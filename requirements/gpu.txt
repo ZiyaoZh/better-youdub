@@ -1,3 +1,10 @@
-# GPU pipeline dependencies will be added when Demucs, WhisperX, and TTS steps are implemented.
-# Keep torch/torchaudio/torchvision installation explicit in docker/app.gpu.Dockerfile.
-
+# Demucs runtime dependencies. The Demucs package itself is installed in the
+# GPU Dockerfile with --no-deps from a fixed upstream commit so its old
+# torchaudio<2.1 metadata does not downgrade the CUDA 12 PyTorch stack.
+dora-search
+einops
+julius>=0.2.3
+lameenc>=1.2
+openunmix
+pyyaml
+tqdm

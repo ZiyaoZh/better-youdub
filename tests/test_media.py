@@ -11,7 +11,9 @@ def test_separate_audio_copies_demucs_outputs(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(media, "require_binary", lambda name: f"/usr/bin/{name}")
 
     def fake_run_command(command: list[str]) -> object:
-        demucs_out = output_dir / "demucs" / "htdemucs" / "audio"
+        assert command[command.index("--name") + 1] == "htdemucs_ft"
+        assert command[command.index("--segment") + 1] == "6"
+        demucs_out = output_dir / "demucs" / "htdemucs_ft" / "audio"
         demucs_out.mkdir(parents=True)
         (demucs_out / "vocals.wav").write_bytes(b"vocals")
         (demucs_out / "no_vocals.wav").write_bytes(b"instruments")
@@ -25,4 +27,3 @@ def test_separate_audio_copies_demucs_outputs(tmp_path: Path, monkeypatch) -> No
     assert instruments_path == output_dir / "audio_instruments.wav"
     assert vocals_path.read_bytes() == b"vocals"
     assert instruments_path.read_bytes() == b"instruments"
-

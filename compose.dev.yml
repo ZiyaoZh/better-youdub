@@ -5,6 +5,7 @@ services:
       dockerfile: docker/app.cpu.Dockerfile
     image: youdub-linux:dev
     working_dir: /app
+    user: "${YOUDUB_UID:-1064}:${YOUDUB_GID:-1065}"
     environment:
       PYTHONPATH: /app/src
       YOUDUB_ROOT: /data/videos

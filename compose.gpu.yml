@@ -5,6 +5,8 @@ services:
       dockerfile: docker/app.gpu.Dockerfile
     image: youdub-linux:gpu
     working_dir: /app
+    user: "${YOUDUB_UID:-1064}:${YOUDUB_GID:-1065}"
+    gpus: all
     environment:
       PYTHONPATH: /app/src
       YOUDUB_ROOT: /data/videos
@@ -14,12 +16,13 @@ services:
       HF_HOME: /cache/huggingface
       TORCH_HOME: /cache/torch
     volumes:
+      - ./data/samples:/data/samples:ro
       - ./data/videos:/data/videos
       - ./data/tasks:/data/tasks
       - ./data/logs:/data/logs
       - ./models:/models
-      - hf-cache:/cache/huggingface
-      - torch-cache:/cache/torch
+      - ./data/cache/huggingface:/cache/huggingface
+      - ./data/cache/torch:/cache/torch
     deploy:
       resources:
         reservations:
@@ -27,8 +30,4 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    command: ["youdub", "doctor"]
-
-volumes:
-  hf-cache:
-  torch-cache:
+    command: ["scripts/check_gpu.sh"]

@@ -16,4 +16,7 @@ PYTHON_BIN="${PYTHON:-python3}"
 task_json="$("$PYTHON_BIN" -m youdub.cli create-task --source "$1" --title 6o68Fg2-bhM)"
 task_id="$("$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<< "$task_json")"
 "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step extract-audio
+if [[ "${YOUDUB_SMOKE_SEPARATE:-0}" == "1" ]]; then
+  "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step separate-audio
+fi
 "$PYTHON_BIN" -m youdub.cli show-task "$task_id"

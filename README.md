@@ -52,6 +52,40 @@ python3 -m youdub.cli show-task <task-id>
 executable on `PATH`; the current base development environment may not include
 it until GPU/runtime dependencies are installed through the project dependency
 files and Docker image.
+The default Demucs model is `htdemucs_ft`.
+The default Demucs segment length is 6 seconds, which stays below the
+`htdemucs_ft` maximum of 7.8 seconds.
+
+## GPU Demucs Validation
+
+Demucs is installed in the GPU app image from the upstream repository at the
+fixed v4.0.1 commit:
+
+```text
+https://github.com/facebookresearch/demucs/tree/ef66d254cd6d558e207eeff2c4b8d053db2e77dd
+```
+
+The GPU image uses a CUDA 12 stack suitable for Ada GPUs such as RTX 4090:
+
+- `pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime`
+- `torch==2.1.2`
+- Demucs runtime dependencies from `requirements/gpu.txt`
+- Demucs itself installed from the fixed upstream commit with `--no-deps`, so
+  its old `torchaudio<2.1` package metadata does not downgrade the CUDA stack
+
+Build and verify the GPU runtime:
+
+```bash
+scripts/gpu_smoke.sh
+```
+
+The host must have a working NVIDIA driver, Docker, and NVIDIA Container
+Toolkit. The local Codex development container may not expose Docker or GPU
+devices directly.
+
+Compose runs containers as `${YOUDUB_UID:-1064}:${YOUDUB_GID:-1065}` so bind
+mounted runtime files are not left as root-owned files. Override those variables
+if the host workspace owner changes.
 
 When running without installation, set:
 

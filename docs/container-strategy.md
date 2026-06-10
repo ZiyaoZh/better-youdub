@@ -70,7 +70,7 @@ docker compose -f compose.dev.yml up --build
 GPU 验证：
 
 ```bash
-docker run --rm --gpus all youdub-app:gpu python -c "import torch; print(torch.cuda.is_available())"
+scripts/gpu_smoke.sh
 ```
 
 生产单实例：
@@ -122,4 +122,3 @@ TORCH_HOME=/cache/torch
 - 不建议在运行中容器里 `pip install` 后不写入依赖文件。
 - 不建议把模型、视频产物、cookies、日志写进镜像层。
 - 不建议把真实密钥写进 Dockerfile、README、`.env.example`。
-

@@ -64,7 +64,8 @@ def extract_audio(video_path: Path, audio_path: Path, sample_rate: int = 44100) 
 def separate_audio(
     audio_path: Path,
     output_dir: Path,
-    model_name: str = "htdemucs",
+    model_name: str = "htdemucs_ft",
+    segment_seconds: int = 6,
 ) -> tuple[Path, Path]:
     require_binary("demucs")
     if not audio_path.exists():
@@ -78,6 +79,8 @@ def separate_audio(
         "vocals",
         "--name",
         model_name,
+        "--segment",
+        str(segment_seconds),
         "--out",
         str(demucs_root),
         str(audio_path),
