@@ -1,0 +1,33 @@
+# Local secrets and operator notes
+.env
+.env.*
+!.env.example
+command.md
+Dockerfile
+
+# Runtime data
+data/
+videos/
+models/
+checkpoints/
+cookies.txt
+tasks.json
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+

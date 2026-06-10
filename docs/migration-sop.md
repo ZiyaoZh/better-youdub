@@ -1,0 +1,344 @@
+# YouDub2026 Windows 到 Linux + 容器迁移 SOP
+
+## 0. 工作原则
+
+- `/tmp/YouDub2026` 只读参考，不在旧代码上直接改。
+- 新项目从 `/workspace` 开始组织。
+- 每完成一个阶段都要有可运行验证，不做大爆炸式迁移。
+- 密钥、cookies、模型、视频产物不进入 Git 和镜像。
+- 涉及平台上传和视频搬运时，应确保内容授权、账号授权和平台规则合规。
+- 旧实现只作为功能参考；新项目不需要严格沿用旧代码组织、双虚拟环境、JSON 调度方式或 Windows 脚本。
+- 基础框架不实现自动抓取、反自动化绕过或 cookie 刷新。首版输入为本地视频文件。
+
+## 权限治理
+
+当前开发命令通常在容器内以 `root` 执行，但 `/workspace` 是宿主机挂载目录，宿主用户归属为 `1064:1065`。为了避免后续宿主机无法编辑、提交或删除文件，每轮创建或修改文件后都必须检查并修正权限。
+
+固定规则：
+
+- 不把 root 权限文件留在 `/workspace`。
+- 不修改 `/tmp/YouDub2026` 旧仓库权限，除非明确需要读取之外的操作。
+- 新增目录、源码、文档、测试、脚本、`.git` 元数据应归属 `/workspace` 的宿主用户。
+- 运行测试产生的 `data/`、`models/`、`.pytest_cache/`、`__pycache__/` 等产物应清理或确保被 `.gitignore` 忽略。
+- 脚本文件需要可执行权限时，用 `chmod +x scripts/*.sh`，随后仍要修正 owner。
+
+检查命令：
+
+```bash
+stat -c '%u:%g %n' /workspace
+find /workspace -maxdepth 3 -not -path '/workspace/.git/*' -printf '%u:%g %p\n' | sort | head -200
+```
+
+修正命令：
+
+```bash
+chown -R 1064:1065 /workspace
+```
+
+如果未来宿主用户变化，不要硬编码沿用 `1064:1065`；先用 `stat -c '%u:%g' /workspace` 读取当前挂载目录归属，再按该值修正。
+
+## 固定测试素材
+
+测试视频标识：
+
+```text
+https://www.youtube.com/watch?v=6o68Fg2-bhM
+```
+
+使用方式：
+
+- 该链接仅用于标识测试内容。
+- 自动化测试使用本地文件路径，例如 `data/samples/6o68Fg2-bhM.mp4`。
+- 不在基础框架中实现自动下载该 URL 的逻辑。
+
+## 1. 新项目骨架
+
+建议目录：
+
+```text
+/workspace
+  app/
+    youdub/
+    cli.py
+  docker/
+    app.cpu.Dockerfile
+    app.gpu.Dockerfile
+  docs/
+  requirements/
+    base.in
+    gpu.in
+    dev.in
+    base.txt
+    gpu.txt
+    dev.txt
+  scripts/
+    smoke.sh
+    check_env.sh
+  tests/
+  .env.example
+  compose.dev.yml
+  compose.gpu.yml
+  pyproject.toml
+  README.md
+```
+
+第一阶段可以先保持 Python 包结构接近旧项目，避免同时重构业务逻辑和运行环境。
+
+## 2. 旧代码盘点
+
+每个模块迁移前先登记：
+
+- 输入文件
+- 输出文件
+- 依赖包
+- 外部命令
+- 是否需要 GPU
+- 是否访问网络
+- 是否需要密钥
+- 是否存在 Windows 路径或 Windows-only 包
+
+建议表格：
+
+| 步骤 | 模块 | GPU | 网络 | 密钥 | 产物 | 首版是否迁移 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 输入/导入 | 新 ingest 接口 | 否 | 否 | 否 | `download.mp4` 或源文件引用 | 是 |
+| Demucs | `step010_demucs_vr.py` | 推荐 | 否 | 否 | `audio_vocals.wav` | 是 |
+| WhisperX | `step020_whisperx.py` | 推荐 | 模型下载 | HF token 可选 | `transcript.json` | 是 |
+| 翻译 | `step030_translation.py` | 否 | 是 | OpenAI key | `translation.json` | 是 |
+| TTS | `step040_tts.py` | 推荐 | 模型下载可选 | 否 | `audio_tts.wav` | 是 |
+| 合成 | `step050_synthesize_video.py` | 否 | 否 | 否 | `video.mp4` | 是 |
+| 上传 | `step070_upload_bilibili.py` | 否 | 是 | Bili 凭证 | `bilibili.json` | 第二阶段 |
+| Cookie 刷新 | `cookies_refresher.py` | 否 | 是 | 浏览器登录 | `cookies.txt` | 第二阶段 |
+
+## 3. 配置治理
+
+把旧代码中的隐式相对路径和硬编码路径统一收敛到配置。
+
+推荐配置来源优先级：
+
+1. CLI 参数
+2. 环境变量
+3. `.env`
+4. 默认值
+
+关键配置：
+
+```text
+YOUDUB_ROOT=/data/videos
+YOUDUB_TASKS_PATH=/data/tasks/tasks.json
+YOUDUB_COOKIES_PATH=/data/cookies/cookies.txt
+YOUDUB_MODELS_DIR=/models
+YOUDUB_LOG_DIR=/data/logs
+OPENAI_API_KEY=
+OPENAI_API_BASE=
+MODEL_NAME=
+HF_READ_TOKEN=
+BILI_SESSDATA=
+BILI_BILI_JCT=
+```
+
+`.env.example` 只放占位符，不放真实值。
+
+## 4. 路径迁移
+
+必须替换的路径假设：
+
+- `.venv\Scripts\python.exe` -> 当前解释器或配置化解释器路径
+- `envdemucs\.venv\Scripts\python.exe` -> Linux 路径或取消双 venv
+- `models\Qwen3-TTS-...` -> `Path("models") / "Qwen3-TTS-..."`
+- `videos\...` 示例路径 -> POSIX 兼容路径或 `pathlib.Path`
+
+优先策略：
+
+- 业务代码使用 `pathlib.Path`
+- 子进程命令使用 list 参数，不拼 shell 字符串
+- FFmpeg subtitle 路径单独处理转义
+- 入口参数接收字符串，但内部立即转为 `Path`
+
+## 5. 虚拟环境策略
+
+旧项目使用主环境 + Demucs 环境。容器中建议先采用单环境，降低运行复杂度。
+
+单环境条件：
+
+- Demucs、WhisperX、TTS 依赖可共存
+- PyTorch/CUDA 版本一致
+- 依赖冲突可解决
+
+如果冲突严重，再拆成多镜像/多 worker，而不是在一个容器内维护多个 venv：
+
+- `worker-gpu-asr`
+- `worker-gpu-tts`
+- `worker-cpu`
+
+第一阶段不建议继续在容器里用两个 venv，因为 Docker 镜像本身就是环境边界。
+
+## 6. Linux 最小链路验证
+
+按顺序验证，每步都以产物存在为准：
+
+1. 导入本地短视频，生成任务目录和 `download.mp4`
+2. `ffmpeg` 从 `download.mp4` 提取 `audio.wav`
+3. Demucs 生成 `audio_vocals.wav`、`audio_instruments.wav`
+4. WhisperX 生成 `transcript.json`
+5. 翻译生成 `summary.json`、`translation.json`
+6. TTS 生成 `audio_tts.wav`、`audio_combined.wav`
+7. FFmpeg 合成 `subtitles.srt`、`video.mp4`
+
+建议先用 30 秒到 2 分钟的视频样本，不要直接用长视频。
+
+当前新项目已验证：
+
+- 固定测试素材路径：`data/samples/6o68Fg2-bhM.mp4`
+- 本地导入：生成任务目录和 `download.mp4`
+- FFmpeg 音频提取：生成 `audio.wav`
+- Demucs 步骤入口：`run-task --step separate-audio` 已接入；当前基础开发环境若没有 `demucs` 可执行文件，会明确失败并把任务步骤标记为 `failed`
+
+## 7. 任务队列迁移
+
+第一阶段：
+
+- 保留单实例 `tasks.json`
+- 任务状态文件放到 `/data/tasks/tasks.json`
+- 明确只支持一个 worker 容器写入
+
+第二阶段：
+
+- 改为 SQLite 或 PostgreSQL
+- 每步状态带 `started_at`、`finished_at`、`error_message`
+- 支持失败后从当前步骤重试，不强制从下载重新开始
+- GPU/CPU/Web 资源限制改为配置项
+
+## 8. Dockerfile 落地
+
+建议先做两个 Dockerfile：
+
+- `docker/app.cpu.Dockerfile`
+- `docker/app.gpu.Dockerfile`
+
+CPU Dockerfile 用于快速验证和 CI；GPU Dockerfile 用于完整链路。
+
+GPU Dockerfile 必须验证：
+
+```bash
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+```
+
+运行时使用：
+
+```bash
+docker run --rm --gpus all \
+  --env-file .env \
+  -v "$PWD/data/videos:/data/videos" \
+  -v "$PWD/data/tasks:/data/tasks" \
+  -v "$PWD/data/cookies:/data/cookies" \
+  -v "$PWD/models:/models" \
+  youdub-app:gpu
+```
+
+## 9. Docker Compose 落地
+
+`compose.dev.yml`：
+
+- bind mount 源码
+- 可进入 shell
+- 适合开发调试
+
+`compose.gpu.yml`：
+
+- 使用正式 app 镜像
+- 挂载数据、模型、缓存
+- 注入 `.env`
+- 配置 GPU
+- 默认运行队列 worker 或 CLI
+
+## 10. 密钥与敏感文件治理
+
+必须加入 `.gitignore`：
+
+```text
+.env
+cookies.txt
+data/
+videos/
+models/
+checkpoints/
+*.log
+tasks.json
+```
+
+必须轮换已经暴露过的：
+
+- OpenAI/API 兼容 key
+- GitHub token
+- Bilibili 凭证
+- YouTube cookies
+
+## 11. 测试策略
+
+### 静态检查
+
+- `python -m compileall app`
+- import 检查
+- 配置缺失时错误信息检查
+
+### 单元测试
+
+优先覆盖：
+
+- 路径拼接
+- 配置加载
+- 任务状态转移
+- 产物存在判断
+- FFmpeg 命令构造
+
+### 集成测试
+
+短视频样本链路：
+
+- 下载 -> 音频提取 -> 合成 smoke
+- GPU 环境下 Demucs/WhisperX/TTS 单步 smoke
+
+### 容器测试
+
+```bash
+docker build -f docker/app.cpu.Dockerfile -t youdub-app:cpu .
+docker run --rm youdub-app:cpu python -m compileall app
+
+docker build -f docker/app.gpu.Dockerfile -t youdub-app:gpu .
+docker run --rm --gpus all youdub-app:gpu python -c "import torch; print(torch.cuda.is_available())"
+```
+
+## 12. 阶段验收标准
+
+### 阶段 A：规划完成
+
+- 文档齐全
+- 旧项目风险点明确
+- 容器策略明确
+- 依赖同步规范明确
+
+### 阶段 B：新项目骨架完成
+
+- 目录结构完成
+- `.env.example` 完成
+- requirements 拆分完成
+- Dockerfile 初版完成
+
+### 阶段 C：Linux 单步可运行
+
+- 下载、FFmpeg、翻译可在 CPU 容器验证
+- GPU 容器可 import torch 并识别 CUDA
+
+### 阶段 D：完整链路可运行
+
+- 短视频样本可完整生成 `video.mp4`
+- 任务队列可跑单任务
+- 失败可定位日志
+
+### 阶段 E：部署可运行
+
+- `docker compose` 可启动
+- 数据、模型、日志、任务状态持久化
+- 无密钥进入镜像
+- 新机器可按 README 复现部署

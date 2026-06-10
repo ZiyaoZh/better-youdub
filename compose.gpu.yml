@@ -1,0 +1,34 @@
+services:
+  youdub-gpu:
+    build:
+      context: .
+      dockerfile: docker/app.gpu.Dockerfile
+    image: youdub-linux:gpu
+    working_dir: /app
+    environment:
+      PYTHONPATH: /app/src
+      YOUDUB_ROOT: /data/videos
+      YOUDUB_TASKS_PATH: /data/tasks/tasks.json
+      YOUDUB_LOG_DIR: /data/logs
+      YOUDUB_MODELS_DIR: /models
+      HF_HOME: /cache/huggingface
+      TORCH_HOME: /cache/torch
+    volumes:
+      - ./data/videos:/data/videos
+      - ./data/tasks:/data/tasks
+      - ./data/logs:/data/logs
+      - ./models:/models
+      - hf-cache:/cache/huggingface
+      - torch-cache:/cache/torch
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: ["youdub", "doctor"]
+
+volumes:
+  hf-cache:
+  torch-cache:

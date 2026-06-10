@@ -1,0 +1,3 @@
+# GPU pipeline dependencies will be added when Demucs, WhisperX, and TTS steps are implemented.
+# Keep torch/torchaudio/torchvision installation explicit in docker/app.gpu.Dockerfile.
+

@@ -1,0 +1,20 @@
+services:
+  youdub-dev:
+    build:
+      context: .
+      dockerfile: docker/app.cpu.Dockerfile
+    image: youdub-linux:dev
+    working_dir: /app
+    environment:
+      PYTHONPATH: /app/src
+      YOUDUB_ROOT: /data/videos
+      YOUDUB_TASKS_PATH: /data/tasks/tasks.json
+      YOUDUB_LOG_DIR: /data/logs
+      YOUDUB_MODELS_DIR: /models
+    volumes:
+      - .:/app
+      - ./data/videos:/data/videos
+      - ./data/tasks:/data/tasks
+      - ./data/logs:/data/logs
+      - ./models:/models
+    command: ["youdub", "doctor"]
