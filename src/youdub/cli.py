@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from .media import require_binary
 from .models import PipelineStep
 from .pipeline import PipelineRunner
 from .storage import TaskStore
+from .transcription import WhisperXConfig
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,8 +36,45 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[
             PipelineStep.EXTRACT_AUDIO.value,
             PipelineStep.SEPARATE_AUDIO.value,
+            PipelineStep.TRANSCRIBE.value,
+            PipelineStep.TRANSCRIBE_WHISPER.value,
+            PipelineStep.TRANSCRIBE_ALIGN.value,
+            PipelineStep.TRANSCRIBE_DIARIZE.value,
         ],
         default=PipelineStep.EXTRACT_AUDIO.value,
+    )
+    run_task.add_argument(
+        "--whisper-model",
+        default=os.getenv("YOUDUB_WHISPER_MODEL", "large-v2"),
+        help="WhisperX model name for transcription steps",
+    )
+    run_task.add_argument(
+        "--whisper-device",
+        default=os.getenv("YOUDUB_WHISPER_DEVICE", "auto"),
+        help="WhisperX device: auto, cuda, or cpu",
+    )
+    run_task.add_argument(
+        "--whisper-batch-size",
+        type=int,
+        default=int(os.getenv("YOUDUB_WHISPER_BATCH_SIZE", "32")),
+        help="WhisperX batch size",
+    )
+    run_task.add_argument(
+        "--no-diarization",
+        action="store_false",
+        dest="diarization",
+        default=os.getenv("YOUDUB_WHISPER_DIARIZATION", "1") not in {"0", "false", "False"},
+        help="Skip speaker diarization and assign SPEAKER_00 to all segments",
+    )
+    run_task.add_argument(
+        "--min-speakers",
+        type=int,
+        default=_optional_int_env("YOUDUB_WHISPER_MIN_SPEAKERS"),
+    )
+    run_task.add_argument(
+        "--max-speakers",
+        type=int,
+        default=_optional_int_env("YOUDUB_WHISPER_MAX_SPEAKERS"),
     )
 
     subparsers.add_parser("test-video", help="Print the fixed test video identifier")
@@ -49,6 +88,10 @@ def cmd_doctor(config: AppConfig) -> int:
         "tasks_path": str(config.tasks_path),
         "log_dir": str(config.log_dir),
         "models_dir": str(config.models_dir),
+        "config_path": str(config.config_path),
+        "huggingface_token_configured": config.secrets.huggingface.token is not None,
+        "openai_api_key_configured": config.secrets.openai.api_key is not None,
+        "openai_base_url_configured": config.secrets.openai.base_url is not None,
         "ffmpeg": require_binary("ffmpeg"),
     }
     print(json.dumps(checks, ensure_ascii=False, indent=2))
@@ -73,12 +116,29 @@ def cmd_run_task(config: AppConfig, args: argparse.Namespace) -> int:
     store = TaskStore(config.tasks_path)
     task = store.get(args.task_id)
     step = PipelineStep(args.step)
+    whisperx_config = WhisperXConfig(
+        models_dir=config.models_dir,
+        model_name=args.whisper_model,
+        device=args.whisper_device,
+        batch_size=args.whisper_batch_size,
+        diarization=args.diarization,
+        min_speakers=args.min_speakers,
+        max_speakers=args.max_speakers,
+        hf_token=config.secrets.huggingface.token,
+    )
     try:
-        task = PipelineRunner().run_step(task, step)
+        task = PipelineRunner(whisperx_config=whisperx_config).run_step(task, step)
     finally:
         store.update(task)
     print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
     return 0
+
+
+def _optional_int_env(name: str) -> int | None:
+    value = os.getenv(name)
+    if not value:
+        return None
+    return int(value)
 
 
 def main(argv: list[str] | None = None) -> int:

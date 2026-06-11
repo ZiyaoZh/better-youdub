@@ -1,6 +1,8 @@
 # Demucs runtime dependencies. The Demucs package itself is installed in the
 # GPU Dockerfile with --no-deps from a fixed upstream commit so its old
-# torchaudio<2.1 metadata does not downgrade the CUDA 12 PyTorch stack.
+# torchaudio metadata does not downgrade the CUDA 12 PyTorch stack. The PyTorch
+# stack itself is provided by the GPU base image and locked by
+# requirements/torch-constraints.txt.
 dora-search
 einops
 julius>=0.2.3
@@ -8,3 +10,7 @@ lameenc>=1.2
 openunmix
 pyyaml
 tqdm
+numpy
+soundfile
+huggingface-hub<1.0
+whisperx @ git+https://github.com/m-bain/whisperx.git@d32ec3e3012ec4c0934f4088424c32f3f038b249

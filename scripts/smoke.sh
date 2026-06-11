@@ -19,4 +19,7 @@ task_id="$("$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin)["id"])'
 if [[ "${YOUDUB_SMOKE_SEPARATE:-0}" == "1" ]]; then
   "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step separate-audio
 fi
+if [[ "${YOUDUB_SMOKE_TRANSCRIBE:-0}" == "1" ]]; then
+  "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step transcribe
+fi
 "$PYTHON_BIN" -m youdub.cli show-task "$task_id"

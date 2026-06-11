@@ -16,4 +16,15 @@ print(f"cuda_device_name={torch.cuda.get_device_name(0)}")
 PY
 
 demucs --help >/dev/null
+"$PYTHON_BIN" - <<'PY'
+from youdub.transcription import WhisperXConfig, prepare_whisperx_runtime
+
+prepare_whisperx_runtime(WhisperXConfig(models_dir="/models"))
+
+import whisperx
+from whisperx.diarize import DiarizationPipeline
+
+print(f"whisperx={whisperx.__file__}")
+print(f"diarization_pipeline={DiarizationPipeline.__name__}")
+PY
 "$PYTHON_BIN" -m youdub.cli doctor

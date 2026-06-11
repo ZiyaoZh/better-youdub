@@ -1,0 +1,10 @@
+{
+  "huggingface": {
+    "token": ""
+  },
+  "openai": {
+    "api_key": "",
+    "base_url": "",
+    "model": ""
+  }
+}

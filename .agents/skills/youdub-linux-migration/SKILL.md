@@ -1,3 +1,8 @@
+---
+name: youdub-linux-migration
+description: Use when working on the Linux/containerized YouDub migration project under /workspace, including migration planning, dependency and Docker changes, path portability, smoke tests, and permission hygiene for the new project derived from /tmp/YouDub2026.
+---
+
 # YouDub Linux Migration Skill
 
 Use this skill when working on the new Linux/containerized YouDub project derived from `/tmp/YouDub2026`.
