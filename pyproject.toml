@@ -7,7 +7,9 @@ name = "youdub-linux"
 version = "0.1.0"
 description = "Linux/container-native scaffold for a video localization pipeline"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "openai>=1.30.0",
+]
 
 [project.optional-dependencies]
 dev = [

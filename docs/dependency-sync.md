@@ -155,6 +155,28 @@ python -c "import whisperx"
 python -c "import demucs"
 ```
 
+涉及 Dockerfile、Compose、GPU 依赖或系统依赖时，必须同步更新宿主机 Docker 验证命令；实际镜像构建和容器内运行时验证由具备 Docker/GPU 环境的宿主机执行：
+
+```bash
+docker compose -f compose.gpu.yml config
+docker compose -f compose.gpu.yml build
+docker compose -f compose.gpu.yml run --rm youdub-gpu scripts/check_gpu.sh
+scripts/gpu_smoke.sh
+```
+
+需要完整重建依赖层时使用：
+
+```bash
+docker compose -f compose.gpu.yml build --no-cache
+```
+
+涉及 WhisperX、Demucs、TTS 或翻译链路时，按需开启分层 smoke test；翻译验证只使用占位密钥示例，真实密钥通过本地环境注入：
+
+```bash
+YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_WHISPER_DIARIZATION=0 scripts/gpu_smoke.sh
+YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
+```
+
 TTS 根据模型选择验证：
 
 ```bash
@@ -167,4 +189,3 @@ python -c "import indextts"
 - 禁止把真实 `.env`、cookies、token、API key 复制进镜像。
 - 禁止把当前开发容器中的 Python site-packages 当作迁移依据。
 - 禁止在 Dockerfile 中散落重复的 pip 安装命令，除非是 PyTorch/CUDA 这种需要特殊 index 的依赖。
-

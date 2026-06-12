@@ -45,6 +45,8 @@ class Task:
     title: str
     source: str
     folder: Path
+    source_key: str | None = None
+    author: str | None = None
     status: TaskStatus = TaskStatus.PENDING
     steps: dict[str, StepStatus] = field(default_factory=dict)
     created_at: str = field(default_factory=utc_now)
@@ -57,6 +59,8 @@ class Task:
             "title": self.title,
             "source": self.source,
             "folder": str(self.folder),
+            "source_key": self.source_key,
+            "author": self.author,
             "status": self.status.value,
             "steps": {key: value.value for key, value in self.steps.items()},
             "created_at": self.created_at,
@@ -71,6 +75,8 @@ class Task:
             title=data["title"],
             source=data["source"],
             folder=Path(data["folder"]),
+            source_key=data.get("source_key"),
+            author=data.get("author"),
             status=TaskStatus(data.get("status", TaskStatus.PENDING)),
             steps={
                 key: StepStatus(value)

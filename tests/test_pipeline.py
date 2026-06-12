@@ -2,6 +2,7 @@ from pathlib import Path
 
 from youdub import pipeline
 from youdub.models import PipelineStep, StepStatus, Task, TaskStatus
+from youdub.translation import TranslationConfig
 from youdub.pipeline import PipelineRunner
 from youdub.transcription import WhisperXConfig
 
@@ -82,3 +83,24 @@ def test_pipeline_marks_transcribe_diarize_success(tmp_path: Path, monkeypatch) 
     assert result.status == TaskStatus.SUCCESS
     assert result.steps[PipelineStep.TRANSCRIBE_DIARIZE.value] == StepStatus.SUCCESS
     assert calls == ["diarize", "finalize"]
+
+
+def test_pipeline_marks_translate_success(tmp_path: Path, monkeypatch) -> None:
+    task = Task(id="abc123", title="demo", source="/tmp/demo.mp4", folder=tmp_path)
+    config = TranslationConfig(api_key="sk-test", model="gpt-test")
+
+    def fake_translate(task_dir: Path, translation_config: TranslationConfig) -> Path:
+        assert task_dir == tmp_path
+        assert translation_config == config
+        output = task_dir / "translation.json"
+        output.write_text('[{"translation":"你好"}]', encoding="utf-8")
+        return output
+
+    monkeypatch.setattr(pipeline, "translate_task", fake_translate)
+
+    result = PipelineRunner(translation_config=config).run_step(task, PipelineStep.TRANSLATE)
+
+    assert result.status == TaskStatus.SUCCESS
+    assert result.error is None
+    assert result.steps[PipelineStep.TRANSLATE.value] == StepStatus.SUCCESS
+    assert (tmp_path / "translation.json").exists()

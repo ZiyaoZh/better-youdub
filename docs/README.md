@@ -6,6 +6,7 @@
 
 - [现状评估](./assessment.md)
 - [迁移与改造 SOP](./migration-sop.md)
+- [翻译阶段设计](./translation-design.md)
 - [容器部署决策](./container-strategy.md)
 - [依赖与 Dockerfile 同步规范](./dependency-sync.md)
 
@@ -17,6 +18,7 @@
 4. 任何新增或修改 Python/系统依赖，必须先更新依赖清单，再由 Dockerfile 从清单安装，避免手工进容器安装后丢失。
 5. 当前 `/workspace/Dockerfile` 和 `/workspace/command.md` 存在明文密钥/Token 痕迹；后续镜像与文档必须改为 `.env`、Docker secret 或运行时环境变量注入。
 6. 旧仓库实现存在多处历史包袱；后续开发以功能等价和 Linux/容器友好为目标，不需要严格沿用旧实现方式。
+7. 每次新增或修改功能，都必须同步更新 README、SOP 和对应 smoke/Docker 验证命令。
 
 ## 固定测试素材
 

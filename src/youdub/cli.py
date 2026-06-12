@@ -8,11 +8,12 @@ from pathlib import Path
 
 from .config import AppConfig
 from .constants import TEST_VIDEO_URL
-from .ingest import create_task_from_local_media
+from .ingest import create_task_from_download_artifacts, create_task_from_local_media
 from .media import require_binary
 from .models import PipelineStep
 from .pipeline import PipelineRunner
 from .storage import TaskStore
+from .translation import TranslationConfig
 from .transcription import WhisperXConfig
 
 
@@ -25,6 +26,14 @@ def build_parser() -> argparse.ArgumentParser:
     create_task = subparsers.add_parser("create-task", help="Create a task from a local media file")
     create_task.add_argument("--source", required=True, type=Path)
     create_task.add_argument("--title")
+
+    create_download_task = subparsers.add_parser(
+        "create-download-task",
+        help="Create or reuse a task from local media plus download metadata",
+    )
+    create_download_task.add_argument("--source", required=True, type=Path)
+    create_download_task.add_argument("--info", required=True, type=Path)
+    create_download_task.add_argument("--cover", type=Path)
 
     show_task = subparsers.add_parser("show-task", help="Show a task as JSON")
     show_task.add_argument("task_id")
@@ -40,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
             PipelineStep.TRANSCRIBE_WHISPER.value,
             PipelineStep.TRANSCRIBE_ALIGN.value,
             PipelineStep.TRANSCRIBE_DIARIZE.value,
+            PipelineStep.TRANSLATE.value,
         ],
         default=PipelineStep.EXTRACT_AUDIO.value,
     )
@@ -76,6 +86,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=_optional_int_env("YOUDUB_WHISPER_MAX_SPEAKERS"),
     )
+    run_task.add_argument(
+        "--translation-language",
+        default=os.getenv("YOUDUB_TRANSLATION_LANGUAGE", "简体中文"),
+        help="Target language for translation output",
+    )
+    run_task.add_argument(
+        "--translation-batch-size",
+        type=int,
+        default=int(os.getenv("YOUDUB_TRANSLATION_BATCH_SIZE", "20")),
+        help="Number of transcript segments per translation request",
+    )
 
     subparsers.add_parser("test-video", help="Print the fixed test video identifier")
     return parser
@@ -106,6 +127,20 @@ def cmd_create_task(config: AppConfig, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_create_download_task(config: AppConfig, args: argparse.Namespace) -> int:
+    config.ensure_dirs()
+    store = TaskStore(config.tasks_path)
+    task = create_task_from_download_artifacts(
+        source=args.source,
+        info_path=args.info,
+        root=config.root,
+        cover_path=args.cover,
+    )
+    task = store.upsert(task)
+    print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_show_task(config: AppConfig, args: argparse.Namespace) -> int:
     task = TaskStore(config.tasks_path).get(args.task_id)
     print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
@@ -126,8 +161,24 @@ def cmd_run_task(config: AppConfig, args: argparse.Namespace) -> int:
         max_speakers=args.max_speakers,
         hf_token=config.secrets.huggingface.token,
     )
+    translation_config = TranslationConfig(
+        api_key=config.secrets.openai.api_key,
+        base_url=config.secrets.openai.base_url,
+        model=config.secrets.openai.model,
+        target_language=args.translation_language,
+        batch_size=args.translation_batch_size,
+        max_retries=int(os.getenv("YOUDUB_TRANSLATION_MAX_RETRIES", "4")),
+        retry_backoff_seconds=float(os.getenv("YOUDUB_TRANSLATION_RETRY_BACKOFF_SECONDS", "1")),
+        retry_backoff_multiplier=float(os.getenv("YOUDUB_TRANSLATION_RETRY_BACKOFF_MULTIPLIER", "2")),
+        retry_max_backoff_seconds=float(os.getenv("YOUDUB_TRANSLATION_RETRY_MAX_BACKOFF_SECONDS", "8")),
+        force_json_output=os.getenv("YOUDUB_TRANSLATION_FORCE_JSON_OUTPUT", "1") not in {"0", "false", "False"},
+        temperature=float(os.getenv("YOUDUB_TRANSLATION_TEMPERATURE", "0")),
+    )
     try:
-        task = PipelineRunner(whisperx_config=whisperx_config).run_step(task, step)
+        task = PipelineRunner(
+            whisperx_config=whisperx_config,
+            translation_config=translation_config,
+        ).run_step(task, step)
     finally:
         store.update(task)
     print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
@@ -151,6 +202,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_doctor(config)
         if args.command == "create-task":
             return cmd_create_task(config, args)
+        if args.command == "create-download-task":
+            return cmd_create_download_task(config, args)
         if args.command == "show-task":
             return cmd_show_task(config, args)
         if args.command == "run-task":

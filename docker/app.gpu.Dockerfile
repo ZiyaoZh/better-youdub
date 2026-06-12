@@ -37,7 +37,7 @@ RUN python -c "import torch, torchaudio, torchvision; print(torch.__version__, t
   && pip install --no-cache-dir --no-deps "git+https://github.com/facebookresearch/demucs.git@ef66d254cd6d558e207eeff2c4b8d053db2e77dd#egg=demucs" \
   && python -c "import torch, torchaudio, torchvision; print(torch.__version__, torch.version.cuda, torchaudio.__version__, torchvision.__version__)" \
   && demucs --help >/dev/null \
-  && python -c "import whisperx; from whisperx.diarize import DiarizationPipeline"
+  && python -c "import librosa, soundfile, yt_dlp, whisperx; from whisperx.diarize import DiarizationPipeline"
 
 COPY pyproject.toml README.md ./
 COPY src src

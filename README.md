@@ -6,24 +6,32 @@
 Linux 行为清晰、依赖可复现、运行路径显式、适合容器部署，不要求保留旧项目
 的代码组织方式。
 
+参考项目：
+
+- `https://github.com/liuzhao1225/YouDub-webui`：可作为 WebUI、任务交互和界面
+  组织方式的参考；当前迁移仍以 Linux/容器原生流水线为主，不直接继承其实现。
+
 ## 当前范围
 
 当前已实现：
 
 - 基于环境变量和通用配置文件的配置管理
 - 从本地媒体文件创建任务目录
+- 基于本地媒体 + `download.info.json` + 封面图创建可复用的稳定任务目录
 - 使用 JSON 任务文件保存状态，并采用原子写入
 - CLI：运行环境检查、创建任务、查看任务、执行单个流水线步骤
 - 使用 FFmpeg 从导入视频中提取音频
 - 使用 Demucs 做人声/伴奏分离，并显式检查运行依赖
 - 使用 WhisperX 做语音识别，并拆分为 whisper、align、diarize 三个阶段
+- 翻译视频信息和语音识别结果，产出 `summary.json`、`translation.segments.json`、`translation.json`
 - Docker 和依赖文件布局，为后续 CPU/GPU 镜像扩展做准备
 
 当前未实现：
 
+- 正式下载器接入
 - 自动网页抓取或 cookie 刷新
 - 上传自动化
-- 翻译、TTS、最终视频合成
+- TTS、最终视频合成
 - 将 Demucs/GPU 运行依赖完整打包进基础开发环境
 
 ## 固定测试视频标识
@@ -41,14 +49,27 @@ data/samples/6o68Fg2-bhM.mp4
 本工作区默认测试素材路径就是上面这个位置。`data/` 是运行时数据目录，已被
 Git 忽略。
 
+除视频本体外，`data/samples/` 还包含后续下载阶段要保留的样本产物：
+
+- `download.info.json`
+- `download.webp`
+
+它们分别代表视频元信息和封面图。当前 CLI 还不会自动把这两个文件导入任务目
+录，但下一阶段的翻译、文案和封面处理会依赖它们。
+
 ## 本地用法
 
 ```bash
 python3 -m youdub.cli doctor
 python3 -m youdub.cli create-task --source data/samples/6o68Fg2-bhM.mp4 --title 6o68Fg2-bhM
+python3 -m youdub.cli create-download-task \
+  --source data/samples/6o68Fg2-bhM.mp4 \
+  --info data/samples/download.info.json \
+  --cover data/samples/download.webp
 python3 -m youdub.cli run-task <task-id> --step extract-audio
 python3 -m youdub.cli run-task <task-id> --step separate-audio
 python3 -m youdub.cli run-task <task-id> --step transcribe
+python3 -m youdub.cli run-task <task-id> --step translate
 python3 -m youdub.cli show-task <task-id>
 ```
 
@@ -73,8 +94,42 @@ GPU Docker 镜像安装运行依赖。
 - `transcript.json`
 - `SPEAKER/*.wav`
 
-其中 `transcript.json` 是后续翻译/TTS 步骤使用的最终字幕列表；
-`SPEAKER/*.wav` 是按说话人切出的参考音频。
+其中：
+
+- `transcript.diarized.json` 保留 WhisperX 对齐后的词级时间和说话人信息
+- `transcript.json` 是按整句合并后的时间列表，适合作为翻译输入
+- `SPEAKER/*.wav` 是按说话人切出的参考音频
+
+下一阶段的翻译会以 `transcript.json` 作为整句语义单元，再结合
+`transcript.diarized.json` 的词级时间，把译文切成适合 TTS 的短句。
+
+`translate` 依赖运行时配置里的 OpenAI 兼容接口，读取：
+
+- `download.info.json`
+- `transcript.json`
+- `transcript.diarized.json`
+
+并写出：
+
+- `summary.json`
+- `translation.segments.json`
+- `translation.json`
+
+翻译请求默认会优先尝试结构化 JSON 输出：
+
+1. `response_format=json_schema`
+2. 不支持时回退到 `response_format=json_object`
+3. 再不支持时回退到纯文本 JSON 提示 + 本地 JSON 解析
+
+对于非 JSON、空 JSON、字段不完整、批次缺项等情况，翻译步骤会自动重试。相关运
+行时参数可通过环境变量调整：
+
+- `YOUDUB_TRANSLATION_MAX_RETRIES`
+- `YOUDUB_TRANSLATION_RETRY_BACKOFF_SECONDS`
+- `YOUDUB_TRANSLATION_RETRY_BACKOFF_MULTIPLIER`
+- `YOUDUB_TRANSLATION_RETRY_MAX_BACKOFF_SECONDS`
+- `YOUDUB_TRANSLATION_FORCE_JSON_OUTPUT`
+- `YOUDUB_TRANSLATION_TEMPERATURE`
 
 默认 Demucs 模型是 `htdemucs_ft`。默认 Demucs segment 长度是 6 秒，低于
 `htdemucs_ft` 的 7.8 秒上限。
@@ -108,6 +163,17 @@ export YOUDUB_WHISPER_MAX_SPEAKERS=
 
 使用 `--no-diarization` 或 `YOUDUB_WHISPER_DIARIZATION=0` 可以跳过说话人分离。
 跳过时，最终 transcript 会统一使用 `SPEAKER_00`。
+
+稳定任务目录会优先按视频身份复用。对于带 `download.info.json` 的任务，目录形
+式为：
+
+```text
+YOUDUB_ROOT/<author>/<upload_date> <title>/
+```
+
+同一视频再次执行 `create-download-task` 时，会复用同一个任务目录和 task id，
+避免重复消耗翻译 token。详细设计见
+[docs/translation-design.md](./docs/translation-design.md)。
 
 ## 通用配置文件
 
@@ -203,15 +269,29 @@ https://huggingface.co/settings/tokens
 需要 `pyannote/speaker-diarization-community-1`。把 token 写入
 `data/config/youdub.json` 的 `huggingface.token` 字段，不要提交真实 token。
 
+构建和检查 GPU 镜像：
+
+```bash
+docker compose -f compose.gpu.yml config
+docker compose -f compose.gpu.yml build
+docker compose -f compose.gpu.yml run --rm youdub-gpu scripts/check_gpu.sh
+```
+
+完整重建时使用：
+
+```bash
+docker compose -f compose.gpu.yml build --no-cache
+```
+
 构建并验证 GPU 运行环境：
 
 ```bash
 scripts/gpu_smoke.sh
 ```
 
-默认 GPU smoke test 会验证媒体导入、音频提取和 Demucs。若还要运行 WhisperX
-识别，并且启用了说话人分离，请先在 `data/config/youdub.json` 中配置
-Hugging Face token，然后执行：
+默认 GPU smoke test 会验证镜像导入、运行时依赖检查、占位下载任务创建、音频提
+取和 Demucs。若还要运行 WhisperX 识别，并且启用了说话人分离，请先在
+`data/config/youdub.json` 中配置 Hugging Face token，然后执行：
 
 ```bash
 YOUDUB_SMOKE_TRANSCRIBE=1 scripts/gpu_smoke.sh
@@ -221,6 +301,43 @@ YOUDUB_SMOKE_TRANSCRIBE=1 scripts/gpu_smoke.sh
 
 ```bash
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_WHISPER_DIARIZATION=0 scripts/gpu_smoke.sh
+```
+
+如果还要验证翻译步骤，请在运行时配置文件或环境变量中提供 OpenAI 兼容接口配置，
+并同时开启识别和翻译：
+
+```bash
+YOUDUB_SMOKE_TRANSCRIBE=1 \
+YOUDUB_SMOKE_TRANSLATE=1 \
+OPENAI_API_KEY=sk-... \
+OPENAI_MODEL=gpt-... \
+scripts/gpu_smoke.sh
+```
+
+`gpu_smoke.sh` 会优先使用 sample 目录里的 `download.info.json` 和 `download.webp`，
+从而走 `create-download-task`，验证稳定任务目录复用和翻译所需输入。若要切换其
+他样本，也可以显式传入：
+
+```bash
+scripts/gpu_smoke.sh /data/samples/demo.mp4 /data/samples/download.info.json /data/samples/download.webp
+```
+
+如果需要在容器内逐步调试任务：
+
+```bash
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub doctor
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub create-download-task --source /data/samples/6o68Fg2-bhM.mp4 --info /data/samples/download.info.json --cover /data/samples/download.webp
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step extract-audio
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step separate-audio
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step transcribe
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step translate
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub show-task <task-id>
+```
+
+清理临时容器和网络：
+
+```bash
+docker compose -f compose.gpu.yml down --remove-orphans
 ```
 
 ### WhisperX 运行故障说明
@@ -276,8 +393,9 @@ hf_hub_download() got an unexpected keyword argument 'use_auth_token'
 宿主机需要可用的 NVIDIA 驱动、Docker 和 NVIDIA Container Toolkit。当前 Codex
 开发容器不一定直接暴露 Docker 或 GPU 设备。
 
-Compose 默认用 `${YOUDUB_UID:-1064}:${YOUDUB_GID:-1065}` 运行容器，避免 bind
-mount 的运行时文件变成 root 所有。如果宿主机工作区 owner 不同，可以覆盖这两个
+Compose 默认可通过 `YOUDUB_UID`/`YOUDUB_GID` 指定容器用户，避免 bind mount 的
+运行时文件变成 root 所有。`scripts/gpu_smoke.sh` 会自动使用当前项目目录 owner；
+手动执行 `docker compose` 时，如果宿主机工作区 owner 不同，可以显式设置这两个
 变量。
 
 不安装包、直接从源码运行时，需要设置：

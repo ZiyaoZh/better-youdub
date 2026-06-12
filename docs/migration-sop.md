@@ -9,6 +9,26 @@
 - 涉及平台上传和视频搬运时，应确保内容授权、账号授权和平台规则合规。
 - 旧实现只作为功能参考；新项目不需要严格沿用旧代码组织、双虚拟环境、JSON 调度方式或 Windows 脚本。
 - 基础框架不实现自动抓取、反自动化绕过或 cookie 刷新。首版输入为本地视频文件。
+- 每新增或修改一个功能，都必须同步更新 README、SOP 和相关 smoke/验证命令。
+
+## 文档与命令同步规则
+
+新增功能、变更 CLI 参数、变更环境变量、变更 Docker/依赖或新增产物时，必须同时检查：
+
+- README 是否说明了用户入口、配置项和验证命令。
+- 本 SOP 是否记录了迁移顺序、产物、验证步骤或风险。
+- `docs/container-strategy.md` 和 `docs/dependency-sync.md` 是否需要同步容器或依赖命令。
+- `scripts/smoke.sh`、`scripts/gpu_smoke.sh`、`scripts/check_gpu.sh` 是否覆盖了新增能力的最小验证路径。
+
+每次提交前至少执行：
+
+```bash
+rg -n "run-task|create-download-task|YOUDUB_|OPENAI_|HF_READ_TOKEN|gpu_smoke|smoke.sh" README.md docs scripts compose*.yml
+bash -n scripts/*.sh
+PYTHONPATH="$PWD/src" python3 -m pytest -q
+```
+
+如果新增或修改了 Dockerfile、Compose、GPU 依赖、系统依赖、Demucs、WhisperX、TTS、翻译模型配置，开发容器内只要求同步更新本文档的 Docker 验证命令，不要求实际执行 Docker/GPU 验证；这些命令由具备 Docker 和 GPU 环境的宿主机执行。真实 token、cookie、API key 只能通过本地配置或环境变量提供，文档中统一使用 `hf_...`、`sk-...`、`gpt-...` 这类占位符。
 
 ## 权限治理
 
@@ -49,6 +69,8 @@ https://www.youtube.com/watch?v=6o68Fg2-bhM
 
 - 该链接仅用于标识测试内容。
 - 自动化测试使用本地文件路径，例如 `data/samples/6o68Fg2-bhM.mp4`。
+- 当前 sample 目录还保留了 `data/samples/download.info.json` 和
+  `data/samples/download.webp`，用于模拟后续下载阶段的元信息和封面产物。
 - 不在基础框架中实现自动下载该 URL 的逻辑。
 
 ## 1. 新项目骨架
@@ -101,10 +123,10 @@ https://www.youtube.com/watch?v=6o68Fg2-bhM
 
 | 步骤 | 模块 | GPU | 网络 | 密钥 | 产物 | 首版是否迁移 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 输入/导入 | 新 ingest 接口 | 否 | 否 | 否 | `download.mp4` 或源文件引用 | 是 |
+| 输入/导入 | 新 ingest 接口 | 否 | 否 | 否 | `download.mp4`、`download.info.json`、`download.<ext>` | 是 |
 | Demucs | `step010_demucs_vr.py` | 推荐 | 否 | 否 | `audio_vocals.wav` | 是 |
 | WhisperX | `step020_whisperx.py` | 推荐 | 模型下载 | HF token 可选 | `transcript.json` | 是 |
-| 翻译 | `step030_translation.py` | 否 | 是 | OpenAI key | `translation.json` | 是 |
+| 翻译 | `step030_translation.py` | 否 | 是 | OpenAI key | `summary.json`、`translation.json` | 是 |
 | TTS | `step040_tts.py` | 推荐 | 模型下载可选 | 否 | `audio_tts.wav` | 是 |
 | 合成 | `step050_synthesize_video.py` | 否 | 否 | 否 | `video.mp4` | 是 |
 | 上传 | `step070_upload_bilibili.py` | 否 | 是 | Bili 凭证 | `bilibili.json` | 第二阶段 |
@@ -177,11 +199,12 @@ BILI_BILI_JCT=
 
 按顺序验证，每步都以产物存在为准：
 
-1. 导入本地短视频，生成任务目录和 `download.mp4`
+1. 导入本地短视频或占位下载信息，生成任务目录，并保留 `download.mp4`、
+   `download.info.json`、`download.<ext>`
 2. `ffmpeg` 从 `download.mp4` 提取 `audio.wav`
 3. Demucs 生成 `audio_vocals.wav`、`audio_instruments.wav`
-4. WhisperX 生成 `transcript.json`
-5. 翻译生成 `summary.json`、`translation.json`
+4. WhisperX 生成 `transcript.diarized.json`、`transcript.json`
+5. 翻译生成 `summary.json`、`translation.segments.json`、`translation.json`
 6. TTS 生成 `audio_tts.wav`、`audio_combined.wav`
 7. FFmpeg 合成 `subtitles.srt`、`video.mp4`
 
@@ -190,9 +213,70 @@ BILI_BILI_JCT=
 当前新项目已验证：
 
 - 固定测试素材路径：`data/samples/6o68Fg2-bhM.mp4`
+- 当前 sample 还包含 `download.info.json` 和 `download.webp`，后续会作为下载阶段占
+  位输入
 - 本地导入：生成任务目录和 `download.mp4`
+- 占位下载导入：`create-download-task` 会稳定复用 `download.info.json` 对应的任务目
+  录，并保留 `download.mp4`、`download.info.json`、`download.webp`
 - FFmpeg 音频提取：生成 `audio.wav`
 - Demucs 步骤入口：`run-task --step separate-audio` 已接入；当前基础开发环境若没有 `demucs` 可执行文件，会明确失败并把任务步骤标记为 `failed`
+- 翻译步骤入口：`run-task --step translate` 已接入；模型调用可通过
+  `translation.segments.json` 复用句级翻译缓存
+
+## Docker 验证命令
+
+以下命令用于宿主机验证。当前开发容器不要求具备 Docker/GPU 环境；每次相关功能变更时，开发容器内只需要保证本节命令随实现同步更新。
+
+宿主机基础检查：
+
+```bash
+docker version
+docker compose version
+nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi
+```
+
+Compose 配置和镜像构建：
+
+```bash
+docker compose -f compose.gpu.yml config
+docker compose -f compose.gpu.yml build
+docker compose -f compose.gpu.yml build --no-cache
+```
+
+容器内运行时依赖检查：
+
+```bash
+docker compose -f compose.gpu.yml run --rm youdub-gpu scripts/check_gpu.sh
+```
+
+分层 smoke test：
+
+```bash
+scripts/gpu_smoke.sh
+YOUDUB_SMOKE_TRANSCRIBE=1 HF_READ_TOKEN=hf_... scripts/gpu_smoke.sh
+YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_WHISPER_DIARIZATION=0 scripts/gpu_smoke.sh
+YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
+scripts/gpu_smoke.sh /data/samples/demo.mp4 /data/samples/download.info.json /data/samples/download.webp
+```
+
+容器内单步调试：
+
+```bash
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub doctor
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub create-download-task --source /data/samples/6o68Fg2-bhM.mp4 --info /data/samples/download.info.json --cover /data/samples/download.webp
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step extract-audio
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step separate-audio
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step transcribe
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step translate
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub show-task <task-id>
+```
+
+清理临时容器和网络：
+
+```bash
+docker compose -f compose.gpu.yml down --remove-orphans
+```
 
 ## 7. 任务队列迁移
 
@@ -201,6 +285,10 @@ BILI_BILI_JCT=
 - 保留单实例 `tasks.json`
 - 任务状态文件放到 `/data/tasks/tasks.json`
 - 明确只支持一个 worker 容器写入
+- 任务目录不再只用随机 UUID，创建任务时先按视频身份查找可复用目录
+- 建议目录使用 `data/videos/<author>/<upload_date> <title>/`
+- 目录内保存稳定的 `source_key`，例如 `youtube:6o68Fg2-bhM`
+- 同一视频重复执行时直接复用已有产物，不重新创建任务目录
 
 第二阶段：
 

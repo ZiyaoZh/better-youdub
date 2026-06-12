@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .media import extract_audio, separate_audio
 from .models import PipelineStep, StepStatus, Task, TaskStatus
+from .translation import TranslationConfig, translate_task
 from .transcription import (
     WhisperXConfig,
     finalize_transcript,
@@ -13,8 +14,13 @@ from .transcription import (
 
 
 class PipelineRunner:
-    def __init__(self, whisperx_config: WhisperXConfig | None = None):
+    def __init__(
+        self,
+        whisperx_config: WhisperXConfig | None = None,
+        translation_config: TranslationConfig | None = None,
+    ):
         self.whisperx_config = whisperx_config
+        self.translation_config = translation_config
 
     def run_step(self, task: Task, step: PipelineStep) -> Task:
         task.status = TaskStatus.RUNNING
@@ -38,6 +44,8 @@ class PipelineRunner:
             elif step == PipelineStep.TRANSCRIBE_DIARIZE:
                 run_diarize(task.folder, self._whisperx_config())
                 finalize_transcript(task.folder)
+            elif step == PipelineStep.TRANSLATE:
+                translate_task(task.folder, self._translation_config())
             else:
                 raise NotImplementedError(f"Step is not implemented yet: {step.value}")
         except Exception as exc:
@@ -54,3 +62,8 @@ class PipelineRunner:
         if self.whisperx_config is None:
             raise ValueError("WhisperX config is required for transcription steps")
         return self.whisperx_config
+
+    def _translation_config(self) -> TranslationConfig:
+        if self.translation_config is None:
+            raise ValueError("Translation config is required for translation steps")
+        return self.translation_config

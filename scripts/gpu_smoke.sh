@@ -4,6 +4,29 @@ set -euo pipefail
 COMPOSE_FILE="${YOUDUB_GPU_COMPOSE_FILE:-compose.gpu.yml}"
 SERVICE="${YOUDUB_GPU_SERVICE:-youdub-gpu}"
 SAMPLE_PATH="${1:-/data/samples/6o68Fg2-bhM.mp4}"
+SAMPLE_INFO_PATH="${YOUDUB_SMOKE_INFO_PATH:-}"
+SAMPLE_COVER_PATH="${YOUDUB_SMOKE_COVER_PATH:-}"
+PROJECT_UID="$(stat -c '%u' .)"
+PROJECT_GID="$(stat -c '%g' .)"
+export YOUDUB_UID="${YOUDUB_UID:-$PROJECT_UID}"
+export YOUDUB_GID="${YOUDUB_GID:-$PROJECT_GID}"
+RUN_FLAGS=(--rm)
+
+if [[ "${YOUDUB_GPU_TTY:-0}" != "1" ]]; then
+  RUN_FLAGS+=(-T)
+fi
+
+if [[ $# -gt 3 ]]; then
+  echo "usage: scripts/gpu_smoke.sh [/path/to/local-video.mp4] [/path/to/download.info.json] [/path/to/cover]" >&2
+  exit 2
+fi
+
+if [[ $# -ge 2 ]]; then
+  SAMPLE_INFO_PATH="$2"
+fi
+if [[ $# -ge 3 ]]; then
+  SAMPLE_COVER_PATH="$3"
+fi
 
 mkdir -p \
   data/cache/huggingface \
@@ -14,20 +37,51 @@ mkdir -p \
   data/videos \
   models
 
+echo "[gpu-smoke] compose_file=$COMPOSE_FILE service=$SERVICE uid=$YOUDUB_UID gid=$YOUDUB_GID"
+
 if [[ "${YOUDUB_GPU_SKIP_BUILD:-0}" != "1" ]]; then
+  echo "[gpu-smoke] building GPU image"
   docker compose -f "$COMPOSE_FILE" build
 fi
 
-docker compose -f "$COMPOSE_FILE" run --rm "$SERVICE"
-docker compose -f "$COMPOSE_FILE" run --rm \
+echo "[gpu-smoke] running GPU dependency check"
+docker compose -f "$COMPOSE_FILE" run "${RUN_FLAGS[@]}" "$SERVICE" \
+  bash -lc 'echo "[gpu-smoke:container] check_gpu starting"; exec scripts/check_gpu.sh'
+
+smoke_cmd=(scripts/smoke.sh "$SAMPLE_PATH")
+if [[ -n "$SAMPLE_INFO_PATH" ]]; then
+  smoke_cmd+=("$SAMPLE_INFO_PATH")
+  if [[ -n "$SAMPLE_COVER_PATH" ]]; then
+    smoke_cmd+=("$SAMPLE_COVER_PATH")
+  fi
+fi
+
+echo "[gpu-smoke] running smoke pipeline: ${smoke_cmd[*]}"
+docker compose -f "$COMPOSE_FILE" run "${RUN_FLAGS[@]}" \
   -e YOUDUB_SMOKE_SEPARATE=1 \
   -e YOUDUB_SMOKE_TRANSCRIBE="${YOUDUB_SMOKE_TRANSCRIBE:-0}" \
+  -e YOUDUB_SMOKE_TRANSLATE="${YOUDUB_SMOKE_TRANSLATE:-0}" \
   -e YOUDUB_WHISPER_MODEL="${YOUDUB_WHISPER_MODEL:-large-v2}" \
   -e YOUDUB_WHISPER_DEVICE="${YOUDUB_WHISPER_DEVICE:-auto}" \
   -e YOUDUB_WHISPER_BATCH_SIZE="${YOUDUB_WHISPER_BATCH_SIZE:-32}" \
   -e YOUDUB_WHISPER_DIARIZATION="${YOUDUB_WHISPER_DIARIZATION:-1}" \
   -e YOUDUB_WHISPER_MIN_SPEAKERS="${YOUDUB_WHISPER_MIN_SPEAKERS:-}" \
   -e YOUDUB_WHISPER_MAX_SPEAKERS="${YOUDUB_WHISPER_MAX_SPEAKERS:-}" \
+  -e YOUDUB_TRANSLATION_LANGUAGE="${YOUDUB_TRANSLATION_LANGUAGE:-简体中文}" \
+  -e YOUDUB_TRANSLATION_BATCH_SIZE="${YOUDUB_TRANSLATION_BATCH_SIZE:-20}" \
+  -e YOUDUB_TRANSLATION_MAX_RETRIES="${YOUDUB_TRANSLATION_MAX_RETRIES:-4}" \
+  -e YOUDUB_TRANSLATION_RETRY_BACKOFF_SECONDS="${YOUDUB_TRANSLATION_RETRY_BACKOFF_SECONDS:-1}" \
+  -e YOUDUB_TRANSLATION_RETRY_BACKOFF_MULTIPLIER="${YOUDUB_TRANSLATION_RETRY_BACKOFF_MULTIPLIER:-2}" \
+  -e YOUDUB_TRANSLATION_RETRY_MAX_BACKOFF_SECONDS="${YOUDUB_TRANSLATION_RETRY_MAX_BACKOFF_SECONDS:-8}" \
+  -e YOUDUB_TRANSLATION_FORCE_JSON_OUTPUT="${YOUDUB_TRANSLATION_FORCE_JSON_OUTPUT:-1}" \
+  -e YOUDUB_TRANSLATION_TEMPERATURE="${YOUDUB_TRANSLATION_TEMPERATURE:-0}" \
   -e HF_READ_TOKEN="${HF_READ_TOKEN:-}" \
+  -e OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
+  -e OPENAI_BASE_URL="${OPENAI_BASE_URL:-}" \
+  -e OPENAI_API_BASE="${OPENAI_API_BASE:-}" \
+  -e OPENAI_MODEL="${OPENAI_MODEL:-}" \
+  -e MODEL_NAME="${MODEL_NAME:-}" \
   "$SERVICE" \
-  scripts/smoke.sh "$SAMPLE_PATH"
+  bash -lc 'echo "[gpu-smoke:container] smoke starting: $*"; exec "$@"' \
+  bash \
+  "${smoke_cmd[@]}"

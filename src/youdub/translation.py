@@ -1,0 +1,966 @@
+from __future__ import annotations
+
+import json
+import math
+import re
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+SUMMARY_OUTPUT = "summary.json"
+SEGMENTS_OUTPUT = "translation.segments.json"
+FINAL_OUTPUT = "translation.json"
+TASK_SUMMARY_FIELDS = ("title", "author", "summary", "tags")
+_ALL_SPLIT_PUNCTUATION = ",，、;；:：.!?。！？"
+_SOURCE_SENTENCE_ENDINGS = ".!?。！？;；"
+
+
+@dataclass(frozen=True)
+class TranslationConfig:
+    api_key: str | None
+    model: str | None
+    base_url: str | None = None
+    target_language: str = "简体中文"
+    batch_size: int = 20
+    timeout_seconds: float = 240.0
+    max_retries: int = 4
+    retry_backoff_seconds: float = 1.0
+    retry_backoff_multiplier: float = 2.0
+    retry_max_backoff_seconds: float = 8.0
+    force_json_output: bool = True
+    temperature: float = 0.0
+
+    def validate(self) -> None:
+        if not self.api_key:
+            raise ValueError("OpenAI API key is required for translation")
+        if not self.model:
+            raise ValueError("OpenAI model is required for translation")
+        if self.batch_size <= 0:
+            raise ValueError("Translation batch size must be positive")
+        if self.max_retries <= 0:
+            raise ValueError("Translation max retries must be positive")
+        if self.retry_backoff_seconds < 0:
+            raise ValueError("Translation retry backoff must be non-negative")
+        if self.retry_backoff_multiplier < 1.0:
+            raise ValueError("Translation retry multiplier must be at least 1.0")
+        if self.retry_max_backoff_seconds < 0:
+            raise ValueError("Translation retry max backoff must be non-negative")
+
+
+@dataclass(frozen=True)
+class SourceClause:
+    text: str
+    start: float
+    end: float
+
+
+class TranslationResponseError(ValueError):
+    """Raised when a model response cannot be normalized into the expected JSON payload."""
+
+
+def translate_task(task_dir: Path, config: TranslationConfig) -> Path:
+    config.validate()
+    info = _read_json_object(task_dir / "download.info.json")
+    transcript = _read_json_list(task_dir / "transcript.json")
+    diarized = _read_json_object(task_dir / "transcript.diarized.json")
+
+    client = _create_openai_client(config)
+    summary = ensure_summary(task_dir, info, transcript, client, config)
+    translated_segments = ensure_segment_translations(
+        task_dir,
+        info,
+        summary,
+        transcript,
+        client,
+        config,
+    )
+    final_entries = build_translation_entries(translated_segments, diarized)
+    return _write_json(task_dir / FINAL_OUTPUT, final_entries)
+
+
+def ensure_summary(
+    task_dir: Path,
+    info: dict[str, Any],
+    transcript: list[dict[str, Any]],
+    client: Any,
+    config: TranslationConfig,
+) -> dict[str, Any]:
+    summary_path = task_dir / SUMMARY_OUTPUT
+    if summary_path.exists():
+        summary = _read_json_object(summary_path)
+        if _valid_summary(summary):
+            return summary
+
+    author = _author_from_info(info)
+    payload = {
+        "title": _title_from_info(info),
+        "author": author,
+        "description": str(info.get("description") or "").strip(),
+        "tags": _string_list(info.get("tags"), limit=20),
+        "categories": _string_list(info.get("categories"), limit=10),
+        "transcript_excerpt": _transcript_excerpt(transcript),
+        "target_language": config.target_language,
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You translate video metadata for a dubbing pipeline. "
+                "Return one JSON object with keys: title, summary, tags. "
+                "title and summary must be natural spoken-style text in the target language. "
+                "tags must be a JSON array of short strings in the target language. "
+                "Do not add markdown or commentary."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(payload, ensure_ascii=False, indent=2),
+        },
+    ]
+    result = _chat_json(
+        client,
+        config,
+        messages,
+        schema_name="summary_translation",
+        schema=_summary_response_schema(),
+        normalize=_normalize_summary_response,
+    )
+
+    title = _clean_text(result.get("title")) or _title_from_info(info)
+    summary_text = _clean_text(result.get("summary"))
+    if not summary_text:
+        raise ValueError("Summary translation returned an empty summary")
+
+    summary = {
+        "title": title,
+        "author": author,
+        "summary": summary_text,
+        "tags": _string_list(result.get("tags"), limit=20) or _string_list(info.get("tags"), limit=20),
+    }
+    return _write_json(summary_path, summary)
+
+
+def ensure_segment_translations(
+    task_dir: Path,
+    info: dict[str, Any],
+    summary: dict[str, Any],
+    transcript: list[dict[str, Any]],
+    client: Any,
+    config: TranslationConfig,
+) -> list[dict[str, Any]]:
+    output_path = task_dir / SEGMENTS_OUTPUT
+    existing = _load_existing_segment_translations(output_path)
+    complete: dict[int, dict[str, Any]] = {}
+    pending: list[dict[str, Any]] = []
+
+    for segment_id, segment in enumerate(transcript):
+        record = {
+            "segment_id": segment_id,
+            "start": float(segment["start"]),
+            "end": float(segment["end"]),
+            "speaker": str(segment.get("speaker", "SPEAKER_00")),
+            "text": str(segment.get("text", "")).strip(),
+        }
+        prior = existing.get(segment_id)
+        if _matches_segment(prior, record) and _clean_text(prior.get("translation")):
+            complete[segment_id] = prior
+        else:
+            pending.append(record)
+
+    for batch in _chunked(pending, config.batch_size):
+        translated = _translate_batch(client, info, summary, batch, config)
+        for item in translated:
+            segment_id = item["segment_id"]
+            if segment_id not in {segment["segment_id"] for segment in batch}:
+                raise ValueError(f"Unexpected segment id in translation response: {segment_id}")
+            source = next(segment for segment in batch if segment["segment_id"] == segment_id)
+            complete[segment_id] = {
+                **source,
+                "translation": item["translation"],
+            }
+        _write_json(
+            output_path,
+            [complete[index] for index in sorted(complete)],
+        )
+
+    missing = [
+        segment["segment_id"]
+        for segment in pending
+        if segment["segment_id"] not in complete
+    ]
+    if missing:
+        raise ValueError(f"Missing translations for segment ids: {missing}")
+
+    ordered = [complete[index] for index in range(len(transcript))]
+    return _write_json(output_path, ordered)
+
+
+def build_translation_entries(
+    translated_segments: list[dict[str, Any]],
+    diarized: dict[str, Any],
+) -> list[dict[str, Any]]:
+    detailed_segments = diarized.get("segments")
+    if not isinstance(detailed_segments, list):
+        raise ValueError("WhisperX diarized output does not contain a segment list")
+
+    output: list[dict[str, Any]] = []
+    for item in translated_segments:
+        translation_text = _clean_text(item.get("translation"))
+        if not translation_text:
+            continue
+
+        segment_id = int(item["segment_id"])
+        start = float(item["start"])
+        end = float(item["end"])
+        speaker = str(item.get("speaker", "SPEAKER_00"))
+        source_text = str(item.get("text", "")).strip()
+        translated_parts = split_translation_text(translation_text)
+        source_clauses = extract_source_clauses(
+            source_text=source_text,
+            segment_start=start,
+            segment_end=end,
+            speaker=speaker,
+            detailed_segments=detailed_segments,
+        )
+        aligned_parts = align_translation_parts(
+            translated_parts=translated_parts,
+            source_clauses=source_clauses,
+            segment_start=start,
+            segment_end=end,
+            source_text=source_text,
+        )
+
+        for part_id, part in enumerate(aligned_parts):
+            output.append(
+                {
+                    "segment_id": segment_id,
+                    "part_id": part_id,
+                    "start": round(part["start"], 3),
+                    "end": round(part["end"], 3),
+                    "speaker": speaker,
+                    "text": part["source_text"],
+                    "source_text": part["source_text"],
+                    "translation": part["translation"],
+                }
+            )
+    return output
+
+
+def split_translation_text(text: str, max_chars: int = 24) -> list[str]:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return []
+
+    pieces = _split_text_attaching_punctuation(normalized, r"([。！？!?；;])")
+    refined: list[str] = []
+    for piece in pieces:
+        piece = piece.strip()
+        if not piece:
+            continue
+        if len(piece) <= max_chars:
+            refined.append(piece)
+            continue
+        refined.extend(_split_text_attaching_punctuation(piece, r"([，,、：:])"))
+
+    final_parts: list[str] = []
+    for piece in refined:
+        piece = piece.strip()
+        if not piece:
+            continue
+        if len(piece) <= max_chars:
+            final_parts.append(piece)
+            continue
+        final_parts.extend(_chunk_text(piece, max_chars))
+
+    return [part for part in (part.strip() for part in final_parts) if part]
+
+
+def extract_source_clauses(
+    source_text: str,
+    segment_start: float,
+    segment_end: float,
+    speaker: str,
+    detailed_segments: list[dict[str, Any]],
+) -> list[SourceClause]:
+    words = _collect_words_for_segment(
+        detailed_segments=detailed_segments,
+        segment_start=segment_start,
+        segment_end=segment_end,
+        speaker=speaker,
+    )
+    if not words:
+        return _fallback_source_clauses(source_text, segment_start, segment_end)
+
+    clauses: list[SourceClause] = []
+    buffer: list[dict[str, Any]] = []
+    for word in words:
+        if not isinstance(word, dict):
+            continue
+        if "start" not in word or "end" not in word:
+            continue
+        text = str(word.get("word") or "").strip()
+        if not text:
+            continue
+        buffer.append(
+            {
+                "word": text,
+                "start": float(word["start"]),
+                "end": float(word["end"]),
+            }
+        )
+        if text[-1] in _SOURCE_SENTENCE_ENDINGS:
+            clauses.append(_source_clause_from_words(buffer))
+            buffer = []
+
+    if buffer:
+        clauses.append(_source_clause_from_words(buffer))
+
+    return clauses or _fallback_source_clauses(source_text, segment_start, segment_end)
+
+
+def align_translation_parts(
+    translated_parts: list[str],
+    source_clauses: list[SourceClause],
+    segment_start: float,
+    segment_end: float,
+    source_text: str,
+) -> list[dict[str, Any]]:
+    if not translated_parts:
+        return []
+    if not source_clauses:
+        return _proportional_parts(
+            translated_parts=translated_parts,
+            source_text=source_text,
+            start=segment_start,
+            end=segment_end,
+        )
+
+    if len(source_clauses) >= len(translated_parts):
+        output: list[dict[str, Any]] = []
+        clause_count = len(source_clauses)
+        part_count = len(translated_parts)
+        for part_index, translated in enumerate(translated_parts):
+            start_index = math.floor(part_index * clause_count / part_count)
+            end_index = math.floor((part_index + 1) * clause_count / part_count) - 1
+            end_index = max(end_index, start_index)
+            group = source_clauses[start_index : end_index + 1]
+            output.append(
+                {
+                    "translation": translated,
+                    "source_text": _join_clause_text(group),
+                    "start": group[0].start,
+                    "end": group[-1].end,
+                }
+            )
+        output[0]["start"] = segment_start
+        output[-1]["end"] = segment_end
+        return output
+
+    output: list[dict[str, Any]] = []
+    part_count = len(translated_parts)
+    clause_count = len(source_clauses)
+    for clause_index, clause in enumerate(source_clauses):
+        part_start = math.floor(clause_index * part_count / clause_count)
+        part_end = math.floor((clause_index + 1) * part_count / clause_count)
+        assigned_parts = translated_parts[part_start:part_end]
+        if not assigned_parts:
+            continue
+        output.extend(
+            _proportional_parts(
+                translated_parts=assigned_parts,
+                source_text=clause.text,
+                start=clause.start,
+                end=clause.end,
+            )
+        )
+
+    if output:
+        output[0]["start"] = segment_start
+        output[-1]["end"] = segment_end
+    return output
+
+
+def _translate_batch(
+    client: Any,
+    info: dict[str, Any],
+    summary: dict[str, Any],
+    batch: list[dict[str, Any]],
+    config: TranslationConfig,
+) -> list[dict[str, Any]]:
+    title = str(summary.get("title") or _title_from_info(info))
+    author = str(summary.get("author") or _author_from_info(info))
+    video_summary = str(summary.get("summary") or "").strip()
+    payload = {
+        "title": title,
+        "author": author,
+        "summary": video_summary,
+        "target_language": config.target_language,
+        "segments": [
+            {
+                "segment_id": item["segment_id"],
+                "text": item["text"],
+            }
+            for item in batch
+        ],
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You translate spoken transcript segments for dubbing. "
+                "Return only a JSON object with one key named segments. "
+                "segments must be an array of objects, and each object must contain "
+                "segment_id and translation. "
+                "translation must be natural, concise, and suitable for speech synthesis. "
+                "Preserve names, jargon, and obvious acronyms when appropriate. "
+                "Do not include markdown, labels, or explanations."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(payload, ensure_ascii=False, indent=2),
+        },
+    ]
+    return _chat_json(
+        client,
+        config,
+        messages,
+        schema_name="segment_translation_batch",
+        schema=_segment_translation_response_schema(),
+        normalize=lambda raw: _normalize_segment_translation_response(raw, batch),
+    )
+
+
+def _chat_json(
+    client: Any,
+    config: TranslationConfig,
+    messages: list[dict[str, str]],
+    schema_name: str,
+    schema: dict[str, Any],
+    normalize: Callable[[Any], Any],
+) -> Any:
+    last_error: Exception | None = None
+    for response_format in _response_format_candidates(schema_name, schema, config.force_json_output):
+        for attempt in range(1, config.max_retries + 1):
+            request_messages = _messages_for_attempt(messages, attempt, schema_name)
+            request_kwargs = _chat_request_kwargs(
+                config=config,
+                messages=request_messages,
+                response_format=response_format,
+            )
+            try:
+                response = client.chat.completions.create(**request_kwargs)
+                raw = _parse_json_response(response)
+                return normalize(raw)
+            except Exception as exc:
+                last_error = exc
+                if response_format is not None and _response_format_unsupported(exc):
+                    break
+                if attempt >= config.max_retries:
+                    continue
+                _sleep_before_retry(config, attempt)
+
+    if last_error is None:
+        raise RuntimeError(f"Translation request failed before sending: {schema_name}")
+    raise RuntimeError(f"Translation request failed for {schema_name}: {last_error}") from last_error
+
+
+def _create_openai_client(config: TranslationConfig) -> Any:
+    try:
+        from openai import OpenAI
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "The openai package is required for translation. Add it to the runtime dependencies."
+        ) from exc
+
+    kwargs: dict[str, Any] = {"api_key": config.api_key}
+    if config.base_url:
+        kwargs["base_url"] = config.base_url
+    return OpenAI(**kwargs)
+
+
+def _chat_request_kwargs(
+    config: TranslationConfig,
+    messages: list[dict[str, str]],
+    response_format: dict[str, Any] | None,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "model": config.model,
+        "messages": messages,
+        "timeout": config.timeout_seconds,
+        "temperature": config.temperature,
+    }
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+    return kwargs
+
+
+def _response_format_candidates(
+    schema_name: str,
+    schema: dict[str, Any],
+    force_json_output: bool,
+) -> list[dict[str, Any] | None]:
+    if not force_json_output:
+        return [None]
+    return [
+        {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_name,
+                "strict": True,
+                "schema": schema,
+            },
+        },
+        {"type": "json_object"},
+        None,
+    ]
+
+
+def _messages_for_attempt(
+    messages: list[dict[str, str]],
+    attempt: int,
+    schema_name: str,
+) -> list[dict[str, str]]:
+    if attempt <= 1:
+        return messages
+    return messages + [
+        {
+            "role": "user",
+            "content": (
+                f"The previous response did not satisfy the required JSON for {schema_name}. "
+                "Return only valid JSON. Do not include markdown, prose, or code fences."
+            ),
+        }
+    ]
+
+
+def _sleep_before_retry(config: TranslationConfig, attempt: int) -> None:
+    delay = config.retry_backoff_seconds * (config.retry_backoff_multiplier ** max(attempt - 1, 0))
+    delay = min(delay, config.retry_max_backoff_seconds)
+    if delay > 0:
+        time.sleep(delay)
+
+
+def _response_text(response: Any) -> str:
+    choices = getattr(response, "choices", None)
+    if not choices:
+        raise ValueError("Model response did not contain choices")
+
+    message = choices[0].message
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts).strip()
+    raise ValueError("Unsupported response content type")
+
+
+def _extract_embedded_json(text: str) -> Any:
+    decoder = json.JSONDecoder()
+    starts = [index for index, char in enumerate(text) if char in "[{"]
+    for start in starts:
+        try:
+            value, _ = decoder.raw_decode(text[start:])
+            return value
+        except json.JSONDecodeError:
+            continue
+    raise ValueError(f"Response does not contain valid JSON: {text}")
+
+
+def _parse_json_response(response: Any) -> Any:
+    content = _response_text(response)
+    if not content:
+        raise TranslationResponseError("Model response content is empty")
+    return _extract_embedded_json(content)
+
+
+def _response_format_unsupported(exc: Exception) -> bool:
+    message = str(exc).lower()
+    if "response_format" not in message and "json_schema" not in message and "json_object" not in message:
+        return False
+    unsupported_markers = (
+        "unsupported",
+        "not support",
+        "unknown parameter",
+        "invalid parameter",
+        "extra inputs are not permitted",
+        "not permitted",
+        "not allowed",
+        "does not support",
+        "invalid value",
+    )
+    return any(marker in message for marker in unsupported_markers)
+
+
+def _summary_response_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title": {"type": "string"},
+            "summary": {"type": "string"},
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+        "required": ["title", "summary", "tags"],
+    }
+
+
+def _segment_translation_response_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "segments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "segment_id": {"type": "integer"},
+                        "translation": {"type": "string"},
+                    },
+                    "required": ["segment_id", "translation"],
+                },
+            }
+        },
+        "required": ["segments"],
+    }
+
+
+def _normalize_summary_response(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        raise TranslationResponseError("Summary translation did not return a JSON object")
+    summary_text = _clean_text(result.get("summary"))
+    if not summary_text:
+        raise TranslationResponseError("Summary translation returned an empty summary")
+    title = _clean_text(result.get("title"))
+    if not title:
+        raise TranslationResponseError("Summary translation returned an empty title")
+    tags = _string_list(result.get("tags"), limit=20)
+    return {
+        "title": title,
+        "summary": summary_text,
+        "tags": tags,
+    }
+
+
+def _normalize_segment_translation_response(
+    result: Any,
+    batch: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if isinstance(result, dict):
+        items = result.get("segments") or result.get("translations")
+    else:
+        items = result
+    if not isinstance(items, list):
+        raise TranslationResponseError("Segment translation did not return a JSON array")
+
+    expected_ids = [int(item["segment_id"]) for item in batch]
+    translated_by_id: dict[int, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if "segment_id" not in item:
+            continue
+        try:
+            segment_id = int(item["segment_id"])
+        except Exception as exc:
+            raise TranslationResponseError(f"Invalid segment id in translation response: {item}") from exc
+        translation = _clean_text(item.get("translation"))
+        if not translation:
+            continue
+        translated_by_id[segment_id] = translation
+
+    missing = [segment_id for segment_id in expected_ids if segment_id not in translated_by_id]
+    unexpected = [segment_id for segment_id in translated_by_id if segment_id not in expected_ids]
+    if missing or unexpected:
+        raise TranslationResponseError(
+            f"Incomplete batch translation. expected={expected_ids} "
+            f"missing={missing} unexpected={sorted(unexpected)}"
+        )
+
+    return [
+        {
+            "segment_id": segment_id,
+            "translation": translated_by_id[segment_id],
+        }
+        for segment_id in expected_ids
+    ]
+
+
+def _load_existing_segment_translations(path: Path) -> dict[int, dict[str, Any]]:
+    if not path.exists():
+        return {}
+    items = _read_json_list(path)
+    existing: dict[int, dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            segment_id = int(item["segment_id"])
+        except Exception:
+            continue
+        existing[segment_id] = item
+    return existing
+
+
+def _matches_segment(existing: dict[str, Any] | None, current: dict[str, Any]) -> bool:
+    if existing is None:
+        return False
+    return (
+        int(existing.get("segment_id", -1)) == current["segment_id"]
+        and _clean_text(existing.get("text")) == current["text"]
+        and abs(float(existing.get("start", -1.0)) - current["start"]) < 1e-6
+        and abs(float(existing.get("end", -1.0)) - current["end"]) < 1e-6
+        and str(existing.get("speaker", "")) == current["speaker"]
+    )
+
+
+def _collect_words_for_segment(
+    detailed_segments: list[dict[str, Any]],
+    segment_start: float,
+    segment_end: float,
+    speaker: str,
+) -> list[dict[str, Any]]:
+    words: list[dict[str, Any]] = []
+    for segment in detailed_segments:
+        if not isinstance(segment, dict):
+            continue
+        start = float(segment.get("start", 0.0))
+        end = float(segment.get("end", 0.0))
+        if end < segment_start - 1e-3:
+            continue
+        if start > segment_end + 1e-3:
+            break
+        segment_speaker = str(segment.get("speaker", speaker))
+        if segment_speaker != speaker:
+            continue
+        for word in segment.get("words", []):
+            if not isinstance(word, dict):
+                continue
+            if "start" not in word or "end" not in word:
+                continue
+            word_start = float(word["start"])
+            word_end = float(word["end"])
+            if word_end < segment_start - 1e-3 or word_start > segment_end + 1e-3:
+                continue
+            words.append(word)
+    return words
+
+
+def _source_clause_from_words(words: list[dict[str, Any]]) -> SourceClause:
+    text = " ".join(str(word["word"]) for word in words).strip()
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    return SourceClause(
+        text=text,
+        start=float(words[0]["start"]),
+        end=float(words[-1]["end"]),
+    )
+
+
+def _fallback_source_clauses(
+    source_text: str,
+    segment_start: float,
+    segment_end: float,
+) -> list[SourceClause]:
+    parts = _split_text_attaching_punctuation(source_text, r"([,，;；:：.!?。！？])")
+    parts = [part.strip() for part in parts if part.strip()]
+    if not parts:
+        return [SourceClause(text=source_text, start=segment_start, end=segment_end)]
+
+    total_length = sum(max(len(part), 1) for part in parts)
+    current = segment_start
+    duration = max(segment_end - segment_start, 0.0)
+    clauses: list[SourceClause] = []
+    for index, part in enumerate(parts):
+        fraction = max(len(part), 1) / total_length
+        next_time = segment_end if index == len(parts) - 1 else current + duration * fraction
+        clauses.append(SourceClause(text=part, start=current, end=next_time))
+        current = next_time
+    return clauses
+
+
+def _proportional_parts(
+    translated_parts: list[str],
+    source_text: str,
+    start: float,
+    end: float,
+) -> list[dict[str, Any]]:
+    duration = max(end - start, 0.0)
+    total_weight = sum(max(len(part), 1) for part in translated_parts)
+    current = start
+    output: list[dict[str, Any]] = []
+    for index, part in enumerate(translated_parts):
+        fraction = max(len(part), 1) / total_weight
+        next_time = end if index == len(translated_parts) - 1 else current + duration * fraction
+        output.append(
+            {
+                "translation": part,
+                "source_text": source_text,
+                "start": current,
+                "end": next_time,
+            }
+        )
+        current = next_time
+    return output
+
+
+def _split_text_attaching_punctuation(text: str, pattern: str) -> list[str]:
+    pieces = re.split(pattern, text)
+    output: list[str] = []
+    buffer = ""
+    for piece in pieces:
+        if piece is None or piece == "":
+            continue
+        if len(piece) == 1 and piece in _ALL_SPLIT_PUNCTUATION:
+            buffer += piece
+            continue
+        if buffer:
+            output.append(buffer)
+        buffer = piece
+    if buffer:
+        output.append(buffer)
+    return _merge_punctuation_only_parts(output)
+
+
+def _merge_punctuation_only_parts(parts: list[str]) -> list[str]:
+    merged: list[str] = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if _is_punctuation_only(part):
+            if merged:
+                merged[-1] += part
+            continue
+        merged.append(part)
+    return merged
+
+
+def _is_punctuation_only(text: str) -> bool:
+    return bool(text) and all(char in _ALL_SPLIT_PUNCTUATION for char in text)
+
+
+def _chunk_text(text: str, max_chars: int) -> list[str]:
+    chunks: list[str] = []
+    remaining = text.strip()
+    while remaining:
+        if len(remaining) <= max_chars:
+            chunks.append(remaining)
+            break
+        split_at = max_chars
+        if " " in remaining[: max_chars + 1]:
+            split_at = remaining.rfind(" ", 0, max_chars + 1)
+            split_at = split_at if split_at > 0 else max_chars
+        elif len(remaining) > split_at and remaining[split_at] in _ALL_SPLIT_PUNCTUATION:
+            split_at += 1
+        chunks.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+    return _merge_punctuation_only_parts([chunk for chunk in chunks if chunk])
+
+
+def _transcript_excerpt(transcript: list[dict[str, Any]], window: int = 3) -> list[str]:
+    texts = [str(item.get("text", "")).strip() for item in transcript if str(item.get("text", "")).strip()]
+    if len(texts) <= window * 2:
+        return texts
+    return texts[:window] + texts[-window:]
+
+
+def _valid_summary(summary: dict[str, Any]) -> bool:
+    if not all(field in summary for field in TASK_SUMMARY_FIELDS):
+        return False
+    if not _clean_text(summary.get("title")):
+        return False
+    if not _clean_text(summary.get("author")):
+        return False
+    if not _clean_text(summary.get("summary")):
+        return False
+    return isinstance(summary.get("tags"), list)
+
+
+def _title_from_info(info: dict[str, Any]) -> str:
+    for key in ("title", "fulltitle", "display_id", "id"):
+        value = info.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "untitled"
+
+
+def _author_from_info(info: dict[str, Any]) -> str:
+    for key in ("uploader", "channel", "author"):
+        value = info.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "Unknown"
+
+
+def _string_list(value: Any, limit: int | None = None) -> list[str]:
+    if isinstance(value, str):
+        output = [item.strip() for item in re.split(r"[,，\n]", value) if item.strip()]
+        return output[:limit] if limit is not None else output
+    if not isinstance(value, list):
+        return []
+    output = [str(item).strip() for item in value if str(item).strip()]
+    if limit is not None:
+        return output[:limit]
+    return output
+
+
+def _join_clause_text(clauses: list[SourceClause]) -> str:
+    text = " ".join(clause.text for clause in clauses).strip()
+    return re.sub(r"\s+([,.;:!?])", r"\1", text)
+
+
+def _clean_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.startswith("```") and text.endswith("```"):
+        text = text.strip("`").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"', "“", "”"}:
+        text = text[1:-1].strip()
+    if text.startswith("翻译：") or text.startswith("翻译:"):
+        text = text.split(":", 1)[-1].split("：", 1)[-1].strip()
+    return re.sub(r"\s+", " ", text)
+
+
+def _chunked(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
+    return [items[index : index + size] for index in range(0, len(items), size)]
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as file:
+        data = json.load(file)
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected JSON object in {path}")
+    return data
+
+
+def _read_json_list(path: Path) -> list[dict[str, Any]]:
+    with path.open("r", encoding="utf-8") as file:
+        data = json.load(file)
+    if not isinstance(data, list):
+        raise ValueError(f"Expected JSON list in {path}")
+    return data
+
+
+def _write_json(path: Path, data: Any) -> Any:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2)
+        file.write("\n")
+    return data

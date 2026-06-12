@@ -70,7 +70,35 @@ docker compose -f compose.dev.yml up --build
 GPU 验证：
 
 ```bash
+docker compose -f compose.gpu.yml config
+docker compose -f compose.gpu.yml build
+docker compose -f compose.gpu.yml run --rm youdub-gpu scripts/check_gpu.sh
 scripts/gpu_smoke.sh
+```
+
+完整重建时使用：
+
+```bash
+docker compose -f compose.gpu.yml build --no-cache
+```
+
+需要覆盖 WhisperX 和翻译时，按层开启 smoke test，避免每次都消耗模型下载时间或翻译 token：
+
+```bash
+YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_WHISPER_DIARIZATION=0 scripts/gpu_smoke.sh
+YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
+```
+
+容器内单步调试任务：
+
+```bash
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub doctor
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub create-download-task --source /data/samples/6o68Fg2-bhM.mp4 --info /data/samples/download.info.json --cover /data/samples/download.webp
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step extract-audio
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step separate-audio
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step transcribe
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step translate
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub show-task <task-id>
 ```
 
 生产单实例：
