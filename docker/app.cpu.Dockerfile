@@ -8,7 +8,13 @@ ENV TZ=Etc/UTC
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    libass9 \
+    fontconfig \
+    fonts-noto-cjk \
   && rm -rf /var/lib/apt/lists/*
+
+RUN ffmpeg -hide_banner -filters | awk '$2 == "subtitles" { found = 1 } END { exit found ? 0 : 1 }' \
+  && fc-match "Noto Sans CJK SC" | grep -F "Noto Sans CJK" >/dev/null
 
 WORKDIR /app
 

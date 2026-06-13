@@ -130,7 +130,8 @@ https://www.youtube.com/watch?v=6o68Fg2-bhM
 | TTS | `step040_tts.py` | 推荐 | 模型下载可选 | 否 | `segments/tts/*.wav`、`audio_tts.wav`、`audio_tts.timings.json` | 是 |
 | TTS 后识别/字幕 | 新 subtitle 接口 | 推荐 | 模型下载 | 否 | `audio_tts.transcript.json`、`subtitles.segments.json`、`subtitles.srt` | 是 |
 | 合成 | `step050_synthesize_video.py` | 否 | 否 | 否 | `video.mp4` | 是 |
-| 上传 | `step070_upload_bilibili.py` | 否 | 是 | Bili 凭证 | `bilibili.json` | 第二阶段 |
+| 发布包 | 新 publish 接口 | 否 | 否 | 否 | `publish.json`、`publish.md`、`cover.jpg` | 是 |
+| 上传 | `step070_upload_bilibili.py` | 否 | 是 | Bili 凭证 | `bilibili.json` | 第二阶段，已提供 dry-run 和显式确认入口 |
 | Cookie 刷新 | `cookies_refresher.py` | 否 | 是 | 浏览器登录 | `cookies.txt` | 第二阶段 |
 
 ## 3. 配置治理
@@ -212,6 +213,8 @@ BILI_BILI_JCT=
 7. 对 `audio_tts.wav` 再做 WhisperX 识别和 align，生成 `audio_tts.transcript.json`
 8. 字幕修正和短句切分生成 `subtitles.segments.json`、`subtitles.srt`
 9. FFmpeg 合成 `video.mp4`
+10. 生成发布包 `publish.json`、`publish.md`、`cover.jpg`
+11. Bilibili 发布 dry-run 生成 `bilibili.dry-run.json`；真实上传需要显式确认和凭证
 
 建议先用 30 秒到 2 分钟的视频样本，不要直接用长视频。
 
@@ -243,6 +246,17 @@ BILI_BILI_JCT=
   或 `audio_tts.timings.json` 的句级实际时间分配，最后才使用 `proportional_fallback`。
   最终字幕显示文本会去掉每条字幕末尾的标点符号，完整标准译文保留在
   `standard_translation` 字段。
+- 合成入口：`run-task --step synthesize` 已接入；读取 `download.mp4`、
+  `audio_tts.wav`、`audio_instruments.wav` 和 `subtitles.srt`，输出
+  `audio_mixed.m4a` 与 `video.mp4`。合成阶段依赖 FFmpeg `subtitles` filter 和
+  中文字体；CPU/GPU app 镜像会安装 `fontconfig` 与 `fonts-noto-cjk`。
+- 发布包入口：`run-task --step prepare-publish` 已接入；读取 `video.mp4`、
+  `summary.json`、`download.info.json` 和下载封面，输出 `publish.json`、
+  `publish.md` 与 `cover.jpg`。
+- Bilibili 发布入口：`run-task --step publish-bilibili` 已接入；默认要求
+  `--publish-dry-run` 或 `--publish-confirm`。dry-run 不触发真实上传，输出
+  `bilibili.dry-run.json`；真实上传需要通过环境变量提供 `BILI_SESSDATA` 和
+  `BILI_BILI_JCT`，成功后写入 `bilibili.json`。
 
 ## Docker 验证命令
 
@@ -280,6 +294,7 @@ YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_WHISPER_DIARIZATION=0 scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_SMOKE_TRANSCRIBE_TTS=1 YOUDUB_SMOKE_SUBTITLE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
+YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_SMOKE_TRANSCRIBE_TTS=1 YOUDUB_SMOKE_SUBTITLE=1 YOUDUB_SMOKE_SYNTHESIZE=1 YOUDUB_SMOKE_PREPARE_PUBLISH=1 YOUDUB_SMOKE_PUBLISH_BILIBILI=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 scripts/gpu_smoke.sh /data/samples/demo.mp4 /data/samples/download.info.json /data/samples/download.webp
 ```
 
@@ -295,6 +310,9 @@ docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> 
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step tts
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step transcribe-tts
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step subtitle
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step synthesize
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step prepare-publish
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step publish-bilibili --publish-dry-run
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub show-task <task-id>
 ```
 

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from .media import extract_audio, separate_audio
 from .models import PipelineStep, StepStatus, Task, TaskStatus
+from .publishing import (
+    BilibiliPublishConfig,
+    PublishPackageConfig,
+    prepare_publish_package,
+    publish_to_bilibili,
+)
 from .subtitles import build_subtitles_from_tts_asr
+from .synthesis import SynthesisConfig, synthesize_video
 from .tts import TTSConfig, generate_tts
 from .translation import TranslationConfig, translate_task
 from .transcription import (
@@ -22,10 +29,16 @@ class PipelineRunner:
         whisperx_config: WhisperXConfig | None = None,
         translation_config: TranslationConfig | None = None,
         tts_config: TTSConfig | None = None,
+        synthesis_config: SynthesisConfig | None = None,
+        publish_config: PublishPackageConfig | None = None,
+        bilibili_publish_config: BilibiliPublishConfig | None = None,
     ):
         self.whisperx_config = whisperx_config
         self.translation_config = translation_config
         self.tts_config = tts_config
+        self.synthesis_config = synthesis_config
+        self.publish_config = publish_config
+        self.bilibili_publish_config = bilibili_publish_config
 
     def run_step(self, task: Task, step: PipelineStep) -> Task:
         task.status = TaskStatus.RUNNING
@@ -57,6 +70,12 @@ class PipelineRunner:
                 transcribe_tts_audio(task.folder, self._whisperx_config())
             elif step == PipelineStep.SUBTITLE:
                 build_subtitles_from_tts_asr(task.folder)
+            elif step == PipelineStep.SYNTHESIZE:
+                synthesize_video(task.folder, self._synthesis_config())
+            elif step == PipelineStep.PREPARE_PUBLISH:
+                prepare_publish_package(task.folder, self._publish_config())
+            elif step == PipelineStep.PUBLISH_BILIBILI:
+                publish_to_bilibili(task.folder, self._bilibili_publish_config())
             else:
                 raise NotImplementedError(f"Step is not implemented yet: {step.value}")
         except Exception as exc:
@@ -83,3 +102,12 @@ class PipelineRunner:
         if self.tts_config is None:
             raise ValueError("TTS config is required for TTS steps")
         return self.tts_config
+
+    def _synthesis_config(self) -> SynthesisConfig:
+        return self.synthesis_config or SynthesisConfig()
+
+    def _publish_config(self) -> PublishPackageConfig:
+        return self.publish_config or PublishPackageConfig()
+
+    def _bilibili_publish_config(self) -> BilibiliPublishConfig:
+        return self.bilibili_publish_config or BilibiliPublishConfig.from_env()

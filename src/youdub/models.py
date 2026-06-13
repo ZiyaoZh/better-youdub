@@ -35,6 +35,8 @@ class PipelineStep(str, Enum):
     TRANSCRIBE_TTS = "transcribe-tts"
     SUBTITLE = "subtitle"
     SYNTHESIZE = "synthesize"
+    PREPARE_PUBLISH = "prepare-publish"
+    PUBLISH_BILIBILI = "publish-bilibili"
 
 
 def utc_now() -> str:

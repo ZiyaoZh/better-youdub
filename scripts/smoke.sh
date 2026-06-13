@@ -18,6 +18,9 @@ SMOKE_TRANSLATE="${YOUDUB_SMOKE_TRANSLATE:-0}"
 SMOKE_TTS="${YOUDUB_SMOKE_TTS:-0}"
 SMOKE_TRANSCRIBE_TTS="${YOUDUB_SMOKE_TRANSCRIBE_TTS:-0}"
 SMOKE_SUBTITLE="${YOUDUB_SMOKE_SUBTITLE:-0}"
+SMOKE_SYNTHESIZE="${YOUDUB_SMOKE_SYNTHESIZE:-0}"
+SMOKE_PREPARE_PUBLISH="${YOUDUB_SMOKE_PREPARE_PUBLISH:-0}"
+SMOKE_PUBLISH_BILIBILI="${YOUDUB_SMOKE_PUBLISH_BILIBILI:-0}"
 
 sample_info_path="${2:-${YOUDUB_SMOKE_INFO_PATH:-}}"
 sample_cover_path="${3:-${YOUDUB_SMOKE_COVER_PATH:-}}"
@@ -55,6 +58,18 @@ if [[ "$SMOKE_TRANSCRIBE_TTS" == "1" && "$SMOKE_TTS" != "1" ]]; then
 fi
 if [[ "$SMOKE_SUBTITLE" == "1" && "$SMOKE_TRANSCRIBE_TTS" != "1" ]]; then
   echo "error: YOUDUB_SMOKE_SUBTITLE=1 requires YOUDUB_SMOKE_TRANSCRIBE_TTS=1" >&2
+  exit 2
+fi
+if [[ "$SMOKE_SYNTHESIZE" == "1" && "$SMOKE_SUBTITLE" != "1" ]]; then
+  echo "error: YOUDUB_SMOKE_SYNTHESIZE=1 requires YOUDUB_SMOKE_SUBTITLE=1" >&2
+  exit 2
+fi
+if [[ "$SMOKE_PREPARE_PUBLISH" == "1" && "$SMOKE_SYNTHESIZE" != "1" ]]; then
+  echo "error: YOUDUB_SMOKE_PREPARE_PUBLISH=1 requires YOUDUB_SMOKE_SYNTHESIZE=1" >&2
+  exit 2
+fi
+if [[ "$SMOKE_PUBLISH_BILIBILI" == "1" && "$SMOKE_PREPARE_PUBLISH" != "1" ]]; then
+  echo "error: YOUDUB_SMOKE_PUBLISH_BILIBILI=1 requires YOUDUB_SMOKE_PREPARE_PUBLISH=1" >&2
   exit 2
 fi
 
@@ -106,5 +121,14 @@ if [[ "$SMOKE_TRANSCRIBE_TTS" == "1" ]]; then
 fi
 if [[ "$SMOKE_SUBTITLE" == "1" ]]; then
   "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step subtitle
+fi
+if [[ "$SMOKE_SYNTHESIZE" == "1" ]]; then
+  "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step synthesize
+fi
+if [[ "$SMOKE_PREPARE_PUBLISH" == "1" ]]; then
+  "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step prepare-publish
+fi
+if [[ "$SMOKE_PUBLISH_BILIBILI" == "1" ]]; then
+  "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step publish-bilibili --publish-dry-run
 fi
 "$PYTHON_BIN" -m youdub.cli show-task "$task_id"

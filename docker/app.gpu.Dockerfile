@@ -15,6 +15,9 @@ ENV TZ=Etc/UTC
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     ffmpeg \
+    libass9 \
+    fontconfig \
+    fonts-noto-cjk \
     git \
     build-essential \
     python3-dev \
@@ -22,6 +25,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
   && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/ffmpeg /opt/conda/bin/ffmpeg \
+  && ln -sf /usr/bin/ffprobe /opt/conda/bin/ffprobe \
+  && ffmpeg -hide_banner -filters | awk '$2 == "subtitles" { found = 1 } END { exit found ? 0 : 1 }' \
+  && fc-match "Noto Sans CJK SC" | grep -F "Noto Sans CJK" >/dev/null
 
 RUN mkdir -p /tmp/youdub-cache/matplotlib /tmp/youdub-cache/xdg \
   && chmod -R 1777 /tmp/youdub-cache

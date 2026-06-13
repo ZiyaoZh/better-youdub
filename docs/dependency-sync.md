@@ -116,11 +116,24 @@ WMI==1.5.1; platform_system == "Windows"
 3. 安装后清理 `/var/lib/apt/lists/*`。
 4. 在本文档或变更记录中说明该依赖服务哪个 Python 包或功能。
 
+当前新增依赖说明：
+
+- `bilibili-api-python==17.4.1`：用于可选的 Bilibili 发布适配器；真实上传仍需
+  环境变量提供账号凭证，并要求显式确认。
+- `libass9`：提供 FFmpeg `subtitles` / `ass` filter 运行时依赖；GPU 镜像会将
+  `/opt/conda/bin/ffmpeg` 和 `/opt/conda/bin/ffprobe` 指向 apt 安装的系统版本，
+  避免 PyTorch 基础镜像中的 conda FFmpeg 缺少 libass 字幕 filter。
+- `fontconfig`、`fonts-noto-cjk`：用于 FFmpeg `subtitles` filter 稳定渲染中文
+  字幕，避免最终合成视频出现字体缺失或乱码。
+
 示例：
 
 ```dockerfile
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    libass9 \
+    fontconfig \
+    fonts-noto-cjk \
     git \
     build-essential \
     python3-dev \
@@ -151,8 +164,11 @@ python -c "import torch; print(torch.__version__); print(torch.cuda.is_available
 ffmpeg -version
 ffprobe -version
 python -c "import yt_dlp, openai, librosa, soundfile, audiostretchy"
+python -c "import bilibili_api"
 python -c "import whisperx"
 python -c "import demucs"
+ffmpeg -hide_banner -filters | grep -q ' subtitles '
+fc-match "Noto Sans CJK SC"
 ```
 
 涉及 Dockerfile、Compose、GPU 依赖或系统依赖时，必须同步更新宿主机 Docker 验证命令；实际镜像构建和容器内运行时验证由具备 Docker/GPU 环境的宿主机执行：
@@ -177,6 +193,7 @@ YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_WHISPER_DIARIZATION=0 scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_SMOKE_TRANSCRIBE_TTS=1 YOUDUB_SMOKE_SUBTITLE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
+YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_SMOKE_TRANSCRIBE_TTS=1 YOUDUB_SMOKE_SUBTITLE=1 YOUDUB_SMOKE_SYNTHESIZE=1 YOUDUB_SMOKE_PREPARE_PUBLISH=1 YOUDUB_SMOKE_PUBLISH_BILIBILI=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 ```
 
 TTS 根据模型选择验证。VoxCPM2 默认从 Hugging Face 下载 `openbmb/VoxCPM2`，模型缓存应放在 `HF_HOME` 挂载卷中。TTS 混音对齐依赖 `audiostretchy` 做分段 time-stretch：

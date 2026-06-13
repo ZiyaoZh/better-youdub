@@ -12,6 +12,8 @@ from .ingest import create_task_from_download_artifacts, create_task_from_local_
 from .media import require_binary
 from .models import PipelineStep
 from .pipeline import PipelineRunner
+from .publishing import BilibiliPublishConfig, PublishPackageConfig
+from .synthesis import SynthesisConfig, ffmpeg_has_filter
 from .storage import TaskStore
 from .tts import TTSConfig
 from .translation import TranslationConfig
@@ -54,6 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
             PipelineStep.TTS.value,
             PipelineStep.TRANSCRIBE_TTS.value,
             PipelineStep.SUBTITLE.value,
+            PipelineStep.SYNTHESIZE.value,
+            PipelineStep.PREPARE_PUBLISH.value,
+            PipelineStep.PUBLISH_BILIBILI.value,
         ],
         default=PipelineStep.EXTRACT_AUDIO.value,
     )
@@ -177,6 +182,106 @@ def build_parser() -> argparse.ArgumentParser:
         default=float(os.getenv("YOUDUB_TTS_STRETCH_LOCAL_MAX", "1.1")),
         help="Maximum per-segment TTS stretch correction",
     )
+    run_task.add_argument(
+        "--no-burn-subtitles",
+        action="store_false",
+        dest="burn_subtitles",
+        default=_bool_env("YOUDUB_BURN_SUBTITLES", True),
+        help="Do not burn subtitles into the synthesized video",
+    )
+    run_task.add_argument(
+        "--synthesis-tts-volume",
+        type=float,
+        default=float(os.getenv("YOUDUB_SYNTHESIS_TTS_VOLUME", "1.0")),
+        help="TTS voice volume used during final audio mix",
+    )
+    run_task.add_argument(
+        "--synthesis-instruments-volume",
+        type=float,
+        default=float(os.getenv("YOUDUB_SYNTHESIS_INSTRUMENTS_VOLUME", "0.30")),
+        help="Background/instrument audio volume used during final audio mix",
+    )
+    run_task.add_argument(
+        "--synthesis-preset",
+        default=os.getenv("YOUDUB_SYNTHESIS_PRESET", "fast"),
+        help="libx264 preset used for final video rendering",
+    )
+    run_task.add_argument(
+        "--synthesis-crf",
+        type=int,
+        default=int(os.getenv("YOUDUB_SYNTHESIS_CRF", "23")),
+        help="libx264 CRF used for final video rendering",
+    )
+    run_task.add_argument(
+        "--subtitle-language",
+        default=os.getenv("YOUDUB_SUBTITLE_LANGUAGE", "zh"),
+        help="Subtitle style language key, currently zh or en",
+    )
+    run_task.add_argument(
+        "--subtitle-font",
+        default=_optional_str_env("YOUDUB_SUBTITLE_FONT"),
+        help="Optional font family for burned subtitles",
+    )
+    run_task.add_argument(
+        "--publish-title-max-chars",
+        type=int,
+        default=int(os.getenv("YOUDUB_PUBLISH_TITLE_MAX_CHARS", "80")),
+        help="Maximum generated publish title length",
+    )
+    run_task.add_argument(
+        "--publish-max-tags",
+        type=int,
+        default=int(os.getenv("YOUDUB_PUBLISH_MAX_TAGS", "10")),
+        help="Maximum generated publish tag count",
+    )
+    run_task.add_argument(
+        "--publish-max-tag-chars",
+        type=int,
+        default=int(os.getenv("YOUDUB_PUBLISH_MAX_TAG_CHARS", "20")),
+        help="Maximum length for each generated publish tag",
+    )
+    run_task.add_argument(
+        "--publish-dry-run",
+        action="store_true",
+        default=_bool_env("YOUDUB_PUBLISH_DRY_RUN", False),
+        help="Validate Bilibili publish metadata without uploading",
+    )
+    run_task.add_argument(
+        "--publish-force",
+        action="store_true",
+        default=_bool_env("YOUDUB_PUBLISH_FORCE", False),
+        help="Upload again even if bilibili.json already exists",
+    )
+    run_task.add_argument(
+        "--publish-confirm",
+        action="store_true",
+        default=_bool_env("YOUDUB_PUBLISH_CONFIRM", False),
+        help="Required for a real Bilibili upload",
+    )
+    run_task.add_argument(
+        "--bilibili-tid",
+        type=int,
+        default=_optional_int_env("BILI_TID") or 201,
+        help="Bilibili category id for upload",
+    )
+    run_task.add_argument(
+        "--bilibili-original",
+        action="store_true",
+        default=_bool_env("BILI_ORIGINAL", False),
+        help="Mark Bilibili submission as original",
+    )
+    run_task.add_argument(
+        "--bilibili-source",
+        default=_optional_str_env("BILI_SOURCE"),
+        help="Optional Bilibili转载来源; defaults to source URL when not original",
+    )
+    run_task.add_argument(
+        "--no-bilibili-watermark",
+        action="store_false",
+        dest="bilibili_watermark",
+        default=_bool_env("BILI_WATERMARK", True),
+        help="Disable Bilibili watermark flag",
+    )
 
     subparsers.add_parser("test-video", help="Print the fixed test video identifier")
     return parser
@@ -194,6 +299,8 @@ def cmd_doctor(config: AppConfig) -> int:
         "openai_api_key_configured": config.secrets.openai.api_key is not None,
         "openai_base_url_configured": config.secrets.openai.base_url is not None,
         "ffmpeg": require_binary("ffmpeg"),
+        "ffprobe": require_binary("ffprobe"),
+        "ffmpeg_subtitles_filter": ffmpeg_has_filter("subtitles"),
     }
     print(json.dumps(checks, ensure_ascii=False, indent=2))
     return 0
@@ -270,11 +377,39 @@ def cmd_run_task(config: AppConfig, args: argparse.Namespace) -> int:
         stretch_local_min=args.tts_stretch_local_min,
         stretch_local_max=args.tts_stretch_local_max,
     )
+    synthesis_config = SynthesisConfig(
+        burn_subtitles=args.burn_subtitles,
+        tts_volume=args.synthesis_tts_volume,
+        instruments_volume=args.synthesis_instruments_volume,
+        video_preset=args.synthesis_preset,
+        video_crf=args.synthesis_crf,
+        subtitle_language=args.subtitle_language,
+        subtitle_font=args.subtitle_font,
+    )
+    publish_config = PublishPackageConfig(
+        max_title_chars=args.publish_title_max_chars,
+        max_tags=args.publish_max_tags,
+        max_tag_chars=args.publish_max_tag_chars,
+    )
+    bilibili_publish_config = BilibiliPublishConfig(
+        sessdata=_optional_str_env("BILI_SESSDATA"),
+        bili_jct=_optional_str_env("BILI_BILI_JCT"),
+        tid=args.bilibili_tid,
+        original=args.bilibili_original,
+        source=args.bilibili_source,
+        watermark=args.bilibili_watermark,
+        dry_run=args.publish_dry_run,
+        force=args.publish_force,
+        confirm=args.publish_confirm,
+    )
     try:
         task = PipelineRunner(
             whisperx_config=whisperx_config,
             translation_config=translation_config,
             tts_config=tts_config,
+            synthesis_config=synthesis_config,
+            publish_config=publish_config,
+            bilibili_publish_config=bilibili_publish_config,
         ).run_step(task, step)
     finally:
         store.update(task)

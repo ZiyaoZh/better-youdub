@@ -2,6 +2,8 @@ from pathlib import Path
 
 from youdub import pipeline
 from youdub.models import PipelineStep, StepStatus, Task, TaskStatus
+from youdub.publishing import BilibiliPublishConfig, PublishPackageConfig
+from youdub.synthesis import SynthesisConfig
 from youdub.tts import TTSConfig
 from youdub.translation import TranslationConfig
 from youdub.pipeline import PipelineRunner
@@ -166,3 +168,66 @@ def test_pipeline_marks_subtitle_success(tmp_path: Path, monkeypatch) -> None:
     assert result.error is None
     assert result.steps[PipelineStep.SUBTITLE.value] == StepStatus.SUCCESS
     assert (tmp_path / "subtitles.segments.json").exists()
+
+
+def test_pipeline_marks_synthesize_success(tmp_path: Path, monkeypatch) -> None:
+    task = Task(id="abc123", title="demo", source="/tmp/demo.mp4", folder=tmp_path)
+    config = SynthesisConfig(burn_subtitles=False)
+
+    def fake_synthesize_video(task_dir: Path, synthesis_config: SynthesisConfig) -> Path:
+        assert task_dir == tmp_path
+        assert synthesis_config == config
+        output = task_dir / "video.mp4"
+        output.write_bytes(b"video")
+        return output
+
+    monkeypatch.setattr(pipeline, "synthesize_video", fake_synthesize_video)
+
+    result = PipelineRunner(synthesis_config=config).run_step(task, PipelineStep.SYNTHESIZE)
+
+    assert result.status == TaskStatus.SUCCESS
+    assert result.error is None
+    assert result.steps[PipelineStep.SYNTHESIZE.value] == StepStatus.SUCCESS
+    assert (tmp_path / "video.mp4").exists()
+
+
+def test_pipeline_marks_prepare_publish_success(tmp_path: Path, monkeypatch) -> None:
+    task = Task(id="abc123", title="demo", source="/tmp/demo.mp4", folder=tmp_path)
+    config = PublishPackageConfig(max_title_chars=50)
+
+    def fake_prepare_publish_package(task_dir: Path, publish_config: PublishPackageConfig) -> Path:
+        assert task_dir == tmp_path
+        assert publish_config == config
+        output = task_dir / "publish.json"
+        output.write_text('{"status":"ready"}', encoding="utf-8")
+        return output
+
+    monkeypatch.setattr(pipeline, "prepare_publish_package", fake_prepare_publish_package)
+
+    result = PipelineRunner(publish_config=config).run_step(task, PipelineStep.PREPARE_PUBLISH)
+
+    assert result.status == TaskStatus.SUCCESS
+    assert result.error is None
+    assert result.steps[PipelineStep.PREPARE_PUBLISH.value] == StepStatus.SUCCESS
+    assert (tmp_path / "publish.json").exists()
+
+
+def test_pipeline_marks_bilibili_publish_dry_run_success(tmp_path: Path, monkeypatch) -> None:
+    task = Task(id="abc123", title="demo", source="/tmp/demo.mp4", folder=tmp_path)
+    config = BilibiliPublishConfig(dry_run=True)
+
+    def fake_publish_to_bilibili(task_dir: Path, publish_config: BilibiliPublishConfig) -> Path:
+        assert task_dir == tmp_path
+        assert publish_config == config
+        output = task_dir / "bilibili.dry-run.json"
+        output.write_text('{"status":"dry_run"}', encoding="utf-8")
+        return output
+
+    monkeypatch.setattr(pipeline, "publish_to_bilibili", fake_publish_to_bilibili)
+
+    result = PipelineRunner(bilibili_publish_config=config).run_step(task, PipelineStep.PUBLISH_BILIBILI)
+
+    assert result.status == TaskStatus.SUCCESS
+    assert result.error is None
+    assert result.steps[PipelineStep.PUBLISH_BILIBILI.value] == StepStatus.SUCCESS
+    assert (tmp_path / "bilibili.dry-run.json").exists()

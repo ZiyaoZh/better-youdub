@@ -89,6 +89,7 @@ YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_WHISPER_DIARIZATION=0 scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_SMOKE_TRANSCRIBE_TTS=1 YOUDUB_SMOKE_SUBTITLE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
+YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_SMOKE_TRANSCRIBE_TTS=1 YOUDUB_SMOKE_SUBTITLE=1 YOUDUB_SMOKE_SYNTHESIZE=1 YOUDUB_SMOKE_PREPARE_PUBLISH=1 YOUDUB_SMOKE_PUBLISH_BILIBILI=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 ```
 
 容器内单步调试任务：
@@ -103,6 +104,9 @@ docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> 
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step tts
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step transcribe-tts
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step subtitle
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step synthesize
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step prepare-publish
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step publish-bilibili --publish-dry-run
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub show-task <task-id>
 ```
 
@@ -124,6 +128,12 @@ docker compose -f compose.gpu.yml up -d
 - `/models`：TTS/Whisper/Demucs 模型文件
 - `/cache/huggingface`：HuggingFace 缓存
 - `/cache/torch`：Torch 缓存
+
+最终视频合成会使用 FFmpeg `subtitles` filter 烧录字幕，app 镜像需要安装
+`libass9`、`fontconfig` 和 `fonts-noto-cjk`，并在运行检查中确认 `subtitles`
+filter 可用且 `Noto Sans CJK SC` 可匹配。GPU 镜像基于 PyTorch 镜像时还会将
+`/opt/conda/bin/ffmpeg` 和 `/opt/conda/bin/ffprobe` 指向 apt 安装的系统版本，避免
+conda FFmpeg 抢占 PATH 后缺少字幕 filter。
 
 建议环境变量：
 
