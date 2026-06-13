@@ -2,3 +2,4 @@
 # Keep this file minimal; add packages only when code imports them.
 openai>=1.30.0
 audiostretchy
+opencc-python-reimplemented>=0.1.7

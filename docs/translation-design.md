@@ -260,19 +260,31 @@ fallback。
 
 - `translation.json`：标准译文，字幕文本必须以它为准
 - `audio_tts.transcript.json`：TTS 合成音频的 ASR 文本和词级时间
+- `audio_tts.timings.json`：可选，作为标准译文句级实际起止时间先验
 
 推荐流程：
 
 1. 把 `translation.json` 的整句译文作为标准结果
-2. 把 `audio_tts.transcript.json` 的一个或多个 ASR segment 对齐到对应标准译文
-3. 用标准译文按中文标点切分字幕短句
-4. 用文本相似度和字符级 alignment，把标准译文短句的字符 span 映射到 ASR 结果
-5. 优先使用 WhisperX align 的词级 `start`/`end` 作为短句时间窗口
+2. 对标准译文和 ASR words 做 NFKC、简繁归一化、去空白和去标点，生成两个全局
+   单调字符流
+3. 用全局字符 alignment 把标准译文短句 span 映射到 ASR word span；ASR segment
+   边界只作为原始容器，不作为切分硬边界
+4. 用标准译文按中文标点切分字幕短句，字幕文本只使用标准译文
+5. 优先使用 WhisperX align 的词级 `start`/`end` 作为短句时间窗口，并用
+   `audio_tts.timings.json` 约束句级首尾时间
 6. ASR 识别结果与标准译文不一致时，只借用 ASR 的时间，不把 ASR 文本写入字幕
-7. 只有当没有可用词级时间时，才退化为句内按比例分配时间
+7. 单个短句映射失败时先用相邻成功短句的空档插值，再用 TTS 句级时间比例分配；
+   只有没有可用词级时间和句级时间时才使用最终 `proportional_fallback`
 
 这种做法不按译文短句长度直接分配时间，因此更能贴合 TTS 实际语速变化。字幕的
 可读短句仍由标准译文生成，避免合成语音二次 ASR 中的错字污染最终字幕。
+
+`subtitles.segments.json` 中的 `timing_source` 用于诊断字幕时间来源：
+
+- `global_asr_words`：主路径，全局标准文本 span 成功映射到 ASR words
+- `neighbor_interpolated_words`：局部缺口用前后成功 word 时间插值
+- `tts_timing_proportional`：有 TTS 句级实际时间，但局部缺少可靠 word 映射
+- `proportional_fallback`：最终兜底，没有可用 word 时间和句级时间
 
 ## 建议实现顺序
 

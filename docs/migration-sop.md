@@ -238,7 +238,9 @@ BILI_BILI_JCT=
   `YOUDUB_TTS_ASR_INITIAL_PROMPT=以下是普通话的句子。`，用于让 Whisper 输出简体中文。
 - 字幕入口：`run-task --step subtitle` 已接入；字幕文本以 `translation.json`
   的标准译文为准，时间优先来自 `audio_tts.transcript.json` 中 WhisperX align 的
-  词级时间窗口，只有缺少可用词级时间时才退化为句内比例分配。
+  词级时间窗口。字幕步骤会把标准译文和 ASR words 展开成全局无标点字符流，做
+  NFKC、简繁归一化和单调字符映射；当局部缺口无法映射时，先用相邻 word 时间插值
+  或 `audio_tts.timings.json` 的句级实际时间分配，最后才使用 `proportional_fallback`。
 
 ## Docker 验证命令
 

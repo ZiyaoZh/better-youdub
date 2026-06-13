@@ -1,79 +1,201 @@
 #!/bin/bash
 
-# 脚本功能：修改 yd_instance 容器中的 config.toml 和 auth.json
-# 用法：./update_config.sh <new_base_url> <new_api_key>
-# 示例：./update_config.sh "https://new.api.com/v1" "sk-abc123"
+# 用法: ./update_config_advanced.sh <vendor> <new_api_key>
+# vendor 可选: packy, rawchat, anyrouter
 
-set -e  # 遇到错误立即退出
+set -e
 
-# 配置
 CONTAINER_NAME="yd_instance"
-CONFIG_FILE="config.toml"
-AUTH_FILE="auth.json"
+TMP_CONFIG="./config.toml.tmp"
+TMP_AUTH="./auth.json.tmp"
 CONTAINER_CONFIG_PATH="/root/.codex/config.toml"
 CONTAINER_AUTH_PATH="/root/.codex/auth.json"
 
-# 临时文件（放在当前目录）
-TMP_CONFIG="./${CONFIG_FILE}.tmp"
-TMP_AUTH="./${AUTH_FILE}.tmp"
-
-# 清理函数：删除临时文件
 cleanup() {
     rm -f "$TMP_CONFIG" "$TMP_AUTH"
     echo "临时文件已清理。"
 }
-
-# 错误处理：确保即使脚本中断也删除临时文件
 trap cleanup EXIT
 
-# 参数检查
 if [ $# -ne 2 ]; then
     echo "错误：需要两个参数"
-    echo "用法: $0 <new_base_url> <new_api_key>"
+    echo "用法: $0 <vendor> <new_api_key>"
+    echo "vendor 可选: packy, rawchat, anyrouter"
     exit 1
 fi
 
-NEW_BASE_URL="$1"
+VENDOR="$1"
 NEW_API_KEY="$2"
 
-echo ">>> 开始更新配置..."
+# 供应商配置
+case "$VENDOR" in
+    packy)
+        PROVIDER_VALUE="packycode"
+        SECTION="packycode"
+        BASE_URL="https://www.packyapi.com/v1"
+        NAME="packycode"
+        ;;
+    anyrouter)
+        PROVIDER_VALUE="anyrouter"
+        SECTION="anyrouter"
+        BASE_URL="https://anyrouter.top/v1"
+        NAME="Any Router"
+        ;;
+    rawchat)
+        PROVIDER_VALUE="rawchat"
+        SECTION="rawchat"
+        BASE_URL="https://new.sharedchat.cc/codex"
+        NAME="rawchat"
+        ;;
+    *)
+        echo "错误：不支持的供应商 '$VENDOR'"
+        exit 1
+        ;;
+esac
 
-# 1. 从容器复制文件到宿主机临时文件
-echo ">>> 从容器复制 $CONFIG_FILE ..."
+echo ">>> 供应商: $VENDOR -> model_provider = $PROVIDER_VALUE"
+echo ">>> 设置 API Key: ${NEW_API_KEY:0:10}..."
+
+# 从容器复制文件
+echo ">>> 从容器复制配置文件..."
 docker cp "$CONTAINER_NAME:$CONTAINER_CONFIG_PATH" "$TMP_CONFIG"
-echo ">>> 从容器复制 $AUTH_FILE ..."
 docker cp "$CONTAINER_NAME:$CONTAINER_AUTH_PATH" "$TMP_AUTH"
 
-# 2. 修改 config.toml 中的 base_url
-#    匹配行 base_url = "..." 或 base_url = '...' 或 base_url = ...（无引号）
-#    替换为 base_url = "新值"
-echo ">>> 修改 $CONFIG_FILE 中的 base_url 为 $NEW_BASE_URL"
-sed -i "s|^\([[:space:]]*base_url[[:space:]]*=[[:space:]]*\).*|\1\"$NEW_BASE_URL\"|" "$TMP_CONFIG"
+# ========== 使用 Python 修改 config.toml ==========
+echo ">>> 使用 Python 修改 config.toml ..."
+python3 << EOF
+import re
+import sys
 
-# 3. 修改 auth.json 中的 OPENAI_API_KEY 值
-#    使用 jq 如果可用，否则使用 sed（后者较脆弱）
+# 读取原始配置
+with open("$TMP_CONFIG", "r") as f:
+    lines = f.readlines()
+
+# 我们需要修改/添加的内容
+new_provider = "$PROVIDER_VALUE"
+new_section = "$SECTION"
+new_base_url = "$BASE_URL"
+new_name = "$NAME"
+
+# 结果行列表
+new_lines = []
+i = 0
+provider_modified = False
+section_found = False
+in_target_section = False
+project_section_modified = False
+
+while i < len(lines):
+    line = lines[i]
+    # 1. 修改顶层 model_provider
+    if not provider_modified and re.match(r'^model_provider\s*=', line):
+        new_lines.append(f'model_provider = "{new_provider}"\n')
+        provider_modified = True
+        i += 1
+        continue
+
+    # 2. 处理项目节（[projects."..."]) 中的 preferred_auth_method
+    if re.match(r'^\[projects\."', line):
+        new_lines.append(line)
+        i += 1
+        # 查找该节内的 preferred_auth_method 并修改/添加
+        j = i
+        found_auth = False
+        while j < len(lines) and not re.match(r'^\[', lines[j]):
+            if re.match(r'^\s*preferred_auth_method\s*=', lines[j]):
+                found_auth = True
+                # 修改该行
+                new_lines.append(f'preferred_auth_method = "apikey"\n')
+                j += 1
+                break
+            else:
+                new_lines.append(lines[j])
+                j += 1
+        if not found_auth:
+            # 在项目节末尾添加
+            new_lines.append('preferred_auth_method = "apikey"\n')
+        # 继续复制剩余行直到下一个节
+        while j < len(lines) and not re.match(r'^\[', lines[j]):
+            new_lines.append(lines[j])
+            j += 1
+        i = j
+        project_section_modified = True
+        continue
+
+    # 3. 处理 model_providers.<section> 节
+    if re.match(r'^\[model_providers\.', line):
+        # 检查是否是目标节
+        if f'model_providers.{new_section}' in line:
+            new_lines.append(line)   # 保留节头
+            i += 1
+            # 更新节内的 base_url 和 name
+            while i < len(lines) and not re.match(r'^\[', lines[i]):
+                l = lines[i]
+                if re.match(r'^\s*base_url\s*=', l):
+                    new_lines.append(f'base_url = "{new_base_url}"\n')
+                elif re.match(r'^\s*name\s*=', l):
+                    new_lines.append(f'name = "{new_name}"\n')
+                else:
+                    new_lines.append(l)
+                i += 1
+            section_found = True
+            continue
+        else:
+            # 其他供应商节，原样保留
+            new_lines.append(line)
+            i += 1
+            continue
+
+    # 默认行
+    new_lines.append(line)
+    i += 1
+
+# 如果顶层 model_provider 没有被修改（文件中不存在该行），则添加
+if not provider_modified:
+    new_lines.insert(0, f'model_provider = "{new_provider}"\n')
+
+# 如果目标供应商节不存在，则追加
+if not section_found:
+    new_lines.append(f'\n[model_providers.{new_section}]\n')
+    new_lines.append(f'base_url = "{new_base_url}"\n')
+    new_lines.append(f'name = "{new_name}"\n')
+    new_lines.append('requires_openai_auth = true\n')
+    new_lines.append('wire_api = "responses"\n')
+
+# 写回文件
+with open("$TMP_CONFIG", "w") as f:
+    f.writelines(new_lines)
+
+print("config.toml 修改完成")
+EOF
+
+# ========== 修改 auth.json ==========
+echo ">>> 修改 auth.json ..."
 if command -v jq &> /dev/null; then
-    echo ">>> 使用 jq 修改 $AUTH_FILE"
-    jq --arg key "$NEW_API_KEY" '.OPENAI_API_KEY = $key' "$TMP_AUTH" > "${TMP_AUTH}.jqtmp"
-    mv "${TMP_AUTH}.jqtmp" "$TMP_AUTH"
+    jq --arg key "$NEW_API_KEY" '.OPENAI_API_KEY = $key' "$TMP_AUTH" > "${TMP_AUTH}.new"
+    mv "${TMP_AUTH}.new" "$TMP_AUTH"
 else
-    echo ">>> 警告：jq 未安装，使用 sed 进行简单替换（可能不严谨）"
-    # 此方法假设 JSON 格式为 "OPENAI_API_KEY": "旧值"
-    sed -i "s|\"OPENAI_API_KEY\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"OPENAI_API_KEY\": \"$NEW_API_KEY\"|" "$TMP_AUTH"
+    # 使用 Python 作为后备（更可靠）
+    python3 << EOF
+import json
+with open("$TMP_AUTH", "r") as f:
+    data = json.load(f)
+data["OPENAI_API_KEY"] = "$NEW_API_KEY"
+with open("$TMP_AUTH", "w") as f:
+    json.dump(data, f, indent=2)
+EOF
 fi
 
-# 4. 将修改后的文件复制回容器
-echo ">>> 复制修改后的 $CONFIG_FILE 回容器..."
+# 复制回容器
+echo ">>> 将修改后的文件复制回容器..."
 docker cp "$TMP_CONFIG" "$CONTAINER_NAME:$CONTAINER_CONFIG_PATH"
-echo ">>> 复制修改后的 $AUTH_FILE 回容器..."
 docker cp "$TMP_AUTH" "$CONTAINER_NAME:$CONTAINER_AUTH_PATH"
 
-# 5. 验证（可选）: 显示修改后的内容片段
-echo ">>> 修改完成。新配置摘要："
-echo "--- config.toml base_url ---"
-grep "^[[:space:]]*base_url" "$TMP_CONFIG" || echo "未找到 base_url 行"
-echo "--- auth.json OPENAI_API_KEY ---"
-grep "OPENAI_API_KEY" "$TMP_AUTH" || echo "未找到 OPENAI_API_KEY 字段"
+# 显示修改后相关行
+echo ">>> 修改完成。关键配置摘要："
+grep -E "^model_provider" "$TMP_CONFIG" || true
+grep -A3 "\[model_providers\.$SECTION\]" "$TMP_CONFIG" || true
+grep -B1 -A1 "preferred_auth_method" "$TMP_CONFIG" | head -5 || true
+grep "OPENAI_API_KEY" "$TMP_AUTH" || true
 
-# 清理会在 exit 时由 trap 自动执行
 echo ">>> 脚本执行成功。"

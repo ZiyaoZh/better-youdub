@@ -208,15 +208,20 @@ export YOUDUB_TTS_ASR_LANGUAGE=zh
 export YOUDUB_TTS_ASR_INITIAL_PROMPT=以下是普通话的句子。
 ```
 
-`subtitle` 读取 `translation.json` 和 `audio_tts.transcript.json`，写出：
+`subtitle` 读取 `translation.json`、`audio_tts.transcript.json`，并在存在时读取
+`audio_tts.timings.json`，写出：
 
 - `subtitles.segments.json`
 - `subtitles.srt`
 
 字幕文本始终以 `translation.json` 中的标准译文为准；TTS-ASR 只提供合成语音的实
-际时间。短句时间优先使用 WhisperX align 的词级时间窗口，并通过文本相似度和字
-符级映射修正 ASR 与标准译文之间的小差异。只有当 ASR 缺少可用词级时间时，才退
-化为句内按比例分配时间。
+际时间。字幕步骤会把标准译文和 ASR words 展开成全局无标点字符流，做 NFKC、
+简繁归一化和单调字符映射，再把标准译文短句投影到 WhisperX align 的词级
+`start`/`end`。ASR segment 边界和标点不再作为硬边界，因此一个无标点 ASR 长段可
+以映射多个标准译文句子。`subtitles.segments.json` 会记录 `timing_source`、
+`alignment_confidence` 和 fallback 原因；正常主路径是 `global_asr_words`，缺口
+才会降级为 `neighbor_interpolated_words`、`tts_timing_proportional` 或最终的
+`proportional_fallback`。
 
 默认 Demucs 模型是 `htdemucs_ft`。默认 Demucs segment 长度是 6 秒，低于
 `htdemucs_ft` 的 7.8 秒上限。
