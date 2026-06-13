@@ -5,10 +5,11 @@ services:
       dockerfile: docker/app.gpu.Dockerfile
     image: youdub-linux:gpu
     working_dir: /app
-    user: "${YOUDUB_UID:-1064}:${YOUDUB_GID:-1065}"
     gpus: all
     environment:
       PYTHONPATH: /app/src
+      YOUDUB_UID: ${YOUDUB_UID:-1064}
+      YOUDUB_GID: ${YOUDUB_GID:-1065}
       YOUDUB_ROOT: /data/videos
       YOUDUB_TASKS_PATH: /data/tasks/tasks.json
       YOUDUB_LOG_DIR: /data/logs
@@ -16,7 +17,7 @@ services:
       YOUDUB_CONFIG_PATH: /data/config/youdub.json
       YOUDUB_COOKIES_PATH: /data/cookies/cookies.txt
       YOUDUB_YTDLP_PROXY: ${YOUDUB_YTDLP_PROXY:-}
-      YOUDUB_DOWNLOAD_MAX_HEIGHT: ${YOUDUB_DOWNLOAD_MAX_HEIGHT:-1080}
+      YOUDUB_DOWNLOAD_MAX_HEIGHT: ${YOUDUB_DOWNLOAD_MAX_HEIGHT:-}
       HF_HOME: /cache/huggingface
       TORCH_HOME: /cache/torch
       HOME: /tmp
@@ -87,6 +88,8 @@ services:
       - ./models:/models
       - ./data/cache/huggingface:/cache/huggingface
       - ./data/cache/torch:/cache/torch
+    ports:
+      - "${YOUDUB_WEB_PORT:-49173}:8000"
     deploy:
       resources:
         reservations:
@@ -94,4 +97,4 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    command: ["scripts/check_gpu.sh"]
+    command: ["uvicorn", "youdub.web:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>YouDub</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>YouDub</h1>
+          <p id="runtimeLine">Loading runtime</p>
+        </div>
+        <div class="topbar-actions">
+          <button id="refreshButton" class="icon-button" title="刷新" type="button">↻</button>
+          <button id="settingsButton" class="button secondary" type="button">设置</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="panel create-panel">
+          <div class="panel-head">
+            <h2>新建任务</h2>
+          </div>
+          <div class="tabs" role="tablist">
+            <button class="tab active" data-create-tab="url" type="button">URL</button>
+            <button class="tab" data-create-tab="local" type="button">本地路径</button>
+            <button class="tab" data-create-tab="upload" type="button">上传</button>
+          </div>
+
+          <form id="urlForm" class="create-form">
+            <label>
+              <span>视频 URL</span>
+              <input id="urlInput" name="url" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off" />
+            </label>
+            <div class="form-row">
+              <label class="checkbox-line">
+                <input id="urlUseCookies" type="checkbox" checked />
+                <span>使用已保存 cookies</span>
+              </label>
+              <label class="checkbox-line">
+                <input id="urlForce" type="checkbox" />
+                <span>重新下载</span>
+              </label>
+            </div>
+            <button class="button primary" type="submit">下载并创建</button>
+          </form>
+
+          <form id="localForm" class="create-form hidden">
+            <label>
+              <span>媒体文件路径</span>
+              <input id="localSourceInput" name="source" placeholder="/workspace/data/samples/6o68Fg2-bhM.mp4" />
+            </label>
+            <label>
+              <span>标题</span>
+              <input id="localTitleInput" name="title" placeholder="可选" />
+            </label>
+            <button class="button primary" type="submit">创建任务</button>
+          </form>
+
+          <form id="uploadForm" class="create-form hidden">
+            <label>
+              <span>视频文件</span>
+              <input id="uploadFileInput" name="file" type="file" accept="video/*,.mp4,.mov,.m4v,.mkv,.webm,.avi,.flv,.wmv" />
+            </label>
+            <label>
+              <span>标题</span>
+              <input id="uploadTitleInput" name="title" placeholder="可选" />
+            </label>
+            <button class="button primary" type="submit">上传并创建</button>
+          </form>
+
+          <div id="createMessage" class="message"></div>
+        </section>
+
+        <section class="panel tasks-panel">
+          <div class="panel-head">
+            <h2>任务</h2>
+            <span id="taskCount" class="counter">0</span>
+          </div>
+          <div id="taskList" class="task-list"></div>
+        </section>
+
+        <section class="panel detail-panel">
+          <div id="emptyDetail" class="empty-state">
+            <h2>选择一个任务</h2>
+            <p>任务详情、步骤执行和产物会显示在这里。</p>
+          </div>
+          <div id="taskDetail" class="hidden">
+            <div class="detail-header">
+              <div>
+                <h2 id="detailTitle"></h2>
+                <p id="detailSource"></p>
+              </div>
+              <span id="detailStatus" class="status-badge"></span>
+            </div>
+
+            <div class="meta-grid">
+              <div><span>任务 ID</span><strong id="detailId"></strong></div>
+              <div><span>作者</span><strong id="detailAuthor"></strong></div>
+              <div><span>目录</span><strong id="detailFolder"></strong></div>
+              <div><span>更新时间</span><strong id="detailUpdated"></strong></div>
+            </div>
+
+            <div class="run-bar">
+              <button id="runAllButton" class="button primary" type="button">运行完整链路</button>
+              <button id="deleteButton" class="button danger" type="button">删除任务记录</button>
+            </div>
+
+            <div class="section-title">步骤</div>
+            <div id="stepsGrid" class="steps-grid"></div>
+
+            <div class="section-title">产物</div>
+            <div id="artifactList" class="artifact-list"></div>
+
+            <div id="videoPreview" class="video-preview hidden">
+              <video id="finalVideo" controls preload="metadata"></video>
+            </div>
+
+            <div id="detailError" class="error-box hidden"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <aside id="settingsDrawer" class="drawer" aria-hidden="true">
+      <div class="drawer-backdrop" data-close-settings></div>
+      <div class="drawer-panel">
+        <div class="drawer-head">
+          <h2>设置</h2>
+          <button class="icon-button" data-close-settings type="button">×</button>
+        </div>
+        <form id="settingsForm" class="settings-form">
+          <label>
+            <span>YouTube cookies</span>
+            <textarea id="cookiesInput" rows="8" placeholder="粘贴 Netscape 格式 cookies.txt 内容。已保存时不会回显明文。"></textarea>
+          </label>
+          <div class="settings-note" id="cookieInfo"></div>
+          <label>
+            <span>yt-dlp 代理</span>
+            <input id="proxyInput" placeholder="http://127.0.0.1:7890" />
+          </label>
+          <label>
+            <span>最大下载高度（0 为不限制）</span>
+            <input id="maxHeightInput" type="number" min="0" step="1" placeholder="0" />
+          </label>
+          <label>
+            <span>OpenAI Base URL</span>
+            <input id="openaiBaseInput" placeholder="https://api.openai.com/v1" />
+          </label>
+          <label>
+            <span>OpenAI API Key</span>
+            <input id="openaiKeyInput" type="password" placeholder="已保存时显示 ********" />
+          </label>
+          <label>
+            <span>模型</span>
+            <input id="openaiModelInput" placeholder="gpt-4o-mini" />
+          </label>
+          <button class="button primary" type="submit">保存设置</button>
+          <div id="settingsMessage" class="message"></div>
+        </form>
+      </div>
+    </aside>
+
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

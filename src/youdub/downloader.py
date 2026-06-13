@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
+from functools import lru_cache
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Protocol
@@ -14,15 +18,17 @@ from .ingest import (
     source_key_from_download_info,
     task_folder_from_download_info,
 )
+from .locking import TaskLock
 
 DOWNLOAD_VIDEO_NAME = "download.mp4"
 THUMBNAIL_EXTENSIONS = (".webp", ".jpg", ".jpeg", ".png")
 
-FORMAT_CANDIDATES = (
-    "bestvideo[height<=1080]+bestaudio/best",
+UNLIMITED_FORMAT_CANDIDATES: tuple[str | None, ...] = (
+    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
     "bestvideo+bestaudio/best",
     "bv*+ba/b",
-    "best",
+    "best[ext=mp4]/best",
+    None,
 )
 
 DEFAULT_USER_AGENT = (
@@ -40,7 +46,7 @@ class YoutubeDLFactory(Protocol):
 class DownloadConfig:
     cookies_path: Path | None = None
     proxy: str | None = None
-    max_height: int = 1080
+    max_height: int = 0
     force: bool = False
     use_cookies: bool = True
     youtube_dl_factory: YoutubeDLFactory | None = None
@@ -64,31 +70,37 @@ def download_url_to_artifacts(url: str, root: Path, config: DownloadConfig | Non
     if urlparse(url).scheme.lower() not in {"http", "https"}:
         raise ValueError("Only http:// and https:// video URLs are supported")
 
-    info = _extract_info(url, config)
-    sanitized_info = _sanitize_info(info, config)
-    source_key = source_key_from_download_info(sanitized_info)
-    task_dir = task_folder_from_download_info(sanitized_info, root)
-    task_dir.mkdir(parents=True, exist_ok=True)
+    download_config, cookie_snapshot = _config_with_cookie_snapshot(config)
+    try:
+        info = _extract_info(url, download_config)
+        sanitized_info = _sanitize_info(info, download_config)
+        source_key = source_key_from_download_info(sanitized_info)
+        task_dir = task_folder_from_download_info(sanitized_info, root)
+        task_dir.mkdir(parents=True, exist_ok=True)
 
-    info_path = task_dir / DOWNLOAD_INFO_NAME
-    _write_json(info_path, sanitized_info)
+        with TaskLock(task_dir, "download-url"):
+            info_path = task_dir / DOWNLOAD_INFO_NAME
+            _write_json(info_path, sanitized_info)
 
-    media_path = task_dir / DOWNLOAD_VIDEO_NAME
-    if config.force or not _has_nonempty_file(media_path):
-        _download_media(url, task_dir, media_path, config)
+            media_path = task_dir / DOWNLOAD_VIDEO_NAME
+            if download_config.force or not _has_nonempty_file(media_path):
+                _download_media(url, task_dir, media_path, download_config)
 
-    if not _has_nonempty_file(media_path):
-        raise RuntimeError(f"yt-dlp finished without producing {media_path}")
+            if not _has_nonempty_file(media_path):
+                raise RuntimeError(f"yt-dlp finished without producing {media_path}")
 
-    cover_path = _find_download_cover(task_dir)
-    return DownloadResult(
-        task_dir=task_dir,
-        info_path=info_path,
-        media_path=media_path,
-        cover_path=cover_path,
-        info=sanitized_info,
-        source_key=source_key,
-    )
+        cover_path = _find_download_cover(task_dir)
+        return DownloadResult(
+            task_dir=task_dir,
+            info_path=info_path,
+            media_path=media_path,
+            cover_path=cover_path,
+            info=sanitized_info,
+            source_key=source_key,
+        )
+    finally:
+        if cookie_snapshot is not None:
+            cookie_snapshot.unlink(missing_ok=True)
 
 
 def ytdlp_base_options(config: DownloadConfig) -> dict[str, Any]:
@@ -96,9 +108,14 @@ def ytdlp_base_options(config: DownloadConfig) -> dict[str, Any]:
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
-        "js_runtimes": {"node": {}},
+        "remote_components": ["ejs:github"],
+        "extractor_args": {"youtube": {"player_js_variant": ["main"]}},
         "http_headers": {"User-Agent": DEFAULT_USER_AGENT},
     }
+
+    js_runtimes = supported_js_runtimes()
+    if js_runtimes:
+        options["js_runtimes"] = js_runtimes
 
     cookie_path = _usable_cookie_path(config)
     if cookie_path is not None:
@@ -111,15 +128,60 @@ def ytdlp_base_options(config: DownloadConfig) -> dict[str, Any]:
     return options
 
 
-def format_candidates(max_height: int) -> tuple[str, ...]:
+@lru_cache(maxsize=1)
+def supported_js_runtimes() -> dict[str, dict[str, str]]:
+    runtimes: dict[str, dict[str, str]] = {}
+
+    deno_path = shutil.which("deno")
+    if deno_path and _runtime_version_at_least(deno_path, "--version", r"deno\s+(\d+)\.", 2):
+        runtimes["deno"] = {"path": deno_path}
+
+    node_path = shutil.which("node")
+    if node_path and _runtime_version_at_least(node_path, "--version", r"v?(\d+)\.", 22):
+        runtimes["node"] = {"path": node_path}
+
+    return runtimes
+
+
+def _runtime_version_at_least(command: str, version_arg: str, pattern: str, minimum_major: int) -> bool:
+    try:
+        result = subprocess.run(
+            [command, version_arg],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except OSError:
+        return False
+    if result.returncode != 0:
+        return False
+    version_output = f"{result.stdout}\n{result.stderr}"
+    match = re.search(pattern, version_output)
+    if match is None:
+        return False
+    return int(match.group(1)) >= minimum_major
+
+
+def format_candidates(max_height: int) -> tuple[str | None, ...]:
     if max_height <= 0:
-        return FORMAT_CANDIDATES
+        return UNLIMITED_FORMAT_CANDIDATES
     return (
-        f"bestvideo[height<={max_height}]+bestaudio/best",
-        "bestvideo+bestaudio/best",
-        "bv*+ba/b",
-        "best",
+        (
+            f"bestvideo[ext=mp4][height<={max_height}]+bestaudio[ext=m4a]/"
+            f"best[ext=mp4][height<={max_height}]/best[height<={max_height}]/best"
+        ),
+        f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best",
+        f"bv*[height<={max_height}]+ba/b[height<={max_height}]/b",
+        "best[ext=mp4]/best",
+        None,
     )
+
+
+def format_sort(max_height: int) -> list[str]:
+    if max_height <= 0:
+        return ["ext:mp4:m4a"]
+    return [f"res:{max_height}", "ext:mp4:m4a"]
 
 
 def _extract_info(url: str, config: DownloadConfig) -> dict[str, Any]:
@@ -139,15 +201,14 @@ def _sanitize_info(info: dict[str, Any], config: DownloadConfig) -> dict[str, An
 
 
 def _download_media(url: str, task_dir: Path, media_path: Path, config: DownloadConfig) -> None:
-    staging_dir = task_dir / ".download-staging"
     last_error: Exception | None = None
-    try:
-        for format_selector in format_candidates(config.max_height):
-            _reset_staging_dir(staging_dir)
+    for format_selector in format_candidates(config.max_height):
+        staging_dir = _create_staging_dir(task_dir)
+        try:
             staged_media = staging_dir / DOWNLOAD_VIDEO_NAME
             options = {
                 **ytdlp_base_options(config),
-                "format": format_selector,
+                "format_sort": format_sort(config.max_height),
                 "merge_output_format": "mp4",
                 "outtmpl": str(staging_dir / "download.%(ext)s"),
                 "writethumbnail": True,
@@ -155,6 +216,8 @@ def _download_media(url: str, task_dir: Path, media_path: Path, config: Download
                 "fragment_retries": 10,
                 "overwrites": True,
             }
+            if format_selector is not None:
+                options["format"] = format_selector
             try:
                 with _youtube_dl_factory(config)(options) as ydl:
                     ydl.download([url])
@@ -168,8 +231,8 @@ def _download_media(url: str, task_dir: Path, media_path: Path, config: Download
                 last_error = exc
                 if not _is_format_unavailable(exc):
                     continue
-    finally:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
     if last_error is not None:
         raise last_error
 
@@ -201,9 +264,9 @@ def _find_download_cover(task_dir: Path) -> Path | None:
     return None
 
 
-def _reset_staging_dir(staging_dir: Path) -> None:
-    shutil.rmtree(staging_dir, ignore_errors=True)
-    staging_dir.mkdir(parents=True)
+def _create_staging_dir(task_dir: Path) -> Path:
+    task_dir.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=".download-staging-", dir=task_dir))
 
 
 def _publish_staged_cover(staging_dir: Path, task_dir: Path) -> None:
@@ -225,6 +288,32 @@ def _usable_cookie_path(config: DownloadConfig) -> Path | None:
     if path.stat().st_size <= 0:
         return None
     return path
+
+
+def _config_with_cookie_snapshot(config: DownloadConfig) -> tuple[DownloadConfig, Path | None]:
+    cookie_path = _usable_cookie_path(config)
+    if cookie_path is None:
+        return config, None
+
+    with tempfile.NamedTemporaryFile(
+        "wb",
+        prefix="youdub-cookies-",
+        suffix=".txt",
+        delete=False,
+    ) as temp:
+        with cookie_path.open("rb") as source:
+            shutil.copyfileobj(source, temp)
+        temp_path = Path(temp.name)
+
+    snapshot_config = DownloadConfig(
+        cookies_path=temp_path,
+        proxy=config.proxy,
+        max_height=config.max_height,
+        force=config.force,
+        use_cookies=config.use_cookies,
+        youtube_dl_factory=config.youtube_dl_factory,
+    )
+    return snapshot_config, temp_path
 
 
 def _clean_proxy(proxy: str | None) -> str | None:

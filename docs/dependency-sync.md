@@ -122,12 +122,17 @@ WMI==1.5.1; platform_system == "Windows"
   GPU 依赖文件不再重复声明它。
 - `bilibili-api-python==17.4.1`：用于可选的 Bilibili 发布适配器；真实上传仍需
   环境变量提供账号凭证，并要求显式确认。
-- `nodejs`：提供 yt-dlp 可用的 JavaScript runtime，用于提升部分站点解析稳定性。
+- `deno`：提供 yt-dlp EJS 可用的 JavaScript runtime。YouTube n challenge
+  solving 需要支持的 JS runtime；镜像固定安装 Deno 2.5.6，并通过
+  `remote_components=["ejs:github"]` 使用 yt-dlp EJS solver 分发。
 - `libass9`：提供 FFmpeg `subtitles` / `ass` filter 运行时依赖；GPU 镜像会将
   `/opt/conda/bin/ffmpeg` 和 `/opt/conda/bin/ffprobe` 指向 apt 安装的系统版本，
   避免 PyTorch 基础镜像中的 conda FFmpeg 缺少 libass 字幕 filter。
 - `fontconfig`、`fonts-noto-cjk`：用于 FFmpeg `subtitles` filter 稳定渲染中文
   字幕，避免最终合成视频出现字体缺失或乱码。
+- `gosu`：Docker entrypoint 用于先以 root 修正 bind mount 目录归属，再降权为
+  `YOUDUB_UID:YOUDUB_GID` 运行应用，避免 cookies、任务文件和视频产物写入时出现
+  `Permission denied` 或 root-owned 文件。
 
 示例：
 
@@ -137,7 +142,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libass9 \
     fontconfig \
     fonts-noto-cjk \
-    nodejs \
+    gosu \
+    curl \
+    unzip \
     git \
     build-essential \
     python3-dev \
@@ -171,7 +178,7 @@ python -c "import yt_dlp, openai, librosa, soundfile, audiostretchy"
 python -c "import bilibili_api"
 python -c "import whisperx"
 python -c "import demucs"
-node --version
+deno --version
 ffmpeg -hide_banner -filters | grep -q ' subtitles '
 fc-match "Noto Sans CJK SC"
 ```

@@ -154,7 +154,7 @@ YOUDUB_ROOT=/data/videos
 YOUDUB_TASKS_PATH=/data/tasks/tasks.json
 YOUDUB_COOKIES_PATH=/data/cookies/cookies.txt
 YOUDUB_YTDLP_PROXY=
-YOUDUB_DOWNLOAD_MAX_HEIGHT=1080
+YOUDUB_DOWNLOAD_MAX_HEIGHT=0
 YOUDUB_MODELS_DIR=/models
 YOUDUB_LOG_DIR=/data/logs
 OPENAI_API_KEY=
@@ -234,6 +234,10 @@ BILI_BILI_JCT=
   Netscape 格式 cookies 文件、可选代理和最大下载高度，生成 `download.mp4`、
   `download.info.json` 和下载封面。不会读取浏览器 cookies、自动登录、自动刷新
   cookies 或批量抓取。
+- 同一任务目录内的 URL 下载和 `run-task` 步骤会通过 `.task.lock` 非阻塞互斥。
+  重复启动同一任务的下载、单步或完整链路会被拒绝；Web API 返回 `409 Task is
+  already running`。该锁用于当前单实例/共享卷部署下保护任务产物，不替代后续
+  多 worker 队列和数据库事务设计。
 - FFmpeg 音频提取：生成 `audio.wav`
 - Demucs 步骤入口：`run-task --step separate-audio` 已接入；当前基础开发环境若没有 `demucs` 可执行文件，会明确失败并把任务步骤标记为 `failed`
 - 翻译步骤入口：`run-task --step translate` 已接入；模型调用可通过

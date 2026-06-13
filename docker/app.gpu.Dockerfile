@@ -11,21 +11,31 @@ ENV XDG_CACHE_HOME=/tmp/youdub-cache/xdg
 ENV TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
+ARG DENO_VERSION=2.5.6
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
     tzdata \
     ffmpeg \
     libass9 \
     fontconfig \
     fonts-noto-cjk \
-    nodejs \
+    gosu \
     git \
     build-essential \
     python3-dev \
     libsndfile1 \
     libgl1 \
     libglib2.0-0 \
+    unzip \
   && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL -o /tmp/deno.zip "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" \
+  && unzip -q /tmp/deno.zip -d /usr/local/bin \
+  && rm /tmp/deno.zip \
+  && chmod +x /usr/local/bin/deno \
+  && deno --version
 
 RUN ln -sf /usr/bin/ffmpeg /opt/conda/bin/ffmpeg \
   && ln -sf /usr/bin/ffprobe /opt/conda/bin/ffprobe \
@@ -56,4 +66,5 @@ RUN chmod +x scripts/*.sh
 
 RUN pip install --no-cache-dir -e .
 
-CMD ["youdub", "doctor"]
+ENTRYPOINT ["scripts/docker-entrypoint.sh"]
+CMD ["uvicorn", "youdub.web:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -143,11 +143,14 @@ YOUDUB_ROOT=/data/videos
 YOUDUB_TASKS_PATH=/data/tasks/tasks.json
 YOUDUB_COOKIES_PATH=/data/cookies/cookies.txt
 YOUDUB_YTDLP_PROXY=
-YOUDUB_DOWNLOAD_MAX_HEIGHT=1080
+YOUDUB_DOWNLOAD_MAX_HEIGHT=0
 YOUDUB_MODELS_DIR=/models
 HF_HOME=/cache/huggingface
 TORCH_HOME=/cache/torch
 ```
+
+`YOUDUB_DOWNLOAD_MAX_HEIGHT=0` 表示不限制下载高度。Compose 默认不注入具体高度，
+以便 Web UI 写入 `/data/config/youdub.json` 的设置可以生效。
 
 ## Compose 服务建议
 

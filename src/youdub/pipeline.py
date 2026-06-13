@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .locking import TaskLock
 from .media import extract_audio, separate_audio
 from .models import PipelineStep, StepStatus, Task, TaskStatus
 from .publishing import (
@@ -40,7 +41,11 @@ class PipelineRunner:
         self.publish_config = publish_config
         self.bilibili_publish_config = bilibili_publish_config
 
-    def run_step(self, task: Task, step: PipelineStep) -> Task:
+    def run_step(self, task: Task, step: PipelineStep, task_lock: TaskLock | None = None) -> Task:
+        if task_lock is None:
+            with TaskLock(task.folder, f"run-step:{step.value}") as lock:
+                return self.run_step(task, step, task_lock=lock)
+
         task.status = TaskStatus.RUNNING
         task.error = None
         task.mark_step(step, StepStatus.RUNNING)

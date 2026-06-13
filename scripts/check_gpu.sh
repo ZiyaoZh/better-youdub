@@ -78,11 +78,14 @@ print(f"voxcpm={voxcpm.__file__}")
 print(f"whisperx={whisperx.__file__}")
 print(f"diarization_pipeline={DiarizationPipeline.__name__}")
 PY
+if command -v deno >/dev/null; then
+  echo "[check-gpu] deno=$(deno --version | head -n 1)"
+else
+  echo "[check-gpu] deno is missing; yt-dlp EJS challenge solving requires a supported JavaScript runtime" >&2
+  exit 1
+fi
 if command -v node >/dev/null; then
   echo "[check-gpu] node=$(node --version)"
-else
-  echo "[check-gpu] node is missing; yt-dlp may be less reliable for sites requiring JavaScript" >&2
-  exit 1
 fi
 echo "[check-gpu] running youdub doctor"
 "$PYTHON_BIN" -m youdub.cli doctor

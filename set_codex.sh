@@ -38,7 +38,7 @@ case "$VENDOR" in
     anyrouter)
         PROVIDER_VALUE="anyrouter"
         SECTION="anyrouter"
-        BASE_URL="https://anyrouter.top/v1"
+        BASE_URL="https://a-ocnfniawgw.cn-shanghai.fcapp.run/v1"
         NAME="Any Router"
         ;;
     rawchat)

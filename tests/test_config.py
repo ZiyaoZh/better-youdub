@@ -78,3 +78,33 @@ def test_app_config_reads_config_path_from_env(tmp_path: Path, monkeypatch) -> N
 
     assert config.config_path == config_path
     assert config.secrets.huggingface.token == "hf_file"
+
+
+def test_app_config_download_max_height_defaults_to_unlimited(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config" / "youdub.json"
+    config_path.parent.mkdir()
+    config_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("YOUDUB_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("YOUDUB_DOWNLOAD_MAX_HEIGHT", "")
+
+    config = AppConfig.from_env()
+
+    assert config.download_max_height == 0
+
+
+def test_app_config_download_max_height_file_and_env_precedence(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config" / "youdub.json"
+    config_path.parent.mkdir()
+    config_path.write_text(json.dumps({"ytdlp": {"max_height": 0}}), encoding="utf-8")
+    monkeypatch.setenv("YOUDUB_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("YOUDUB_DOWNLOAD_MAX_HEIGHT", "")
+
+    config = AppConfig.from_env()
+
+    assert config.download_max_height == 0
+
+    monkeypatch.setenv("YOUDUB_DOWNLOAD_MAX_HEIGHT", "720")
+
+    config = AppConfig.from_env()
+
+    assert config.download_max_height == 720

@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from youdub import pipeline
+from youdub.locking import TaskLock, TaskLockBusy
 from youdub.models import PipelineStep, StepStatus, Task, TaskStatus
 from youdub.publishing import BilibiliPublishConfig, PublishPackageConfig
 from youdub.synthesis import SynthesisConfig
@@ -32,6 +35,25 @@ def test_pipeline_marks_separate_audio_success(tmp_path: Path, monkeypatch) -> N
     assert result.steps[PipelineStep.SEPARATE_AUDIO.value] == StepStatus.SUCCESS
     assert (tmp_path / "audio_vocals.wav").exists()
     assert (tmp_path / "audio_instruments.wav").exists()
+
+
+def test_pipeline_refuses_to_run_when_task_lock_is_held(tmp_path: Path, monkeypatch) -> None:
+    task = Task(id="abc123", title="demo", source="/tmp/demo.mp4", folder=tmp_path)
+    called = False
+
+    def fake_extract_audio(input_path: Path, output_path: Path) -> Path:
+        nonlocal called
+        called = True
+        output_path.write_bytes(b"audio")
+        return output_path
+
+    monkeypatch.setattr(pipeline, "extract_audio", fake_extract_audio)
+
+    with TaskLock(tmp_path, "existing"):
+        with pytest.raises(TaskLockBusy):
+            PipelineRunner().run_step(task, PipelineStep.EXTRACT_AUDIO)
+
+    assert called is False
 
 
 def test_pipeline_marks_transcribe_success(tmp_path: Path, monkeypatch) -> None:

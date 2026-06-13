@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .config import AppConfig
 from .constants import TEST_VIDEO_URL
-from .downloader import DownloadConfig, download_url_to_artifacts
+from .downloader import DownloadConfig, download_url_to_artifacts, supported_js_runtimes
 from .ingest import create_task_from_download_artifacts, create_task_from_local_media
 from .media import require_binary
 from .models import PipelineStep
@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_url_task.add_argument(
         "--max-height",
         type=int,
-        help="Preferred maximum video height for the first yt-dlp format candidate",
+        help="Preferred maximum video height; use 0 for no height limit",
     )
     create_url_task.add_argument(
         "--force-download",
@@ -329,6 +329,7 @@ def cmd_doctor(config: AppConfig) -> int:
         "cookies_path": str(config.cookies_path) if config.cookies_path is not None else None,
         "cookies_configured": _existing_nonempty_file(config.cookies_path),
         "ytdlp_proxy_configured": config.ytdlp_proxy is not None,
+        "ytdlp_js_runtimes": sorted(supported_js_runtimes()),
         "download_max_height": config.download_max_height,
         "huggingface_token_configured": config.secrets.huggingface.token is not None,
         "openai_api_key_configured": config.secrets.openai.api_key is not None,

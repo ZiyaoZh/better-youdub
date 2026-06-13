@@ -16,6 +16,19 @@ def _clean(value: Any) -> str | None:
     return value or None
 
 
+def _int_or_default(value: Any, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return default
+        return int(cleaned)
+    raise ValueError(f"Expected integer config value, got {type(value).__name__}")
+
+
 def _load_json_object(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -93,6 +106,8 @@ class AppConfig:
     def from_env(cls) -> "AppConfig":
         root = Path(os.getenv("YOUDUB_ROOT", "/data/videos"))
         config_path = Path(os.getenv("YOUDUB_CONFIG_PATH", "/data/config/youdub.json"))
+        data = _load_json_object(config_path)
+        ytdlp = _section(data, "ytdlp")
         cookies_value = _clean(os.getenv("YOUDUB_COOKIES_PATH"))
         return cls(
             root=root,
@@ -101,8 +116,11 @@ class AppConfig:
             models_dir=Path(os.getenv("YOUDUB_MODELS_DIR", "/models")),
             config_path=config_path,
             cookies_path=Path(cookies_value) if cookies_value else None,
-            ytdlp_proxy=_clean(os.getenv("YOUDUB_YTDLP_PROXY")),
-            download_max_height=int(os.getenv("YOUDUB_DOWNLOAD_MAX_HEIGHT", "1080")),
+            ytdlp_proxy=_clean(os.getenv("YOUDUB_YTDLP_PROXY")) or _clean(ytdlp.get("proxy")),
+            download_max_height=_int_or_default(
+                _clean(os.getenv("YOUDUB_DOWNLOAD_MAX_HEIGHT")) or ytdlp.get("max_height"),
+                0,
+            ),
             secrets=SecretsConfig.from_file_and_env(config_path),
         )
 
