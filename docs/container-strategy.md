@@ -97,6 +97,7 @@ YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_SMO
 ```bash
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub doctor
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub create-download-task --source /data/samples/6o68Fg2-bhM.mp4 --info /data/samples/download.info.json --cover /data/samples/download.webp
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub create-url-task --url "https://www.youtube.com/watch?v=6o68Fg2-bhM" --cookies /data/cookies/cookies.txt
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step extract-audio
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step separate-audio
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step transcribe
@@ -141,6 +142,8 @@ conda FFmpeg 抢占 PATH 后缺少字幕 filter。
 YOUDUB_ROOT=/data/videos
 YOUDUB_TASKS_PATH=/data/tasks/tasks.json
 YOUDUB_COOKIES_PATH=/data/cookies/cookies.txt
+YOUDUB_YTDLP_PROXY=
+YOUDUB_DOWNLOAD_MAX_HEIGHT=1080
 YOUDUB_MODELS_DIR=/models
 HF_HOME=/cache/huggingface
 TORCH_HOME=/cache/torch

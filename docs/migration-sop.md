@@ -8,7 +8,8 @@
 - 密钥、cookies、模型、视频产物不进入 Git 和镜像。
 - 涉及平台上传和视频搬运时，应确保内容授权、账号授权和平台规则合规。
 - 旧实现只作为功能参考；新项目不需要严格沿用旧代码组织、双虚拟环境、JSON 调度方式或 Windows 脚本。
-- 基础框架不实现自动抓取、反自动化绕过或 cookie 刷新。首版输入为本地视频文件。
+- 基础框架不实现自动抓取、反自动化绕过或 cookie 刷新。URL 输入仅支持用户显式
+  提供的单个视频 URL 和可选本地 cookies 文件。
 - 每新增或修改一个功能，都必须同步更新 README、SOP 和相关 smoke/验证命令。
 
 ## 文档与命令同步规则
@@ -23,7 +24,7 @@
 每次提交前至少执行：
 
 ```bash
-rg -n "run-task|create-download-task|YOUDUB_|OPENAI_|HF_READ_TOKEN|gpu_smoke|smoke.sh" README.md docs scripts compose*.yml
+rg -n "run-task|create-download-task|create-url-task|YOUDUB_|OPENAI_|HF_READ_TOKEN|gpu_smoke|smoke.sh" README.md docs scripts compose*.yml
 bash -n scripts/*.sh
 PYTHONPATH="$PWD/src" python3 -m pytest -q
 ```
@@ -71,7 +72,8 @@ https://www.youtube.com/watch?v=6o68Fg2-bhM
 - 自动化测试使用本地文件路径，例如 `data/samples/6o68Fg2-bhM.mp4`。
 - 当前 sample 目录还保留了 `data/samples/download.info.json` 和
   `data/samples/download.webp`，用于模拟后续下载阶段的元信息和封面产物。
-- 不在基础框架中实现自动下载该 URL 的逻辑。
+- 默认自动化测试不下载该 URL；真实 URL 下载需要用户显式运行 `create-url-task`
+  或把 URL 传给 smoke 脚本，并只处理有权下载、转换和发布的视频内容。
 
 ## 1. 新项目骨架
 
@@ -123,7 +125,7 @@ https://www.youtube.com/watch?v=6o68Fg2-bhM
 
 | 步骤 | 模块 | GPU | 网络 | 密钥 | 产物 | 首版是否迁移 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 输入/导入 | 新 ingest 接口 | 否 | 否 | 否 | `download.mp4`、`download.info.json`、`download.<ext>` | 是 |
+| 输入/导入 | 新 ingest/download 接口 | 否 | URL 下载需要 | cookies 可选本地文件 | `download.mp4`、`download.info.json`、`download.<ext>` | 是 |
 | Demucs | `step010_demucs_vr.py` | 推荐 | 否 | 否 | `audio_vocals.wav` | 是 |
 | WhisperX | `step020_whisperx.py` | 推荐 | 模型下载 | HF token 可选 | `transcript.json` | 是 |
 | 翻译 | `step030_translation.py` | 否 | 是 | OpenAI key | `summary.json`、`translation.context.json`、`translation.segments.json`、`translation.json` | 是 |
@@ -151,6 +153,8 @@ https://www.youtube.com/watch?v=6o68Fg2-bhM
 YOUDUB_ROOT=/data/videos
 YOUDUB_TASKS_PATH=/data/tasks/tasks.json
 YOUDUB_COOKIES_PATH=/data/cookies/cookies.txt
+YOUDUB_YTDLP_PROXY=
+YOUDUB_DOWNLOAD_MAX_HEIGHT=1080
 YOUDUB_MODELS_DIR=/models
 YOUDUB_LOG_DIR=/data/logs
 OPENAI_API_KEY=
@@ -226,6 +230,10 @@ BILI_BILI_JCT=
 - 本地导入：生成任务目录和 `download.mp4`
 - 占位下载导入：`create-download-task` 会稳定复用 `download.info.json` 对应的任务目
   录，并保留 `download.mp4`、`download.info.json`、`download.webp`
+- URL 下载：`create-url-task` 使用 `yt-dlp` 下载单个视频 URL，支持本地
+  Netscape 格式 cookies 文件、可选代理和最大下载高度，生成 `download.mp4`、
+  `download.info.json` 和下载封面。不会读取浏览器 cookies、自动登录、自动刷新
+  cookies 或批量抓取。
 - FFmpeg 音频提取：生成 `audio.wav`
 - Demucs 步骤入口：`run-task --step separate-audio` 已接入；当前基础开发环境若没有 `demucs` 可执行文件，会明确失败并把任务步骤标记为 `failed`
 - 翻译步骤入口：`run-task --step translate` 已接入；模型调用可通过
@@ -296,6 +304,7 @@ YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_WHI
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_SMOKE_TRANSCRIBE_TTS=1 YOUDUB_SMOKE_SUBTITLE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_SMOKE_TRANSCRIBE_TTS=1 YOUDUB_SMOKE_SUBTITLE=1 YOUDUB_SMOKE_SYNTHESIZE=1 YOUDUB_SMOKE_PREPARE_PUBLISH=1 YOUDUB_SMOKE_PUBLISH_BILIBILI=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 scripts/gpu_smoke.sh /data/samples/demo.mp4 /data/samples/download.info.json /data/samples/download.webp
+scripts/gpu_smoke.sh "https://www.youtube.com/watch?v=6o68Fg2-bhM" /data/cookies/cookies.txt
 ```
 
 容器内单步调试：
@@ -303,6 +312,7 @@ scripts/gpu_smoke.sh /data/samples/demo.mp4 /data/samples/download.info.json /da
 ```bash
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub doctor
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub create-download-task --source /data/samples/6o68Fg2-bhM.mp4 --info /data/samples/download.info.json --cover /data/samples/download.webp
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub create-url-task --url "https://www.youtube.com/watch?v=6o68Fg2-bhM" --cookies /data/cookies/cookies.txt
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step extract-audio
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step separate-audio
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step transcribe

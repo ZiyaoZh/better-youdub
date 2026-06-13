@@ -118,8 +118,11 @@ WMI==1.5.1; platform_system == "Windows"
 
 当前新增依赖说明：
 
+- `yt-dlp`：基础运行依赖，用于 `create-url-task` 下载用户显式提供的单个视频 URL。
+  GPU 依赖文件不再重复声明它。
 - `bilibili-api-python==17.4.1`：用于可选的 Bilibili 发布适配器；真实上传仍需
   环境变量提供账号凭证，并要求显式确认。
+- `nodejs`：提供 yt-dlp 可用的 JavaScript runtime，用于提升部分站点解析稳定性。
 - `libass9`：提供 FFmpeg `subtitles` / `ass` filter 运行时依赖；GPU 镜像会将
   `/opt/conda/bin/ffmpeg` 和 `/opt/conda/bin/ffprobe` 指向 apt 安装的系统版本，
   避免 PyTorch 基础镜像中的 conda FFmpeg 缺少 libass 字幕 filter。
@@ -134,6 +137,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libass9 \
     fontconfig \
     fonts-noto-cjk \
+    nodejs \
     git \
     build-essential \
     python3-dev \
@@ -167,6 +171,7 @@ python -c "import yt_dlp, openai, librosa, soundfile, audiostretchy"
 python -c "import bilibili_api"
 python -c "import whisperx"
 python -c "import demucs"
+node --version
 ffmpeg -hide_banner -filters | grep -q ' subtitles '
 fc-match "Noto Sans CJK SC"
 ```
@@ -178,6 +183,7 @@ docker compose -f compose.gpu.yml config
 docker compose -f compose.gpu.yml build
 docker compose -f compose.gpu.yml run --rm youdub-gpu scripts/check_gpu.sh
 scripts/gpu_smoke.sh
+scripts/gpu_smoke.sh "https://www.youtube.com/watch?v=6o68Fg2-bhM" /data/cookies/cookies.txt
 ```
 
 需要完整重建依赖层时使用：

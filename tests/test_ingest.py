@@ -69,6 +69,36 @@ def test_create_task_from_download_artifacts_uses_stable_folder(tmp_path: Path) 
     assert second.id == task.id
 
 
+def test_create_task_from_download_artifacts_accepts_files_already_in_task_folder(tmp_path: Path) -> None:
+    info = {
+        "extractor": "youtube",
+        "id": "demo123",
+        "title": "Sample Title",
+        "uploader": "Sample Author",
+        "upload_date": "20240102",
+        "webpage_url": "https://example.test/watch?v=demo123",
+    }
+    task_dir = tmp_path / "videos" / "Sample Author" / "20240102 Sample Title"
+    task_dir.mkdir(parents=True)
+    source = task_dir / "download.mp4"
+    source.write_bytes(b"video")
+    info_path = task_dir / "download.info.json"
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+    cover_path = task_dir / "download.webp"
+    cover_path.write_bytes(b"cover")
+
+    task = create_task_from_download_artifacts(
+        source=source,
+        info_path=info_path,
+        root=tmp_path / "videos",
+        cover_path=cover_path,
+    )
+
+    assert task.folder == task_dir
+    assert source.read_bytes() == b"video"
+    assert cover_path.read_bytes() == b"cover"
+
+
 def test_task_folder_from_download_info_avoids_foreign_collision(tmp_path: Path) -> None:
     info = {
         "extractor": "youtube",

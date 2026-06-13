@@ -12,6 +12,7 @@ dependencies = [
   "opencc-python-reimplemented>=0.1.7",
   "openai>=1.30.0",
   "bilibili-api-python==17.4.1",
+  "yt-dlp",
 ]
 
 [project.optional-dependencies]

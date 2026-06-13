@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libass9 \
     fontconfig \
     fonts-noto-cjk \
+    nodejs \
     git \
     build-essential \
     python3-dev \

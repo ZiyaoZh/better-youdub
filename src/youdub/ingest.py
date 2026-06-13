@@ -64,9 +64,9 @@ def create_task_from_download_artifacts(
     task_folder.mkdir(parents=True, exist_ok=True)
 
     _copy_video_if_needed(source, task_folder / "download.mp4")
-    shutil.copy2(info_path, task_folder / DOWNLOAD_INFO_NAME)
+    _copy_file_if_different(info_path, task_folder / DOWNLOAD_INFO_NAME)
     if cover_path is not None:
-        shutil.copy2(cover_path, task_folder / f"download{cover_path.suffix.lower()}")
+        _copy_file_if_different(cover_path, task_folder / f"download{cover_path.suffix.lower()}")
 
     task = Task(
         id=stable_task_id(source_key),
@@ -164,6 +164,12 @@ def read_task_source_key(folder: Path) -> str | None:
 
 def _copy_video_if_needed(source: Path, target: Path) -> None:
     if target.exists():
+        return
+    shutil.copy2(source, target)
+
+
+def _copy_file_if_different(source: Path, target: Path) -> None:
+    if source.resolve() == target.resolve():
         return
     shutil.copy2(source, target)
 

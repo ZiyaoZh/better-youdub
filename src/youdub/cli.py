@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import AppConfig
 from .constants import TEST_VIDEO_URL
+from .downloader import DownloadConfig, download_url_to_artifacts
 from .ingest import create_task_from_download_artifacts, create_task_from_local_media
 from .media import require_binary
 from .models import PipelineStep
@@ -37,6 +38,36 @@ def build_parser() -> argparse.ArgumentParser:
     create_download_task.add_argument("--source", required=True, type=Path)
     create_download_task.add_argument("--info", required=True, type=Path)
     create_download_task.add_argument("--cover", type=Path)
+
+    create_url_task = subparsers.add_parser(
+        "create-url-task",
+        help="Download one URL with yt-dlp and create or reuse a task",
+    )
+    create_url_task.add_argument("--url", required=True)
+    create_url_task.add_argument(
+        "--cookies",
+        type=Path,
+        help="Optional Netscape cookies.txt path; defaults to YOUDUB_COOKIES_PATH",
+    )
+    create_url_task.add_argument(
+        "--no-cookies",
+        action="store_true",
+        help="Ignore YOUDUB_COOKIES_PATH and do not pass cookies to yt-dlp",
+    )
+    create_url_task.add_argument(
+        "--proxy",
+        help="Optional yt-dlp proxy URL; defaults to YOUDUB_YTDLP_PROXY",
+    )
+    create_url_task.add_argument(
+        "--max-height",
+        type=int,
+        help="Preferred maximum video height for the first yt-dlp format candidate",
+    )
+    create_url_task.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Download media again even if download.mp4 already exists",
+    )
 
     show_task = subparsers.add_parser("show-task", help="Show a task as JSON")
     show_task.add_argument("task_id")
@@ -295,6 +326,10 @@ def cmd_doctor(config: AppConfig) -> int:
         "log_dir": str(config.log_dir),
         "models_dir": str(config.models_dir),
         "config_path": str(config.config_path),
+        "cookies_path": str(config.cookies_path) if config.cookies_path is not None else None,
+        "cookies_configured": _existing_nonempty_file(config.cookies_path),
+        "ytdlp_proxy_configured": config.ytdlp_proxy is not None,
+        "download_max_height": config.download_max_height,
         "huggingface_token_configured": config.secrets.huggingface.token is not None,
         "openai_api_key_configured": config.secrets.openai.api_key is not None,
         "openai_base_url_configured": config.secrets.openai.base_url is not None,
@@ -324,6 +359,28 @@ def cmd_create_download_task(config: AppConfig, args: argparse.Namespace) -> int
         cover_path=args.cover,
     )
     task = store.upsert(task)
+    print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_create_url_task(config: AppConfig, args: argparse.Namespace) -> int:
+    config.ensure_dirs()
+    cookies_path = None if args.no_cookies else (args.cookies or config.cookies_path)
+    download_config = DownloadConfig(
+        cookies_path=cookies_path,
+        proxy=args.proxy if args.proxy is not None else config.ytdlp_proxy,
+        max_height=args.max_height if args.max_height is not None else config.download_max_height,
+        force=args.force_download,
+        use_cookies=not args.no_cookies,
+    )
+    result = download_url_to_artifacts(args.url, config.root, download_config)
+    task = create_task_from_download_artifacts(
+        source=result.media_path,
+        info_path=result.info_path,
+        root=config.root,
+        cover_path=result.cover_path,
+    )
+    task = TaskStore(config.tasks_path).upsert(task)
     print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
     return 0
 
@@ -446,6 +503,10 @@ def _bool_env(name: str, default: bool) -> bool:
     return value not in {"0", "false", "False"}
 
 
+def _existing_nonempty_file(path: Path | None) -> bool:
+    return path is not None and path.exists() and path.is_file() and path.stat().st_size > 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -458,6 +519,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_create_task(config, args)
         if args.command == "create-download-task":
             return cmd_create_download_task(config, args)
+        if args.command == "create-url-task":
+            return cmd_create_url_task(config, args)
         if args.command == "show-task":
             return cmd_show_task(config, args)
         if args.command == "run-task":

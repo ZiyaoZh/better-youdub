@@ -84,18 +84,25 @@ class AppConfig:
     log_dir: Path
     models_dir: Path
     config_path: Path
+    cookies_path: Path | None
+    ytdlp_proxy: str | None
+    download_max_height: int
     secrets: SecretsConfig
 
     @classmethod
     def from_env(cls) -> "AppConfig":
         root = Path(os.getenv("YOUDUB_ROOT", "/data/videos"))
         config_path = Path(os.getenv("YOUDUB_CONFIG_PATH", "/data/config/youdub.json"))
+        cookies_value = _clean(os.getenv("YOUDUB_COOKIES_PATH"))
         return cls(
             root=root,
             tasks_path=Path(os.getenv("YOUDUB_TASKS_PATH", "/data/tasks/tasks.json")),
             log_dir=Path(os.getenv("YOUDUB_LOG_DIR", "/data/logs")),
             models_dir=Path(os.getenv("YOUDUB_MODELS_DIR", "/models")),
             config_path=config_path,
+            cookies_path=Path(cookies_value) if cookies_value else None,
+            ytdlp_proxy=_clean(os.getenv("YOUDUB_YTDLP_PROXY")),
+            download_max_height=int(os.getenv("YOUDUB_DOWNLOAD_MAX_HEIGHT", "1080")),
             secrets=SecretsConfig.from_file_and_env(config_path),
         )
 
@@ -105,3 +112,5 @@ class AppConfig:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.cookies_path is not None:
+            self.cookies_path.parent.mkdir(parents=True, exist_ok=True)

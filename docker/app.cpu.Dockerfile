@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libass9 \
     fontconfig \
     fonts-noto-cjk \
+    nodejs \
   && rm -rf /var/lib/apt/lists/*
 
 RUN ffmpeg -hide_banner -filters | awk '$2 == "subtitles" { found = 1 } END { exit found ? 0 : 1 }' \
