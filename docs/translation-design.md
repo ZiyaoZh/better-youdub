@@ -21,6 +21,9 @@
 - `translation.context.json`
 - `translation.segments.json`
 - `translation.json`
+- `audio_tts.transcript.json`
+- `subtitles.segments.json`
+- `subtitles.srt`
 - 可复用、幂等的任务目录创建
 
 当前仓库还没有完成：
@@ -195,7 +198,8 @@
 
 ### `translation.json`
 
-它是给 TTS 用的最终短句列表。建议结构：
+它是给 TTS 用的最终整句列表。翻译阶段不再负责字幕短句切分，避免 TTS 在短句拼
+接时不连贯。建议结构：
 
 ```json
 [
@@ -203,15 +207,16 @@
     "segment_id": 0,
     "part_id": 0,
     "start": 0.031,
-    "end": 2.214,
+    "end": 6.039,
     "speaker": "SPEAKER_00",
-    "source_text": "Bloons Tower Defense 6,",
-    "translation": "《气球塔防6》这游戏，"
+    "source_text": "Bloons Tower Defense 6, a game where ...",
+    "translation": "《气球塔防6》这游戏，说白了就是靠摆猴子挡气球。"
   }
 ]
 ```
 
-这里的 `segment_id` 指回句级翻译，`part_id` 表示该句拆出的第几个短句。
+这里的 `segment_id` 指回句级翻译。`part_id` 目前固定为 0，表示该条 TTS 输入保
+留完整译文句子。
 
 ## 句级翻译与时间对齐方案
 
@@ -222,7 +227,7 @@
 3. 每批请求使用稳定的 `segment_id`，并注入全文摘要、术语表和 ASR 纠错表
 4. 要求模型返回结构化 JSON，并拒绝空译文、纯标点译文和格式残留
 5. 每个批次成功后立刻写回 `translation.segments.json`
-6. 全部句级翻译完成后，再本地生成 `translation.json`
+6. 全部句级翻译完成后，再本地生成整句 `translation.json`
 
 不建议像旧项目那样一条句子发一次请求。那种做法上下文弱、请求数多、token 浪费
 也更明显。
@@ -232,32 +237,42 @@
 - 10 到 30 句
 - 或按字符数/估算 token 数限制批大小
 
-## 短句切分方案
+## TTS 后字幕切分方案
 
-最终 TTS 更适合短句，但时间锚点仍然应该尽量尊重原始整句时间。
+TTS 使用整句译文生成 `audio_tts.wav` 后，再对合成语音做一次 WhisperX whisper +
+align，生成：
 
-推荐做法：
+- `audio_tts.transcript.whisper.json`
+- `audio_tts.transcript.aligned.json`
+- `audio_tts.transcript.json`
 
-1. 句级翻译先保存在 `translation.segments.json`
-2. 使用中文标点对译文切分，优先按 `，。！？；：` 分句
-3. 对超长短句再按长度做二次切分，控制成便于 TTS 的长度
-4. 纯标点片段必须并入相邻文本，过短引导片段优先并入下一段
-5. 每个短句的时间不直接按中文字符数平均分，而是优先参考源句的词级时间
+TTS-ASR 默认使用：
 
-时间分配建议：
+```bash
+YOUDUB_TTS_ASR_LANGUAGE=zh
+YOUDUB_TTS_ASR_INITIAL_PROMPT=以下是普通话的句子。
+```
 
-1. 从 `transcript.diarized.json` 里取当前句的词序列
-2. 根据源句中的标点，先求出源句的子句边界和时间范围
-3. 再把译文短句映射到这些时间范围
+这两个参数用于让 Whisper 按中文识别，并尽量输出简体中文，减少繁体字导致的对齐
+fallback。
 
-推荐规则：
+字幕生成阶段读取：
 
-- 若“译文短句数”与“源句子句数”一致，直接一一对应
-- 若译文短句更少，合并相邻源句时间范围
-- 若译文短句更多，优先把最长的源句时间范围再细分
-- 若词级时间缺失或标点不可靠，最后才退化到句内按比例分配
+- `translation.json`：标准译文，字幕文本必须以它为准
+- `audio_tts.transcript.json`：TTS 合成音频的 ASR 文本和词级时间
 
-这样做比旧项目单纯按字符长度平均分配更稳，尤其适合长句、多逗号句和后续 TTS。
+推荐流程：
+
+1. 把 `translation.json` 的整句译文作为标准结果
+2. 把 `audio_tts.transcript.json` 的一个或多个 ASR segment 对齐到对应标准译文
+3. 用标准译文按中文标点切分字幕短句
+4. 用文本相似度和字符级 alignment，把标准译文短句的字符 span 映射到 ASR 结果
+5. 优先使用 WhisperX align 的词级 `start`/`end` 作为短句时间窗口
+6. ASR 识别结果与标准译文不一致时，只借用 ASR 的时间，不把 ASR 文本写入字幕
+7. 只有当没有可用词级时间时，才退化为句内按比例分配时间
+
+这种做法不按译文短句长度直接分配时间，因此更能贴合 TTS 实际语速变化。字幕的
+可读短句仍由标准译文生成，避免合成语音二次 ASR 中的错字污染最终字幕。
 
 ## 建议实现顺序
 

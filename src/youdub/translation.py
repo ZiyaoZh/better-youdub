@@ -72,7 +72,6 @@ def translate_task(task_dir: Path, config: TranslationConfig) -> Path:
     config.validate()
     info = _read_json_object(task_dir / "download.info.json")
     transcript = _read_json_list(task_dir / "transcript.json")
-    diarized = _read_json_object(task_dir / "transcript.diarized.json")
 
     client = _create_openai_client(config)
     summary = ensure_summary(task_dir, info, transcript, client, config)
@@ -86,8 +85,32 @@ def translate_task(task_dir: Path, config: TranslationConfig) -> Path:
         client,
         config,
     )
-    final_entries = build_translation_entries(translated_segments, diarized)
+    final_entries = build_tts_translation_entries(translated_segments)
     return _write_json(task_dir / FINAL_OUTPUT, final_entries)
+
+
+def build_tts_translation_entries(translated_segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for item in translated_segments:
+        translation_text = _clean_text(item.get("translation"))
+        if not translation_text:
+            continue
+
+        segment_id = int(item["segment_id"])
+        source_text = str(item.get("text", "")).strip()
+        output.append(
+            {
+                "segment_id": segment_id,
+                "part_id": 0,
+                "start": round(float(item["start"]), 3),
+                "end": round(float(item["end"]), 3),
+                "speaker": str(item.get("speaker", "SPEAKER_00")),
+                "text": source_text,
+                "source_text": source_text,
+                "translation": translation_text,
+            }
+        )
+    return output
 
 
 def ensure_summary(

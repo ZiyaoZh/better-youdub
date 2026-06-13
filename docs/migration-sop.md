@@ -128,6 +128,7 @@ https://www.youtube.com/watch?v=6o68Fg2-bhM
 | WhisperX | `step020_whisperx.py` | 推荐 | 模型下载 | HF token 可选 | `transcript.json` | 是 |
 | 翻译 | `step030_translation.py` | 否 | 是 | OpenAI key | `summary.json`、`translation.context.json`、`translation.segments.json`、`translation.json` | 是 |
 | TTS | `step040_tts.py` | 推荐 | 模型下载可选 | 否 | `segments/tts/*.wav`、`audio_tts.wav`、`audio_tts.timings.json` | 是 |
+| TTS 后识别/字幕 | 新 subtitle 接口 | 推荐 | 模型下载 | 否 | `audio_tts.transcript.json`、`subtitles.segments.json`、`subtitles.srt` | 是 |
 | 合成 | `step050_synthesize_video.py` | 否 | 否 | 否 | `video.mp4` | 是 |
 | 上传 | `step070_upload_bilibili.py` | 否 | 是 | Bili 凭证 | `bilibili.json` | 第二阶段 |
 | Cookie 刷新 | `cookies_refresher.py` | 否 | 是 | 浏览器登录 | `cookies.txt` | 第二阶段 |
@@ -208,7 +209,9 @@ BILI_BILI_JCT=
 4. WhisperX 生成 `transcript.diarized.json`、`transcript.json`
 5. 翻译生成 `summary.json`、`translation.context.json`、`translation.segments.json`、`translation.json`
 6. TTS 生成 `segments/vocals/*.wav`、`segments/tts/*.wav`、`audio_tts.wav`、`audio_tts.timings.json`
-7. FFmpeg 合成 `subtitles.srt`、`video.mp4`
+7. 对 `audio_tts.wav` 再做 WhisperX 识别和 align，生成 `audio_tts.transcript.json`
+8. 字幕修正和短句切分生成 `subtitles.segments.json`、`subtitles.srt`
+9. FFmpeg 合成 `video.mp4`
 
 建议先用 30 秒到 2 分钟的视频样本，不要直接用长视频。
 
@@ -230,6 +233,12 @@ BILI_BILI_JCT=
   与 `audio_vocals.wav` 生成分段配音和 `audio_tts.wav`。混音阶段默认对 TTS
   片段做轻量 time-stretch 以控制累计漂移，并在 `audio_tts.timings.json` 中记录
   原始时长、调整后时长、实际起止时间、漂移量、拉伸比例和对齐状态。
+- TTS 后识别入口：`run-task --step transcribe-tts` 已接入；对 `audio_tts.wav`
+  运行 whisper + align，默认 `YOUDUB_TTS_ASR_LANGUAGE=zh` 和
+  `YOUDUB_TTS_ASR_INITIAL_PROMPT=以下是普通话的句子。`，用于让 Whisper 输出简体中文。
+- 字幕入口：`run-task --step subtitle` 已接入；字幕文本以 `translation.json`
+  的标准译文为准，时间优先来自 `audio_tts.transcript.json` 中 WhisperX align 的
+  词级时间窗口，只有缺少可用词级时间时才退化为句内比例分配。
 
 ## Docker 验证命令
 
@@ -266,6 +275,7 @@ YOUDUB_SMOKE_TRANSCRIBE=1 HF_READ_TOKEN=hf_... scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_WHISPER_DIARIZATION=0 scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
+YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_SMOKE_TRANSCRIBE_TTS=1 YOUDUB_SMOKE_SUBTITLE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 scripts/gpu_smoke.sh /data/samples/demo.mp4 /data/samples/download.info.json /data/samples/download.webp
 ```
 
@@ -279,6 +289,8 @@ docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> 
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step transcribe
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step translate
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step tts
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step transcribe-tts
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step subtitle
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub show-task <task-id>
 ```
 

@@ -32,6 +32,8 @@ class PipelineStep(str, Enum):
     TRANSCRIBE_DIARIZE = "transcribe-diarize"
     TRANSLATE = "translate"
     TTS = "tts"
+    TRANSCRIBE_TTS = "transcribe-tts"
+    SUBTITLE = "subtitle"
     SYNTHESIZE = "synthesize"
 
 

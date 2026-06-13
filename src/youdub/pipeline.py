@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .media import extract_audio, separate_audio
 from .models import PipelineStep, StepStatus, Task, TaskStatus
+from .subtitles import build_subtitles_from_tts_asr
 from .tts import TTSConfig, generate_tts
 from .translation import TranslationConfig, translate_task
 from .transcription import (
@@ -11,6 +12,7 @@ from .transcription import (
     run_all,
     run_diarize,
     run_whisper,
+    transcribe_tts_audio,
 )
 
 
@@ -51,6 +53,10 @@ class PipelineRunner:
                 translate_task(task.folder, self._translation_config())
             elif step == PipelineStep.TTS:
                 generate_tts(task.folder, self._tts_config())
+            elif step == PipelineStep.TRANSCRIBE_TTS:
+                transcribe_tts_audio(task.folder, self._whisperx_config())
+            elif step == PipelineStep.SUBTITLE:
+                build_subtitles_from_tts_asr(task.folder)
             else:
                 raise NotImplementedError(f"Step is not implemented yet: {step.value}")
         except Exception as exc:

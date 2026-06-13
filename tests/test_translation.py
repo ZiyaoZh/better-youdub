@@ -14,6 +14,7 @@ from youdub.translation import (
     _summary_response_schema,
     _normalize_summary_response,
     _translate_batch,
+    build_tts_translation_entries,
     build_translation_entries,
     split_translation_text,
 )
@@ -137,6 +138,32 @@ def test_build_translation_entries_aligns_with_source_clause_timings() -> None:
             "source_text": "Nice day.",
             "translation": "今天天气不错。",
         },
+    ]
+
+
+def test_build_tts_translation_entries_keeps_full_sentences() -> None:
+    translated_segments = [
+        {
+            "segment_id": 0,
+            "start": 0.0,
+            "end": 10.0,
+            "speaker": "SPEAKER_00",
+            "text": "Hello, world. Nice day.",
+            "translation": "你好，世界。今天天气不错。",
+        }
+    ]
+
+    assert build_tts_translation_entries(translated_segments) == [
+        {
+            "segment_id": 0,
+            "part_id": 0,
+            "start": 0.0,
+            "end": 10.0,
+            "speaker": "SPEAKER_00",
+            "text": "Hello, world. Nice day.",
+            "source_text": "Hello, world. Nice day.",
+            "translation": "你好，世界。今天天气不错。",
+        }
     ]
 
 

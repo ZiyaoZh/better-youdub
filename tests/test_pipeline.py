@@ -126,3 +126,43 @@ def test_pipeline_marks_tts_success(tmp_path: Path, monkeypatch) -> None:
     assert result.error is None
     assert result.steps[PipelineStep.TTS.value] == StepStatus.SUCCESS
     assert (tmp_path / "audio_tts.wav").exists()
+
+
+def test_pipeline_marks_transcribe_tts_success(tmp_path: Path, monkeypatch) -> None:
+    task = Task(id="abc123", title="demo", source="/tmp/demo.mp4", folder=tmp_path)
+    config = WhisperXConfig(models_dir=tmp_path / "models", language="zh")
+
+    def fake_transcribe_tts_audio(task_dir: Path, whisperx_config: WhisperXConfig) -> Path:
+        assert task_dir == tmp_path
+        assert whisperx_config == config
+        output = task_dir / "audio_tts.transcript.json"
+        output.write_text('[{"text":"你好"}]', encoding="utf-8")
+        return output
+
+    monkeypatch.setattr(pipeline, "transcribe_tts_audio", fake_transcribe_tts_audio)
+
+    result = PipelineRunner(whisperx_config=config).run_step(task, PipelineStep.TRANSCRIBE_TTS)
+
+    assert result.status == TaskStatus.SUCCESS
+    assert result.error is None
+    assert result.steps[PipelineStep.TRANSCRIBE_TTS.value] == StepStatus.SUCCESS
+    assert (tmp_path / "audio_tts.transcript.json").exists()
+
+
+def test_pipeline_marks_subtitle_success(tmp_path: Path, monkeypatch) -> None:
+    task = Task(id="abc123", title="demo", source="/tmp/demo.mp4", folder=tmp_path)
+
+    def fake_build_subtitles_from_tts_asr(task_dir: Path) -> Path:
+        assert task_dir == tmp_path
+        output = task_dir / "subtitles.segments.json"
+        output.write_text('[{"translation":"你好"}]', encoding="utf-8")
+        return output
+
+    monkeypatch.setattr(pipeline, "build_subtitles_from_tts_asr", fake_build_subtitles_from_tts_asr)
+
+    result = PipelineRunner().run_step(task, PipelineStep.SUBTITLE)
+
+    assert result.status == TaskStatus.SUCCESS
+    assert result.error is None
+    assert result.steps[PipelineStep.SUBTITLE.value] == StepStatus.SUCCESS
+    assert (tmp_path / "subtitles.segments.json").exists()

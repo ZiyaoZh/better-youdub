@@ -52,6 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
             PipelineStep.TRANSCRIBE_DIARIZE.value,
             PipelineStep.TRANSLATE.value,
             PipelineStep.TTS.value,
+            PipelineStep.TRANSCRIBE_TTS.value,
+            PipelineStep.SUBTITLE.value,
         ],
         default=PipelineStep.EXTRACT_AUDIO.value,
     )
@@ -70,6 +72,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.getenv("YOUDUB_WHISPER_BATCH_SIZE", "32")),
         help="WhisperX batch size",
+    )
+    run_task.add_argument(
+        "--whisper-language",
+        default=_optional_str_env("YOUDUB_WHISPER_LANGUAGE"),
+        help="Optional WhisperX language code, for example zh or en",
+    )
+    run_task.add_argument(
+        "--whisper-initial-prompt",
+        default=_optional_str_env("YOUDUB_WHISPER_INITIAL_PROMPT"),
+        help="Optional Whisper initial prompt for transcription decoding",
     )
     run_task.add_argument(
         "--no-diarization",
@@ -228,6 +240,8 @@ def cmd_run_task(config: AppConfig, args: argparse.Namespace) -> int:
         min_speakers=args.min_speakers,
         max_speakers=args.max_speakers,
         hf_token=config.secrets.huggingface.token,
+        language=args.whisper_language,
+        initial_prompt=args.whisper_initial_prompt,
     )
     translation_config = TranslationConfig(
         api_key=config.secrets.openai.api_key,
@@ -280,6 +294,14 @@ def _optional_path_env(name: str) -> Path | None:
     if not value:
         return None
     return Path(value)
+
+
+def _optional_str_env(name: str) -> str | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
 
 
 def _bool_env(name: str, default: bool) -> bool:

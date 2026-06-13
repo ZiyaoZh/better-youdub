@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,8 @@ class WhisperXConfig:
     min_speakers: int | None = None
     max_speakers: int | None = None
     hf_token: str | None = None
+    language: str | None = None
+    initial_prompt: str | None = None
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -65,6 +68,13 @@ def _normalize_model_name(model_name: str) -> str:
     if model_name == "large":
         return "large-v2"
     return model_name
+
+
+def _clean_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
 
 
 def prepare_whisperx_runtime(config: WhisperXConfig) -> None:
@@ -153,7 +163,7 @@ def _patch_huggingface_hub_download() -> None:
     _HUGGINGFACE_HUB_PATCHED = True
 
 
-def _segments_for_transcript(result: dict[str, Any]) -> list[dict[str, Any]]:
+def _segments_for_transcript(result: dict[str, Any], include_words: bool = False) -> list[dict[str, Any]]:
     segments = result.get("segments")
     if not isinstance(segments, list):
         raise ValueError("WhisperX result does not contain a segment list")
@@ -162,14 +172,23 @@ def _segments_for_transcript(result: dict[str, Any]) -> list[dict[str, Any]]:
     for segment in segments:
         if not isinstance(segment, dict):
             continue
-        transcript.append(
-            {
-                "start": segment["start"],
-                "end": segment["end"],
-                "text": str(segment.get("text", "")).strip(),
-                "speaker": segment.get("speaker", "SPEAKER_00"),
-            }
-        )
+        item = {
+            "start": segment["start"],
+            "end": segment["end"],
+            "text": str(segment.get("text", "")).strip(),
+            "speaker": segment.get("speaker", "SPEAKER_00"),
+        }
+        if include_words and isinstance(segment.get("words"), list):
+            item["words"] = [
+                {
+                    "word": str(word.get("word") or "").strip(),
+                    "start": word.get("start"),
+                    "end": word.get("end"),
+                }
+                for word in segment["words"]
+                if isinstance(word, dict) and str(word.get("word") or "").strip()
+            ]
+        transcript.append(item)
     return transcript
 
 
@@ -232,8 +251,13 @@ def process_transcript(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]
     return processed
 
 
-def run_whisper(task_dir: Path, config: WhisperXConfig) -> Path:
-    audio_path = task_dir / "audio_vocals.wav"
+def run_whisper(
+    task_dir: Path,
+    config: WhisperXConfig,
+    audio_name: str = "audio_vocals.wav",
+    output_name: str = WHISPER_OUTPUT,
+) -> Path:
+    audio_path = task_dir / audio_name
     if not audio_path.exists():
         raise FileNotFoundError(audio_path)
 
@@ -247,22 +271,32 @@ def run_whisper(task_dir: Path, config: WhisperXConfig) -> Path:
 
     model = whisperx.load_model(
         model_name,
-        download_root=str(download_root),
-        device=device,
+        **_whisperx_load_model_kwargs(
+            whisperx.load_model,
+            download_root=str(download_root),
+            device=device,
+            config=config,
+        ),
     )
-    result = model.transcribe(str(audio_path), batch_size=config.batch_size)
+    result = _transcribe_with_options(model, audio_path, config)
     if result.get("language") == "nn":
         raise RuntimeError(f"No language detected in {audio_path}")
 
-    return _write_json(task_dir / WHISPER_OUTPUT, result)
+    return _write_json(task_dir / output_name, result)
 
 
-def run_align(task_dir: Path, config: WhisperXConfig) -> Path:
-    audio_path = task_dir / "audio_vocals.wav"
+def run_align(
+    task_dir: Path,
+    config: WhisperXConfig,
+    audio_name: str = "audio_vocals.wav",
+    whisper_name: str = WHISPER_OUTPUT,
+    output_name: str = ALIGN_OUTPUT,
+) -> Path:
+    audio_path = task_dir / audio_name
     if not audio_path.exists():
         raise FileNotFoundError(audio_path)
 
-    whisper_path = task_dir / WHISPER_OUTPUT
+    whisper_path = task_dir / whisper_name
     result = _read_json(whisper_path)
     language = result.get("language")
     if not isinstance(language, str) or not language:
@@ -285,7 +319,7 @@ def run_align(task_dir: Path, config: WhisperXConfig) -> Path:
         return_char_alignments=False,
     )
     aligned["language"] = language
-    return _write_json(task_dir / ALIGN_OUTPUT, aligned)
+    return _write_json(task_dir / output_name, aligned)
 
 
 def run_diarize(task_dir: Path, config: WhisperXConfig) -> Path:
@@ -334,6 +368,91 @@ def run_all(task_dir: Path, config: WhisperXConfig) -> Path:
     run_align(task_dir, config)
     run_diarize(task_dir, config)
     return finalize_transcript(task_dir)
+
+
+def transcribe_tts_audio(task_dir: Path, config: WhisperXConfig) -> Path:
+    whisper_name = "audio_tts.transcript.whisper.json"
+    aligned_name = "audio_tts.transcript.aligned.json"
+    output_name = "audio_tts.transcript.json"
+    tts_config = _tts_asr_config(config)
+    run_whisper(task_dir, tts_config, audio_name="audio_tts.wav", output_name=whisper_name)
+    run_align(
+        task_dir,
+        tts_config,
+        audio_name="audio_tts.wav",
+        whisper_name=whisper_name,
+        output_name=aligned_name,
+    )
+    result = _read_json(task_dir / aligned_name)
+    segments = _segments_for_transcript(result, include_words=True)
+    return _write_json(task_dir / output_name, segments)
+
+
+def _tts_asr_config(config: WhisperXConfig) -> WhisperXConfig:
+    return WhisperXConfig(
+        models_dir=config.models_dir,
+        model_name=config.model_name,
+        device=config.device,
+        batch_size=config.batch_size,
+        diarization=False,
+        hf_token=config.hf_token,
+        language=_clean_optional_text(os.getenv("YOUDUB_TTS_ASR_LANGUAGE", "zh")),
+        initial_prompt=_clean_optional_text(
+            os.getenv("YOUDUB_TTS_ASR_INITIAL_PROMPT", "以下是普通话的句子。")
+        ),
+    )
+
+
+def _whisperx_load_model_kwargs(
+    load_model: Any,
+    *,
+    download_root: str,
+    device: str,
+    config: WhisperXConfig,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "download_root": download_root,
+        "device": device,
+    }
+    asr_options = _asr_options(config)
+    if not asr_options:
+        return kwargs
+    try:
+        parameters = inspect.signature(load_model).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "asr_options" in parameters:
+        kwargs["asr_options"] = asr_options
+    return kwargs
+
+
+def _transcribe_with_options(model: Any, audio_path: Path, config: WhisperXConfig) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"batch_size": config.batch_size}
+    options = _asr_options(config)
+    try:
+        parameters = inspect.signature(model.transcribe).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+
+    for key, value in options.items():
+        if key in parameters:
+            kwargs[key] = value
+
+    try:
+        return model.transcribe(str(audio_path), **kwargs)
+    except TypeError:
+        return model.transcribe(str(audio_path), batch_size=config.batch_size)
+
+
+def _asr_options(config: WhisperXConfig) -> dict[str, Any]:
+    options: dict[str, Any] = {}
+    language = _clean_optional_text(config.language)
+    initial_prompt = _clean_optional_text(config.initial_prompt)
+    if language:
+        options["language"] = language
+    if initial_prompt:
+        options["initial_prompt"] = initial_prompt
+    return options
 
 
 def generate_speaker_audio(
