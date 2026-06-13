@@ -81,6 +81,16 @@ def test_split_translation_text_merges_short_leading_fragments() -> None:
     ]
 
 
+def test_split_translation_text_balances_hard_chunks_instead_of_short_tail() -> None:
+    assert split_translation_text(
+        "气球塔防6，一款通过放置猴子戳破气球来保卫世界免受气球入侵的游戏。"
+    ) == [
+        "气球塔防6，",
+        "一款通过放置猴子戳破气球来",
+        "保卫世界免受气球入侵的游戏。",
+    ]
+
+
 def test_build_translation_entries_aligns_with_source_clause_timings() -> None:
     translated_segments = [
         {

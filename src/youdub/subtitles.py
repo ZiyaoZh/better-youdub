@@ -16,6 +16,7 @@ SUBTITLE_SEGMENTS_OUTPUT = "subtitles.segments.json"
 SRT_OUTPUT = "subtitles.srt"
 MIN_SUBTITLE_DURATION = 0.2
 GLOBAL_ALIGNMENT_MIN_CONFIDENCE = 0.15
+SUBTITLE_TRAILING_PUNCTUATION = "。！？!?，,、；;：:…."
 _OPENCC_CONVERTER: Any | None = None
 _OPENCC_UNAVAILABLE = False
 TRADITIONAL_TO_SIMPLIFIED = str.maketrans(
@@ -292,7 +293,7 @@ def _build_segment_window_subtitle_segments(
                     "part_id": part_id,
                     "start": round(part_start, 3),
                     "end": round(part_end, 3),
-                    "translation": fragment,
+                    "translation": _strip_subtitle_trailing_punctuation(fragment),
                     "standard_translation": text,
                     "asr_text": window["asr_text"],
                     "match_score": round(float(window["score"]), 4),
@@ -347,7 +348,7 @@ def _build_global_word_subtitle_segments(
                     "part_id": part_id,
                     "start": round(part_start, 3),
                     "end": round(part_end, 3),
-                    "translation": fragment["text"],
+                    "translation": _strip_subtitle_trailing_punctuation(str(fragment["text"])),
                     "standard_translation": sentence["text"],
                     "asr_text": part_window.get("asr_text", ""),
                     "match_score": round(float(part_window.get("alignment_confidence", global_score)), 4),
@@ -681,7 +682,7 @@ def write_srt(subtitle_segments: list[dict[str, Any]], path: Path) -> Path:
         end = float(item["end"])
         if end <= start:
             continue
-        text = str(item["translation"]).strip()
+        text = _strip_subtitle_trailing_punctuation(str(item["translation"]))
         if not text:
             continue
         lines.extend([str(index), f"{format_srt_time(start)} --> {format_srt_time(end)}", text, ""])
@@ -696,6 +697,10 @@ def format_srt_time(seconds: float) -> str:
     minutes, remainder = divmod(remainder, 60_000)
     secs, millis = divmod(remainder, 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def _strip_subtitle_trailing_punctuation(text: str) -> str:
+    return text.strip().rstrip(SUBTITLE_TRAILING_PUNCTUATION).strip()
 
 
 def _fallback_window(translation: dict[str, Any], previous: list[dict[str, Any]]) -> dict[str, Any]:

@@ -221,7 +221,8 @@ export YOUDUB_TTS_ASR_INITIAL_PROMPT=以下是普通话的句子。
 以映射多个标准译文句子。`subtitles.segments.json` 会记录 `timing_source`、
 `alignment_confidence` 和 fallback 原因；正常主路径是 `global_asr_words`，缺口
 才会降级为 `neighbor_interpolated_words`、`tts_timing_proportional` 或最终的
-`proportional_fallback`。
+`proportional_fallback`。最终输出的字幕文本会去掉每条字幕末尾的标点符号，
+`standard_translation` 仍保留完整标准译文用于追踪。
 
 默认 Demucs 模型是 `htdemucs_ft`。默认 Demucs segment 长度是 6 秒，低于
 `htdemucs_ft` 的 7.8 秒上限。

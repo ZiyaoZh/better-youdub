@@ -241,6 +241,8 @@ BILI_BILI_JCT=
   词级时间窗口。字幕步骤会把标准译文和 ASR words 展开成全局无标点字符流，做
   NFKC、简繁归一化和单调字符映射；当局部缺口无法映射时，先用相邻 word 时间插值
   或 `audio_tts.timings.json` 的句级实际时间分配，最后才使用 `proportional_fallback`。
+  最终字幕显示文本会去掉每条字幕末尾的标点符号，完整标准译文保留在
+  `standard_translation` 字段。
 
 ## Docker 验证命令
 

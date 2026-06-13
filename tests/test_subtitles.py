@@ -41,7 +41,7 @@ def test_build_subtitle_segments_uses_standard_translation_text() -> None:
 
     segments = build_subtitle_segments(standard, asr)
 
-    assert [item["translation"] for item in segments] == ["今天的天气真的非常非常好，", "不错的地方会被保留下来。"]
+    assert [item["translation"] for item in segments] == ["今天的天气真的非常非常好", "不错的地方会被保留下来"]
     assert {item["timing_source"] for item in segments} == {"proportional_fallback"}
     assert all(item["standard_translation"] == "今天的天气真的非常非常好，不错的地方会被保留下来。" for item in segments)
     assert all(item["asr_text"] == "今天的天气真的非常非常好，不搓的地方会被保留下来。" for item in segments)
@@ -84,7 +84,7 @@ def test_build_subtitle_segments_maps_standard_fragments_to_misrecognized_asr_wo
 
     segments = build_subtitle_segments(standard, asr)
 
-    assert [item["translation"] for item in segments] == ["今天的天气真的非常非常好，", "不错的地方会被保留下来。"]
+    assert [item["translation"] for item in segments] == ["今天的天气真的非常非常好", "不错的地方会被保留下来"]
     assert [item["timing_source"] for item in segments] == ["global_asr_words", "global_asr_words"]
     assert segments[0]["start"] == 0.0
     assert segments[0]["end"] == 0.6
@@ -134,7 +134,7 @@ def test_build_subtitle_segments_maps_partial_traditional_asr_words() -> None:
 
     segments = build_subtitle_segments(standard, asr)
 
-    assert [item["translation"] for item in segments] == ["气球防御游戏很简单。"]
+    assert [item["translation"] for item in segments] == ["气球防御游戏很简单"]
     assert segments[0]["timing_source"] == "global_asr_words"
     assert segments[0]["start"] == 0.0
     assert segments[0]["end"] == 2.0
@@ -178,15 +178,15 @@ def test_build_subtitles_from_tts_asr_writes_segments_and_srt(tmp_path: Path) ->
 
     segments = json.loads(output.read_text(encoding="utf-8"))
     assert output == tmp_path / "subtitles.segments.json"
-    assert [item["translation"] for item in segments] == ["今天的天气真的非常非常好，", "不错的地方会被保留下来。"]
+    assert [item["translation"] for item in segments] == ["今天的天气真的非常非常好", "不错的地方会被保留下来"]
     assert (tmp_path / "subtitles.srt").read_text(encoding="utf-8") == (
         "1\n"
         "00:00:00,000 --> 00:00:00,600\n"
-        "今天的天气真的非常非常好，\n"
+        "今天的天气真的非常非常好\n"
         "\n"
         "2\n"
         "00:00:01,200 --> 00:00:02,000\n"
-        "不错的地方会被保留下来。\n"
+        "不错的地方会被保留下来\n"
     )
 
 

@@ -278,6 +278,10 @@ fallback。
 
 这种做法不按译文短句长度直接分配时间，因此更能贴合 TTS 实际语速变化。字幕的
 可读短句仍由标准译文生成，避免合成语音二次 ASR 中的错字污染最终字幕。
+当无标点长片段达到最大字幕长度并产生很短尾句时，切分器会把最后两片按长度重新
+均匀分配，避免生成 `游戏。` 这类孤立短尾字幕。
+最终写入 `subtitles.segments.json` 的字幕显示文本和 `subtitles.srt` 会去掉每条字
+幕末尾的标点符号，`standard_translation` 字段仍保留完整标准译文。
 
 `subtitles.segments.json` 中的 `timing_source` 用于诊断字幕时间来源：
 

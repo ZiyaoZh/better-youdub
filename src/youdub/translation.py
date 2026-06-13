@@ -1134,7 +1134,31 @@ def _chunk_text(text: str, max_chars: int) -> list[str]:
             split_at += 1
         chunks.append(remaining[:split_at].strip())
         remaining = remaining[split_at:].strip()
-    return _merge_punctuation_only_parts([chunk for chunk in chunks if chunk])
+    return _rebalance_short_tail_chunks(_merge_punctuation_only_parts([chunk for chunk in chunks if chunk]), max_chars)
+
+
+def _rebalance_short_tail_chunks(chunks: list[str], max_chars: int) -> list[str]:
+    if len(chunks) < 2:
+        return chunks
+    short_tail_limit = max(4, max_chars // 3)
+    if len(chunks[-1]) > short_tail_limit:
+        return chunks
+
+    combined = f"{chunks[-2]}{chunks[-1]}".strip()
+    if len(combined) <= max_chars:
+        return chunks[:-2] + [combined]
+
+    chunk_count = (len(combined) + max_chars - 1) // max_chars
+    base_size, larger_chunks = divmod(len(combined), chunk_count)
+    balanced: list[str] = []
+    cursor = 0
+    for index in range(chunk_count):
+        size = base_size + (1 if index >= chunk_count - larger_chunks else 0)
+        chunk = combined[cursor : cursor + size].strip()
+        if chunk:
+            balanced.append(chunk)
+        cursor += size
+    return chunks[:-2] + balanced
 
 
 def _transcript_excerpt(transcript: list[dict[str, Any]], window: int = 3) -> list[str]:
