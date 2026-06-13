@@ -8,7 +8,7 @@
 
 - 当前 `/workspace/Dockerfile` 是 Codex 工作环境镜像，不是应用运行镜像。
 - 当前镜像包含 Codex、Node.js、认证配置和明文密钥痕迹，运行面过大。
-- YouDub 运行时需要 CUDA、FFmpeg、PyTorch、WhisperX、Demucs、IndexTTS 等专用依赖，应独立建镜像。
+- YouDub 运行时需要 CUDA、FFmpeg、PyTorch、WhisperX、Demucs、VoxCPM2 等专用依赖，应独立建镜像。
 - 应用镜像需要稳定、可复现、可发布；开发容器可以保留工具和临时状态。
 
 ## 推荐容器分层
@@ -87,6 +87,7 @@ docker compose -f compose.gpu.yml build --no-cache
 ```bash
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_WHISPER_DIARIZATION=0 scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
+YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 ```
 
 容器内单步调试任务：
@@ -98,6 +99,7 @@ docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> 
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step separate-audio
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step transcribe
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step translate
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step tts
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub show-task <task-id>
 ```
 

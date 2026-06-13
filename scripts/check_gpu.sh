@@ -29,6 +29,7 @@ import librosa
 import openai
 import soundfile
 import yt_dlp
+import voxcpm
 from youdub.transcription import WhisperXConfig, prepare_whisperx_runtime
 
 prepare_whisperx_runtime(WhisperXConfig(models_dir="/models"))
@@ -40,6 +41,7 @@ print(f"openai={openai.__version__}")
 print(f"yt_dlp={yt_dlp.version.__version__}")
 print(f"librosa={librosa.__version__}")
 print(f"soundfile={soundfile.__version__}")
+print(f"voxcpm={voxcpm.__file__}")
 print(f"whisperx={whisperx.__file__}")
 print(f"diarization_pipeline={DiarizationPipeline.__name__}")
 PY

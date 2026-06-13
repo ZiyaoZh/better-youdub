@@ -126,8 +126,8 @@ https://www.youtube.com/watch?v=6o68Fg2-bhM
 | 输入/导入 | 新 ingest 接口 | 否 | 否 | 否 | `download.mp4`、`download.info.json`、`download.<ext>` | 是 |
 | Demucs | `step010_demucs_vr.py` | 推荐 | 否 | 否 | `audio_vocals.wav` | 是 |
 | WhisperX | `step020_whisperx.py` | 推荐 | 模型下载 | HF token 可选 | `transcript.json` | 是 |
-| 翻译 | `step030_translation.py` | 否 | 是 | OpenAI key | `summary.json`、`translation.json` | 是 |
-| TTS | `step040_tts.py` | 推荐 | 模型下载可选 | 否 | `audio_tts.wav` | 是 |
+| 翻译 | `step030_translation.py` | 否 | 是 | OpenAI key | `summary.json`、`translation.context.json`、`translation.segments.json`、`translation.json` | 是 |
+| TTS | `step040_tts.py` | 推荐 | 模型下载可选 | 否 | `segments/tts/*.wav`、`audio_tts.wav`、`audio_tts.timings.json` | 是 |
 | 合成 | `step050_synthesize_video.py` | 否 | 否 | 否 | `video.mp4` | 是 |
 | 上传 | `step070_upload_bilibili.py` | 否 | 是 | Bili 凭证 | `bilibili.json` | 第二阶段 |
 | Cookie 刷新 | `cookies_refresher.py` | 否 | 是 | 浏览器登录 | `cookies.txt` | 第二阶段 |
@@ -155,6 +155,8 @@ OPENAI_API_KEY=
 OPENAI_API_BASE=
 MODEL_NAME=
 HF_READ_TOKEN=
+YOUDUB_TTS_MODEL=openbmb/VoxCPM2
+YOUDUB_TTS_MODEL_DIR=
 BILI_SESSDATA=
 BILI_BILI_JCT=
 ```
@@ -167,7 +169,7 @@ BILI_BILI_JCT=
 
 - `.venv\Scripts\python.exe` -> 当前解释器或配置化解释器路径
 - `envdemucs\.venv\Scripts\python.exe` -> Linux 路径或取消双 venv
-- `models\Qwen3-TTS-...` -> `Path("models") / "Qwen3-TTS-..."`
+- `models\Qwen3-TTS-...` / VoxCPM 本地目录 -> `Path("models") / "<model-name>"`
 - `videos\...` 示例路径 -> POSIX 兼容路径或 `pathlib.Path`
 
 优先策略：
@@ -204,8 +206,8 @@ BILI_BILI_JCT=
 2. `ffmpeg` 从 `download.mp4` 提取 `audio.wav`
 3. Demucs 生成 `audio_vocals.wav`、`audio_instruments.wav`
 4. WhisperX 生成 `transcript.diarized.json`、`transcript.json`
-5. 翻译生成 `summary.json`、`translation.segments.json`、`translation.json`
-6. TTS 生成 `audio_tts.wav`、`audio_combined.wav`
+5. 翻译生成 `summary.json`、`translation.context.json`、`translation.segments.json`、`translation.json`
+6. TTS 生成 `segments/vocals/*.wav`、`segments/tts/*.wav`、`audio_tts.wav`、`audio_tts.timings.json`
 7. FFmpeg 合成 `subtitles.srt`、`video.mp4`
 
 建议先用 30 秒到 2 分钟的视频样本，不要直接用长视频。
@@ -221,7 +223,13 @@ BILI_BILI_JCT=
 - FFmpeg 音频提取：生成 `audio.wav`
 - Demucs 步骤入口：`run-task --step separate-audio` 已接入；当前基础开发环境若没有 `demucs` 可执行文件，会明确失败并把任务步骤标记为 `failed`
 - 翻译步骤入口：`run-task --step translate` 已接入；模型调用可通过
-  `translation.segments.json` 复用句级翻译缓存
+  `translation.context.json` 复用全文上下文，并通过 `translation.segments.json`
+  复用带目标语言、提示词版本和上下文 hash 的句级翻译缓存
+- TTS 步骤入口：`run-task --step tts` 已接入；默认使用 Hugging Face 上的
+  `openbmb/VoxCPM2`，运行时下载到 `HF_HOME` 缓存，并根据 `translation.json`
+  与 `audio_vocals.wav` 生成分段配音和 `audio_tts.wav`。混音阶段默认对 TTS
+  片段做轻量 time-stretch 以控制累计漂移，并在 `audio_tts.timings.json` 中记录
+  原始时长、调整后时长、实际起止时间、漂移量、拉伸比例和对齐状态。
 
 ## Docker 验证命令
 
@@ -257,6 +265,7 @@ scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 HF_READ_TOKEN=hf_... scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_WHISPER_DIARIZATION=0 scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
+YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 scripts/gpu_smoke.sh /data/samples/demo.mp4 /data/samples/download.info.json /data/samples/download.webp
 ```
 
@@ -269,6 +278,7 @@ docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> 
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step separate-audio
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step transcribe
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step translate
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step tts
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub show-task <task-id>
 ```
 

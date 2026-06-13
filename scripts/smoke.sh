@@ -15,6 +15,7 @@ PYTHON_BIN="${PYTHON:-python3}"
 SAMPLE_PATH="$1"
 SMOKE_TRANSCRIBE="${YOUDUB_SMOKE_TRANSCRIBE:-0}"
 SMOKE_TRANSLATE="${YOUDUB_SMOKE_TRANSLATE:-0}"
+SMOKE_TTS="${YOUDUB_SMOKE_TTS:-0}"
 
 sample_info_path="${2:-${YOUDUB_SMOKE_INFO_PATH:-}}"
 sample_cover_path="${3:-${YOUDUB_SMOKE_COVER_PATH:-}}"
@@ -40,6 +41,10 @@ fi
 
 if [[ "$SMOKE_TRANSLATE" == "1" && "$SMOKE_TRANSCRIBE" != "1" ]]; then
   echo "error: YOUDUB_SMOKE_TRANSLATE=1 requires YOUDUB_SMOKE_TRANSCRIBE=1" >&2
+  exit 2
+fi
+if [[ "$SMOKE_TTS" == "1" && "$SMOKE_TRANSLATE" != "1" ]]; then
+  echo "error: YOUDUB_SMOKE_TTS=1 requires YOUDUB_SMOKE_TRANSLATE=1" >&2
   exit 2
 fi
 
@@ -82,5 +87,8 @@ if [[ "$SMOKE_TRANSCRIBE" == "1" ]]; then
 fi
 if [[ "$SMOKE_TRANSLATE" == "1" ]]; then
   "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step translate
+fi
+if [[ "$SMOKE_TTS" == "1" ]]; then
+  "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step tts
 fi
 "$PYTHON_BIN" -m youdub.cli show-task "$task_id"

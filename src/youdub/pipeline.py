@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .media import extract_audio, separate_audio
 from .models import PipelineStep, StepStatus, Task, TaskStatus
+from .tts import TTSConfig, generate_tts
 from .translation import TranslationConfig, translate_task
 from .transcription import (
     WhisperXConfig,
@@ -18,9 +19,11 @@ class PipelineRunner:
         self,
         whisperx_config: WhisperXConfig | None = None,
         translation_config: TranslationConfig | None = None,
+        tts_config: TTSConfig | None = None,
     ):
         self.whisperx_config = whisperx_config
         self.translation_config = translation_config
+        self.tts_config = tts_config
 
     def run_step(self, task: Task, step: PipelineStep) -> Task:
         task.status = TaskStatus.RUNNING
@@ -46,6 +49,8 @@ class PipelineRunner:
                 finalize_transcript(task.folder)
             elif step == PipelineStep.TRANSLATE:
                 translate_task(task.folder, self._translation_config())
+            elif step == PipelineStep.TTS:
+                generate_tts(task.folder, self._tts_config())
             else:
                 raise NotImplementedError(f"Step is not implemented yet: {step.value}")
         except Exception as exc:
@@ -67,3 +72,8 @@ class PipelineRunner:
         if self.translation_config is None:
             raise ValueError("Translation config is required for translation steps")
         return self.translation_config
+
+    def _tts_config(self) -> TTSConfig:
+        if self.tts_config is None:
+            raise ValueError("TTS config is required for TTS steps")
+        return self.tts_config

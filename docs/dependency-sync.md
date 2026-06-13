@@ -9,7 +9,7 @@
 新项目建议拆分依赖：
 
 - `requirements/base.in`：业务通用依赖
-- `requirements/gpu.in`：GPU 相关依赖，如 torch、torchaudio、torchvision、whisperx、demucs、indextts
+- `requirements/gpu.in`：GPU 相关依赖，如 torch、torchaudio、torchvision、whisperx、demucs、voxcpm
 - `requirements/dev.in`：测试、lint、开发工具
 - `requirements/base.txt`：锁定后的 base 依赖
 - `requirements/gpu.txt`：锁定后的 GPU 依赖
@@ -98,7 +98,7 @@ WMI==1.5.1; platform_system == "Windows"
 
 - `demucs @ git+https://github.com/facebookresearch/demucs@...`
 - `whisperx @ git+https://github.com/m-bain/whisperx.git@...`
-- `indextts @ git+https://github.com/index-tts/index-tts.git@...`
+- `voxcpm`
 
 规范：
 
@@ -150,7 +150,7 @@ python -V
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ffmpeg -version
 ffprobe -version
-python -c "import yt_dlp, openai, librosa, soundfile"
+python -c "import yt_dlp, openai, librosa, soundfile, audiostretchy"
 python -c "import whisperx"
 python -c "import demucs"
 ```
@@ -175,12 +175,13 @@ docker compose -f compose.gpu.yml build --no-cache
 ```bash
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_WHISPER_DIARIZATION=0 scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
+YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 ```
 
-TTS 根据模型选择验证：
+TTS 根据模型选择验证。VoxCPM2 默认从 Hugging Face 下载 `openbmb/VoxCPM2`，模型缓存应放在 `HF_HOME` 挂载卷中。TTS 混音对齐依赖 `audiostretchy` 做分段 time-stretch：
 
 ```bash
-python -c "import indextts"
+python -c "import voxcpm, audiostretchy"
 ```
 
 ## 禁止事项

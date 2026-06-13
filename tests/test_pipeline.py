@@ -2,6 +2,7 @@ from pathlib import Path
 
 from youdub import pipeline
 from youdub.models import PipelineStep, StepStatus, Task, TaskStatus
+from youdub.tts import TTSConfig
 from youdub.translation import TranslationConfig
 from youdub.pipeline import PipelineRunner
 from youdub.transcription import WhisperXConfig
@@ -104,3 +105,24 @@ def test_pipeline_marks_translate_success(tmp_path: Path, monkeypatch) -> None:
     assert result.error is None
     assert result.steps[PipelineStep.TRANSLATE.value] == StepStatus.SUCCESS
     assert (tmp_path / "translation.json").exists()
+
+
+def test_pipeline_marks_tts_success(tmp_path: Path, monkeypatch) -> None:
+    task = Task(id="abc123", title="demo", source="/tmp/demo.mp4", folder=tmp_path)
+    config = TTSConfig(model="openbmb/VoxCPM2")
+
+    def fake_generate_tts(task_dir: Path, tts_config: TTSConfig) -> Path:
+        assert task_dir == tmp_path
+        assert tts_config == config
+        output = task_dir / "audio_tts.wav"
+        output.write_bytes(b"tts")
+        return output
+
+    monkeypatch.setattr(pipeline, "generate_tts", fake_generate_tts)
+
+    result = PipelineRunner(tts_config=config).run_step(task, PipelineStep.TTS)
+
+    assert result.status == TaskStatus.SUCCESS
+    assert result.error is None
+    assert result.steps[PipelineStep.TTS.value] == StepStatus.SUCCESS
+    assert (tmp_path / "audio_tts.wav").exists()

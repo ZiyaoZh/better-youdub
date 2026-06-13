@@ -13,6 +13,7 @@ from .media import require_binary
 from .models import PipelineStep
 from .pipeline import PipelineRunner
 from .storage import TaskStore
+from .tts import TTSConfig
 from .translation import TranslationConfig
 from .transcription import WhisperXConfig
 
@@ -50,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
             PipelineStep.TRANSCRIBE_ALIGN.value,
             PipelineStep.TRANSCRIBE_DIARIZE.value,
             PipelineStep.TRANSLATE.value,
+            PipelineStep.TTS.value,
         ],
         default=PipelineStep.EXTRACT_AUDIO.value,
     )
@@ -96,6 +98,72 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.getenv("YOUDUB_TRANSLATION_BATCH_SIZE", "20")),
         help="Number of transcript segments per translation request",
+    )
+    run_task.add_argument(
+        "--tts-model",
+        default=os.getenv("YOUDUB_TTS_MODEL", os.getenv("VOXCPM_MODEL", "openbmb/VoxCPM2")),
+        help="VoxCPM2 Hugging Face model id for TTS",
+    )
+    run_task.add_argument(
+        "--tts-model-dir",
+        type=Path,
+        default=_optional_path_env("YOUDUB_TTS_MODEL_DIR") or _optional_path_env("VOXCPM_MODEL_DIR"),
+        help="Optional local VoxCPM2 model directory; bypasses Hugging Face download when set",
+    )
+    run_task.add_argument(
+        "--tts-load-denoiser",
+        action="store_true",
+        default=_bool_env("YOUDUB_TTS_LOAD_DENOISER", _bool_env("VOXCPM_LOAD_DENOISER", False)),
+        help="Load VoxCPM2 denoiser during TTS",
+    )
+    run_task.add_argument(
+        "--tts-cfg-value",
+        type=float,
+        default=float(os.getenv("YOUDUB_TTS_CFG_VALUE", os.getenv("VOXCPM_CFG_VALUE", "2.0"))),
+        help="VoxCPM2 classifier-free guidance value",
+    )
+    run_task.add_argument(
+        "--tts-inference-timesteps",
+        type=int,
+        default=int(os.getenv("YOUDUB_TTS_INFERENCE_TIMESTEPS", os.getenv("VOXCPM_INFERENCE_TIMESTEPS", "10"))),
+        help="VoxCPM2 inference timesteps",
+    )
+    run_task.add_argument(
+        "--tts-min-reference-ms",
+        type=int,
+        default=int(os.getenv("YOUDUB_TTS_MIN_REFERENCE_MS", os.getenv("VOXCPM_MIN_REFERENCE_MS", "1200"))),
+        help="Minimum vocal reference length before falling back to a longer reference",
+    )
+    run_task.add_argument(
+        "--no-tts-align-audio",
+        action="store_false",
+        dest="tts_align_audio",
+        default=_bool_env("YOUDUB_TTS_ALIGN_AUDIO", True),
+        help="Disable time-stretch alignment when mixing TTS segments",
+    )
+    run_task.add_argument(
+        "--tts-stretch-base-min",
+        type=float,
+        default=float(os.getenv("YOUDUB_TTS_STRETCH_BASE_MIN", "0.8")),
+        help="Minimum global TTS stretch ratio",
+    )
+    run_task.add_argument(
+        "--tts-stretch-base-max",
+        type=float,
+        default=float(os.getenv("YOUDUB_TTS_STRETCH_BASE_MAX", "1.2")),
+        help="Maximum global TTS stretch ratio",
+    )
+    run_task.add_argument(
+        "--tts-stretch-local-min",
+        type=float,
+        default=float(os.getenv("YOUDUB_TTS_STRETCH_LOCAL_MIN", "0.9")),
+        help="Minimum per-segment TTS stretch correction",
+    )
+    run_task.add_argument(
+        "--tts-stretch-local-max",
+        type=float,
+        default=float(os.getenv("YOUDUB_TTS_STRETCH_LOCAL_MAX", "1.1")),
+        help="Maximum per-segment TTS stretch correction",
     )
 
     subparsers.add_parser("test-video", help="Print the fixed test video identifier")
@@ -174,10 +242,25 @@ def cmd_run_task(config: AppConfig, args: argparse.Namespace) -> int:
         force_json_output=os.getenv("YOUDUB_TRANSLATION_FORCE_JSON_OUTPUT", "1") not in {"0", "false", "False"},
         temperature=float(os.getenv("YOUDUB_TRANSLATION_TEMPERATURE", "0")),
     )
+    tts_config = TTSConfig(
+        model=args.tts_model,
+        model_dir=args.tts_model_dir,
+        hf_token=config.secrets.huggingface.token,
+        load_denoiser=args.tts_load_denoiser,
+        cfg_value=args.tts_cfg_value,
+        inference_timesteps=args.tts_inference_timesteps,
+        min_reference_ms=args.tts_min_reference_ms,
+        align_audio=args.tts_align_audio,
+        stretch_base_min=args.tts_stretch_base_min,
+        stretch_base_max=args.tts_stretch_base_max,
+        stretch_local_min=args.tts_stretch_local_min,
+        stretch_local_max=args.tts_stretch_local_max,
+    )
     try:
         task = PipelineRunner(
             whisperx_config=whisperx_config,
             translation_config=translation_config,
+            tts_config=tts_config,
         ).run_step(task, step)
     finally:
         store.update(task)
@@ -190,6 +273,20 @@ def _optional_int_env(name: str) -> int | None:
     if not value:
         return None
     return int(value)
+
+
+def _optional_path_env(name: str) -> Path | None:
+    value = os.getenv(name)
+    if not value:
+        return None
+    return Path(value)
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value not in {"0", "false", "False"}
 
 
 def main(argv: list[str] | None = None) -> int:

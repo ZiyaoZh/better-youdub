@@ -21,7 +21,7 @@
 2. 人声分离：Demucs
 3. 语音识别：WhisperX，可选 diarization
 4. 翻译与摘要：OpenAI 兼容接口
-5. 克隆配音：IndexTTS / Qwen TTS 相关模型
+5. 克隆配音：VoxCPM2
 6. 合成视频：FFmpeg 叠字幕、调速、转码
 7. 生成封面和文案
 8. 上传 Bilibili
@@ -81,7 +81,7 @@
 模型体积大，不适合直接烘进常规应用镜像。建议运行时挂载或使用独立模型卷：
 
 - `/app/models`
-- `/app/checkpoints` 或保持旧代码兼容的 `models/index-tts-*`
+- `/app/checkpoints` 或按当前模型选择挂载 VoxCPM2 本地目录
 - HuggingFace 缓存：`/cache/huggingface`
 - Torch/Whisper 缓存：`/cache/torch`
 

@@ -18,6 +18,7 @@
 - Demucs 人声分离
 - WhisperX 识别、对齐、说话人分离
 - `summary.json`
+- `translation.context.json`
 - `translation.segments.json`
 - `translation.json`
 - 可复用、幂等的任务目录创建
@@ -127,32 +128,69 @@
 - `transcript.json`：整句时间，适合做翻译单元
 - `transcript.diarized.json`：词级时间和说话人信息，适合做切句和时间对齐
 
-建议翻译阶段也拆成两层产物：
+翻译阶段现在拆成三层字幕相关产物：
 
-1. `translation.segments.json`
-2. `translation.json`
+1. `translation.context.json`
+2. `translation.segments.json`
+3. `translation.json`
+
+### `translation.context.json`
+
+它是全文翻译上下文缓存，输入包括 `download.info.json` 的视频元信息、`summary.json`
+的摘要和完整 `transcript.json` 文本。最小结构如下：
+
+```json
+{
+  "schema_version": 1,
+  "status": "success",
+  "target_language": "简体中文",
+  "source_hash": "...",
+  "content_summary": "目标语言写的视频内容摘要。",
+  "glossary": [
+    {"source": "Dart Monkey", "target": "飞镖猴"}
+  ],
+  "corrections": [
+    {"wrong": "tax shooter", "correct": "Tack Shooter"}
+  ]
+}
+```
+
+设计理由：
+
+- 全文摘要能给后续分批翻译提供稳定上下文
+- 术语表能统一游戏名、角色名、技术词和缩写的译法
+- ASR 纠错表能在翻译前静默修正高置信度识别错误
+- `source_hash` 用来判断视频元信息、目标语言或全文转录变化后是否需要重算
 
 ### `translation.segments.json`
 
 它是句级翻译缓存，与 `transcript.json` 一一对应。建议结构：
 
 ```json
-[
-  {
-    "segment_id": 0,
-    "start": 0.031,
-    "end": 6.039,
-    "speaker": "SPEAKER_00",
-    "text": "Bloons Tower Defense 6, a game where ...",
-    "translation": "《气球塔防6》这游戏，说白了就是靠摆猴子挡气球。"
-  }
-]
+{
+  "schema_version": 2,
+  "prompt_version": "translation-v2",
+  "target_language": "简体中文",
+  "model": "gpt-...",
+  "context_hash": "...",
+  "segments": [
+    {
+      "segment_id": 0,
+      "start": 0.031,
+      "end": 6.039,
+      "speaker": "SPEAKER_00",
+      "text": "Bloons Tower Defense 6, a game where ...",
+      "translation": "《气球塔防6》这游戏，说白了就是靠摆猴子挡气球。"
+    }
+  ]
+}
 ```
 
 设计理由：
 
 - 句级翻译最容易保证语义完整
 - 句级缓存可以增量写入，失败后只补缺失句子
+- 缓存元数据可在目标语言、提示词版本或上下文变化时主动失效
 - 后续如果切句规则调整，可以只重算 `translation.json`，不再消耗翻译 token
 
 ### `translation.json`
@@ -179,10 +217,12 @@
 
 推荐按下面顺序做：
 
-1. 以 `transcript.json` 为句级输入，按顺序分批翻译
-2. 每批请求使用稳定的 `segment_id`，要求模型返回结构化 JSON
-3. 每个批次成功后立刻写回 `translation.segments.json`
-4. 全部句级翻译完成后，再本地生成 `translation.json`
+1. 用完整转录和视频元信息生成或复用 `translation.context.json`
+2. 以 `transcript.json` 为句级输入，按顺序分批翻译
+3. 每批请求使用稳定的 `segment_id`，并注入全文摘要、术语表和 ASR 纠错表
+4. 要求模型返回结构化 JSON，并拒绝空译文、纯标点译文和格式残留
+5. 每个批次成功后立刻写回 `translation.segments.json`
+6. 全部句级翻译完成后，再本地生成 `translation.json`
 
 不建议像旧项目那样一条句子发一次请求。那种做法上下文弱、请求数多、token 浪费
 也更明显。
@@ -201,7 +241,8 @@
 1. 句级翻译先保存在 `translation.segments.json`
 2. 使用中文标点对译文切分，优先按 `，。！？；：` 分句
 3. 对超长短句再按长度做二次切分，控制成便于 TTS 的长度
-4. 每个短句的时间不直接按中文字符数平均分，而是优先参考源句的词级时间
+4. 纯标点片段必须并入相邻文本，过短引导片段优先并入下一段
+5. 每个短句的时间不直接按中文字符数平均分，而是优先参考源句的词级时间
 
 时间分配建议：
 
@@ -223,8 +264,9 @@
 1. 增加基于 `download.info.json` 的占位下载/建任务接口
 2. 把任务目录从随机 UUID 改成基于 `source_key` 的可复用目录
 3. 实现视频信息翻译，产出 `summary.json`
-4. 实现句级翻译缓存，产出 `translation.segments.json`
-5. 实现本地切句和时间对齐，产出 `translation.json`
+4. 实现全文翻译上下文缓存，产出 `translation.context.json`
+5. 实现句级翻译缓存，产出 `translation.segments.json`
+6. 实现本地切句和时间对齐，产出 `translation.json`
 
 这条路径可以先把昂贵的模型调用和可重复的本地处理分离开，后面调切句规则时不需
 要反复重新翻译。

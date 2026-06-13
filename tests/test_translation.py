@@ -1,9 +1,15 @@
 from types import SimpleNamespace
 
 from youdub.translation import (
+    CONTEXT_OUTPUT,
+    SEGMENTS_OUTPUT,
     TranslationConfig,
     _chat_json,
-    _normalize_segment_translation_response,
+    align_translation_parts,
+    ensure_segment_translations,
+    ensure_translation_context,
+    _normalize_translation_context_response,
+    SourceClause,
     _segment_translation_response_schema,
     _summary_response_schema,
     _normalize_summary_response,
@@ -66,6 +72,14 @@ def test_split_translation_text_does_not_emit_punctuation_only_parts() -> None:
     ]
 
 
+def test_split_translation_text_merges_short_leading_fragments() -> None:
+    assert split_translation_text("很快，你会解锁升级：更锋利的飞镖、更快的攻击。", max_chars=12) == [
+        "很快，你会解锁升级：",
+        "更锋利的飞镖、",
+        "更快的攻击。",
+    ]
+
+
 def test_build_translation_entries_aligns_with_source_clause_timings() -> None:
     translated_segments = [
         {
@@ -123,6 +137,24 @@ def test_build_translation_entries_aligns_with_source_clause_timings() -> None:
             "source_text": "Nice day.",
             "translation": "今天天气不错。",
         },
+    ]
+
+
+def test_align_translation_parts_falls_back_for_invalid_short_timings() -> None:
+    output = align_translation_parts(
+        translated_parts=["第一段，", "第二段。"],
+        source_clauses=[
+            SourceClause("First,", 0.0, 0.02),
+            SourceClause("Second.", 0.02, 2.0),
+        ],
+        segment_start=0.0,
+        segment_end=2.0,
+        source_text="First, Second.",
+    )
+
+    assert output == [
+        {"translation": "第一段，", "source_text": "First, Second.", "start": 0.0, "end": 1.0},
+        {"translation": "第二段。", "source_text": "First, Second.", "start": 1.0, "end": 2.0},
     ]
 
 
@@ -204,6 +236,7 @@ def test_translate_batch_retries_after_incomplete_json(monkeypatch) -> None:
         client=client,
         info={"title": "Demo", "uploader": "Author"},
         summary={"title": "标题", "author": "作者", "summary": "摘要"},
+        context={"content_summary": "上下文", "glossary": [], "corrections": []},
         batch=batch,
         config=config,
     )
@@ -214,3 +247,110 @@ def test_translate_batch_retries_after_incomplete_json(monkeypatch) -> None:
     ]
     assert len(client.chat.completions.calls) == 2
     assert client.chat.completions.calls[0]["response_format"]["type"] == "json_schema"
+
+
+def test_translate_batch_includes_context_terms(monkeypatch) -> None:
+    monkeypatch.setattr("youdub.translation.time.sleep", lambda *_args: None)
+    client = _FakeClient([_response('{"segments":[{"segment_id":0,"translation":"飞镖猴。"}]}')])
+    config = TranslationConfig(api_key="sk-test", model="gpt-test", max_retries=1)
+
+    translated = _translate_batch(
+        client=client,
+        info={"title": "Demo", "uploader": "Author"},
+        summary={"title": "标题", "author": "作者", "summary": "摘要"},
+        context={
+            "content_summary": "游戏说明。",
+            "glossary": [{"source": "Dart Monkey", "target": "飞镖猴"}],
+            "corrections": [{"wrong": "tax shooter", "correct": "Tack Shooter"}],
+        },
+        batch=[{"segment_id": 0, "text": "Dart Monkey."}],
+        config=config,
+    )
+
+    payload = client.chat.completions.calls[0]["messages"][1]["content"]
+    assert translated == [{"segment_id": 0, "translation": "飞镖猴。"}]
+    assert "Dart Monkey" in payload
+    assert "Tack Shooter" in payload
+
+
+def test_translate_batch_rejects_punctuation_only_translation(monkeypatch) -> None:
+    monkeypatch.setattr("youdub.translation.time.sleep", lambda *_args: None)
+    client = _FakeClient([_response('{"segments":[{"segment_id":0,"translation":"、"}]}')])
+    config = TranslationConfig(api_key="sk-test", model="gpt-test", max_retries=1, force_json_output=False)
+
+    try:
+        _translate_batch(
+            client=client,
+            info={"title": "Demo", "uploader": "Author"},
+            summary={"title": "标题", "author": "作者", "summary": "摘要"},
+            context={"content_summary": "", "glossary": [], "corrections": []},
+            batch=[{"segment_id": 0, "text": "Comma."}],
+            config=config,
+        )
+    except RuntimeError as exc:
+        assert "Punctuation-only translation" in str(exc)
+    else:
+        raise AssertionError("punctuation-only translation should fail")
+
+
+def test_normalize_translation_context_accepts_hotword_aliases() -> None:
+    result = _normalize_translation_context_response(
+        {
+            "summary": "摘要",
+            "hotwords": [{"src": "Dart Monkey", "dst": "飞镖猴"}],
+            "corrections": [{"wrong": "tax shooter", "correct": "Tack Shooter"}],
+        }
+    )
+
+    assert result == {
+        "content_summary": "摘要",
+        "glossary": [{"source": "Dart Monkey", "target": "飞镖猴"}],
+        "corrections": [{"wrong": "tax shooter", "correct": "Tack Shooter"}],
+    }
+
+
+def test_ensure_translation_context_writes_cache(tmp_path) -> None:
+    client = _FakeClient(
+        [
+            _response(
+                '{"content_summary":"摘要","glossary":[{"source":"Dart Monkey","target":"飞镖猴"}],'
+                '"corrections":[{"wrong":"tax shooter","correct":"Tack Shooter"}]}'
+            )
+        ]
+    )
+    config = TranslationConfig(api_key="sk-test", model="gpt-test", max_retries=1)
+    transcript = [{"start": 0.0, "end": 1.0, "text": "Dart Monkey."}]
+
+    context = ensure_translation_context(
+        tmp_path,
+        {"title": "Demo", "uploader": "Author"},
+        {"summary": "旧摘要"},
+        transcript,
+        client,
+        config,
+    )
+
+    assert context["status"] == "success"
+    assert context["content_summary"] == "摘要"
+    assert context["glossary"] == [{"source": "Dart Monkey", "target": "飞镖猴"}]
+    assert (tmp_path / CONTEXT_OUTPUT).exists()
+
+
+def test_segment_translation_cache_uses_metadata(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("youdub.translation.time.sleep", lambda *_args: None)
+    client = _FakeClient([_response('{"segments":[{"segment_id":0,"translation":"飞镖猴。"}]}')])
+    config = TranslationConfig(api_key="sk-test", model="gpt-test", max_retries=1)
+    info = {"title": "Demo", "uploader": "Author"}
+    summary = {"title": "标题", "author": "作者", "summary": "摘要"}
+    context = {"content_summary": "上下文", "glossary": [], "corrections": []}
+    transcript = [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00", "text": "Dart Monkey."}]
+
+    first = ensure_segment_translations(tmp_path, info, summary, context, transcript, client, config)
+    second = ensure_segment_translations(tmp_path, info, summary, context, transcript, client, config)
+    cache = __import__("json").loads((tmp_path / SEGMENTS_OUTPUT).read_text(encoding="utf-8"))
+
+    assert first == second
+    assert cache["schema_version"] == 2
+    assert cache["prompt_version"] == "translation-v2"
+    assert cache["segments"][0]["translation"] == "飞镖猴。"
+    assert len(client.chat.completions.calls) == 1
