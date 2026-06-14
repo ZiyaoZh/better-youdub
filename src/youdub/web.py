@@ -59,6 +59,7 @@ class UrlTaskRequest(BaseModel):
     url: str
     use_cookies: bool = True
     cookies_path: str | None = None
+    cookies_content: str | None = None
     proxy: str | None = None
     max_height: int | None = None
     force_download: bool = False
@@ -137,6 +138,7 @@ def create_app() -> FastAPI:
     def create_url_task(payload: UrlTaskRequest) -> dict[str, Any]:
         config = _config()
         config.ensure_dirs()
+        _save_url_cookies_content(config, payload)
         try:
             result = download_url_to_artifacts(
                 payload.url,
@@ -285,11 +287,9 @@ def create_app() -> FastAPI:
         path = _config().cookies_path
         if path is None:
             raise HTTPException(status_code=422, detail="YOUDUB_COOKIES_PATH is not configured")
-        path.parent.mkdir(parents=True, exist_ok=True)
         content = payload.content if payload.content is not None else None
         if content:
-            normalized = _normalize_cookies_content(content)
-            path.write_text(normalized, encoding="utf-8")
+            _write_cookies_file(path, content)
         elif payload.clear and path.exists():
             path.unlink()
         return get_cookies()
@@ -425,15 +425,32 @@ def _download_config_from_url_payload(config: AppConfig, payload: UrlTaskRequest
 
 def _task_config_for_url_payload(config: AppConfig, payload: UrlTaskRequest) -> dict[str, Any]:
     task_config = default_task_config(config)
+    cookies_path = payload.cookies_path if payload.cookies_path is not None else task_config["download"]["cookies_path"]
+    if _clean_text(payload.cookies_content) and not _clean_text(cookies_path):
+        cookies_path = str(config.cookies_path) if config.cookies_path is not None else ""
     task_config["download"] = {
         **task_config["download"],
         "use_cookies": payload.use_cookies,
-        "cookies_path": payload.cookies_path if payload.cookies_path is not None else task_config["download"]["cookies_path"],
+        "cookies_path": cookies_path,
         "proxy": payload.proxy if payload.proxy is not None else task_config["download"]["proxy"],
         "max_height": payload.max_height if payload.max_height is not None else task_config["download"]["max_height"],
         "force_download": payload.force_download,
     }
     return task_config
+
+
+def _save_url_cookies_content(config: AppConfig, payload: UrlTaskRequest) -> None:
+    content = _clean_text(payload.cookies_content)
+    if not content:
+        return
+    if config.cookies_path is None:
+        raise HTTPException(status_code=422, detail="YOUDUB_COOKIES_PATH is not configured")
+    _write_cookies_file(config.cookies_path, content)
+
+
+def _write_cookies_file(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_normalize_cookies_content(content), encoding="utf-8")
 
 
 def _get_task(task_id: str) -> Task:
@@ -550,6 +567,13 @@ def _set_or_clear(data: dict[str, Any], key: str, value: str) -> None:
         data[key] = value
     else:
         data.pop(key, None)
+
+
+def _clean_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _normalize_cookies_content(content: str) -> str:

@@ -681,12 +681,14 @@ async function submitUrl(event) {
         url: $("urlInput").value,
         use_cookies: $("urlUseCookies").checked,
         cookies_path: $("urlCookiesPathInput").value,
+        cookies_content: $("urlCookiesContentInput").value,
         proxy: $("urlProxyInput").value,
         max_height: Number($("urlMaxHeightInput").value || 0),
         force_download: $("urlForce").checked,
       }),
     })
     $("urlInput").value = ""
+    $("urlCookiesContentInput").value = ""
     setMessage("createMessage", "任务已创建")
     await refreshTasks()
     selectTask(task.id)

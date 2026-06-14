@@ -204,6 +204,63 @@ def test_web_url_task_uses_and_saves_download_config(monkeypatch, tmp_path: Path
     }
 
 
+def test_web_url_task_accepts_cookies_content_without_echoing_it(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_download(url: str, root: Path, config: object) -> DownloadResult:
+        captured["config"] = config
+        task_dir = root / "Web" / "20260614 CookieSample__abc123"
+        task_dir.mkdir(parents=True)
+        info = {
+            "extractor_key": "YouTube",
+            "id": "abc123",
+            "title": "CookieSample",
+            "uploader": "Web",
+            "upload_date": "20260614",
+        }
+        info_path = task_dir / "download.info.json"
+        media_path = task_dir / "download.mp4"
+        info_path.write_text(json.dumps(info), encoding="utf-8")
+        media_path.write_bytes(b"video")
+        return DownloadResult(
+            task_dir=task_dir,
+            info_path=info_path,
+            media_path=media_path,
+            cover_path=None,
+            info=info,
+            source_key="youtube:abc123",
+        )
+
+    monkeypatch.setattr(web_module, "download_url_to_artifacts", fake_download)
+    cookies_content = (
+        "# Netscape HTTP Cookie File\n"
+        ".youtube.com TRUE / TRUE 1815872581 LOGIN_INFO secret-value\n"
+    )
+
+    response = client.post(
+        "/api/tasks/url",
+        json={
+            "url": "https://example.test/watch?v=abc123",
+            "use_cookies": True,
+            "cookies_path": "",
+            "cookies_content": cookies_content,
+        },
+    )
+
+    assert response.status_code == 201
+    cookies_path = tmp_path / "cookies" / "cookies.txt"
+    assert cookies_path.read_text(encoding="utf-8") == (
+        "# Netscape HTTP Cookie File\n"
+        ".youtube.com\tTRUE\t/\tTRUE\t1815872581\tLOGIN_INFO\tsecret-value\n"
+    )
+    assert captured["config"].cookies_path == cookies_path
+    assert captured["config"].use_cookies is True
+    payload = json.dumps(response.json(), ensure_ascii=False)
+    assert "secret-value" not in payload
+    assert response.json()["config"]["download"]["cookies_path"] == str(cookies_path)
+
+
 def test_web_run_step_uses_saved_task_config(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
     monkeypatch.setenv("OPENAI_MODEL", "gpt-env")
