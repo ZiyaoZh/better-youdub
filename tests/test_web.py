@@ -211,6 +211,98 @@ def test_web_url_task_uses_and_saves_download_config(monkeypatch, tmp_path: Path
     }
 
 
+def test_web_can_create_url_draft_before_download(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+
+    def fail_download(*args: object, **kwargs: object) -> None:
+        raise AssertionError("draft creation must not download")
+
+    monkeypatch.setattr(web_module, "download_url_to_artifacts", fail_download)
+
+    response = client.post(
+        "/api/tasks/url-draft",
+        json={
+            "url": "https://example.test/watch?v=abc123",
+            "max_height": 720,
+            "auto_run_all_after_download": True,
+        },
+    )
+
+    assert response.status_code == 201
+    task = response.json()
+    assert task["source"] == "https://example.test/watch?v=abc123"
+    assert task["source_key"] is None
+    assert task["status"] == "pending"
+    assert task["steps"] == {}
+    assert task["artifacts"] == []
+    assert Path(task["folder"]).parent == tmp_path / "videos" / "_pending"
+    assert task["config"]["download"]["max_height"] == 720
+    assert task["config"]["download"]["auto_run_all_after_download"] is True
+
+
+def test_web_downloads_url_draft_with_saved_config_and_hydrates_same_task(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    draft = client.post(
+        "/api/tasks/url-draft",
+        json={"url": "https://example.test/watch?v=abc123", "max_height": 720},
+    ).json()
+    config = draft["config"]
+    config["download"]["max_height"] = 360
+    config["translation"]["model"] = "gpt-task"
+    updated = client.put(f"/api/tasks/{draft['id']}/config", json={"config": config})
+    assert updated.status_code == 200
+    captured = {}
+
+    def fake_download(url: str, root: Path, config: object) -> DownloadResult:
+        captured["url"] = url
+        captured["config"] = config
+        task_dir = root / "Web" / "20260614 Hydrated__abc123"
+        task_dir.mkdir(parents=True)
+        info = {
+            "extractor_key": "YouTube",
+            "id": "abc123",
+            "title": "Hydrated",
+            "uploader": "Web",
+            "upload_date": "20260614",
+            "webpage_url": url,
+        }
+        info_path = task_dir / "download.info.json"
+        media_path = task_dir / "download.mp4"
+        cover_path = task_dir / "download.webp"
+        info_path.write_text(json.dumps(info), encoding="utf-8")
+        media_path.write_bytes(b"video")
+        cover_path.write_bytes(b"cover")
+        return DownloadResult(
+            task_dir=task_dir,
+            info_path=info_path,
+            media_path=media_path,
+            cover_path=cover_path,
+            info=info,
+            source_key="youtube:abc123",
+        )
+
+    monkeypatch.setattr(web_module, "download_url_to_artifacts", fake_download)
+
+    response = client.post(f"/api/tasks/{draft['id']}/download")
+
+    assert response.status_code == 200
+    assert response.json()["running"] is True
+    web_module._RUNNING[draft["id"]].result(timeout=2)
+    task = client.get(f"/api/tasks/{draft['id']}").json()
+    assert task["id"] == draft["id"]
+    assert task["title"] == "Hydrated"
+    assert task["source"] == "https://example.test/watch?v=abc123"
+    assert task["source_key"] == "youtube:abc123"
+    assert task["author"] == "Web"
+    assert task["folder"] == str(tmp_path / "videos" / "Web" / "20260614 Hydrated")
+    assert task["steps"]["ingest"] == "success"
+    assert task["artifacts"][0]["key"] == "download-video"
+    assert task["config"]["download"]["max_height"] == 360
+    assert task["config"]["translation"]["model"] == "gpt-task"
+    assert captured["url"] == "https://example.test/watch?v=abc123"
+    assert captured["config"].max_height == 360
+
+
 def test_web_url_task_can_auto_run_all_after_download(monkeypatch, tmp_path: Path) -> None:
     client = _client(monkeypatch, tmp_path)
     captured = {}
@@ -260,6 +352,60 @@ def test_web_url_task_can_auto_run_all_after_download(monkeypatch, tmp_path: Pat
         "label": "web-auto-run-all-after-download",
     }
     assert task["config"]["download"]["auto_run_all_after_download"] is True
+
+
+def test_web_url_draft_auto_runs_after_download(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    draft = client.post(
+        "/api/tasks/url-draft",
+        json={
+            "url": "https://example.test/watch?v=abc123",
+            "auto_run_all_after_download": True,
+        },
+    ).json()
+    captured = {}
+
+    def fake_download(url: str, root: Path, config: object) -> DownloadResult:
+        task_dir = root / "Web" / "20260614 DraftAuto__abc123"
+        task_dir.mkdir(parents=True)
+        info = {
+            "extractor_key": "YouTube",
+            "id": "abc123",
+            "title": "DraftAuto",
+            "uploader": "Web",
+            "upload_date": "20260614",
+            "webpage_url": url,
+        }
+        info_path = task_dir / "download.info.json"
+        media_path = task_dir / "download.mp4"
+        info_path.write_text(json.dumps(info), encoding="utf-8")
+        media_path.write_bytes(b"video")
+        return DownloadResult(
+            task_dir=task_dir,
+            info_path=info_path,
+            media_path=media_path,
+            cover_path=None,
+            info=info,
+            source_key="youtube:abc123",
+        )
+
+    def fake_run_all(task_id: str, task_lock=None) -> None:
+        captured["task_id"] = task_id
+        captured["locked_folder"] = str(task_lock.task_dir) if task_lock is not None else None
+        if task_lock is not None:
+            task_lock.release()
+
+    monkeypatch.setattr(web_module, "download_url_to_artifacts", fake_download)
+    monkeypatch.setattr(web_module, "_run_all_job", fake_run_all)
+
+    response = client.post(f"/api/tasks/{draft['id']}/download")
+
+    assert response.status_code == 200
+    web_module._RUNNING[draft["id"]].result(timeout=2)
+    assert captured == {
+        "task_id": draft["id"],
+        "locked_folder": str(tmp_path / "videos" / "Web" / "20260614 DraftAuto"),
+    }
 
 
 def test_web_url_task_accepts_cookies_content_without_echoing_it(monkeypatch, tmp_path: Path) -> None:

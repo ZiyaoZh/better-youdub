@@ -3,6 +3,7 @@ from pathlib import Path
 
 from youdub.ingest import (
     TASK_METADATA_NAME,
+    create_pending_url_task,
     create_task_from_download_artifacts,
     create_task_from_local_media,
     slugify,
@@ -25,6 +26,16 @@ def test_create_task_from_local_media(tmp_path: Path) -> None:
     assert task.folder.exists()
     assert (task.folder / "download.mp4").read_bytes() == b"not a real video"
     assert task.steps[PipelineStep.INGEST.value] == StepStatus.SUCCESS
+
+
+def test_create_pending_url_task_creates_configurable_placeholder(tmp_path: Path) -> None:
+    task = create_pending_url_task("https://example.test/watch?v=demo123", tmp_path / "videos")
+
+    assert task.source == "https://example.test/watch?v=demo123"
+    assert task.title == "URL draft"
+    assert task.folder.parent == tmp_path / "videos" / "_pending"
+    assert task.steps == {}
+    assert task.source_key is None
 
 
 def test_create_task_from_download_artifacts_uses_stable_folder(tmp_path: Path) -> None:

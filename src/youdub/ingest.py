@@ -46,6 +46,19 @@ def create_task_from_local_media(source: Path, root: Path, title: str | None = N
     return task
 
 
+def create_pending_url_task(url: str, root: Path, title: str | None = None) -> Task:
+    task_id = uuid.uuid4().hex[:12]
+    clean_title = slugify(title or "URL draft")
+    task_folder = root / "_pending" / f"{task_id}_{clean_title}"
+    task_folder.mkdir(parents=True, exist_ok=False)
+    return Task(
+        id=task_id,
+        title=clean_title,
+        source=url.strip(),
+        folder=task_folder,
+    )
+
+
 def create_task_from_download_artifacts(
     source: Path,
     info_path: Path,

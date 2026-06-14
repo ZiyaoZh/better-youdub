@@ -13,6 +13,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
@@ -21,9 +22,9 @@ from pydantic import BaseModel
 
 from .config import AppConfig
 from .downloader import download_url_to_artifacts, supported_js_runtimes
-from .ingest import create_task_from_download_artifacts, create_task_from_local_media
+from .ingest import create_pending_url_task, create_task_from_download_artifacts, create_task_from_local_media
 from .locking import TaskLock, TaskLockBusy, task_is_locked
-from .models import PipelineStep, Task
+from .models import PipelineStep, StepStatus, Task, TaskStatus
 from .pipeline import PipelineRunner
 from .storage import TaskStore
 from .synthesis import ffmpeg_has_filter
@@ -139,10 +140,11 @@ def create_app() -> FastAPI:
     def create_url_task(payload: UrlTaskRequest) -> dict[str, Any]:
         config = _config()
         config.ensure_dirs()
+        url = _validated_url(payload.url)
         _save_url_cookies_content(config, payload)
         try:
             result = download_url_to_artifacts(
-                payload.url,
+                url,
                 config.root,
                 _download_config_from_url_payload(config, payload),
             )
@@ -158,6 +160,17 @@ def create_app() -> FastAPI:
         task = _store().upsert(task)
         if payload.auto_run_all_after_download:
             _schedule_run_all_for_task(task, "web-auto-run-all-after-download")
+        return _task_payload(task)
+
+    @app.post("/api/tasks/url-draft", status_code=201)
+    def create_url_draft_task(payload: UrlTaskRequest) -> dict[str, Any]:
+        config = _config()
+        config.ensure_dirs()
+        url = _validated_url(payload.url)
+        _save_url_cookies_content(config, payload)
+        task = create_pending_url_task(url, config.root)
+        task.config = _task_config_for_url_payload(config, payload)
+        _store().add(task)
         return _task_payload(task)
 
     @app.post("/api/tasks/local", status_code=201)
@@ -206,6 +219,13 @@ def create_app() -> FastAPI:
     def run_all(task_id: str) -> dict[str, Any]:
         task = _get_task(task_id)
         _schedule_run_all_for_task(task, "web-run-all")
+        return _task_payload(task)
+
+    @app.post("/api/tasks/{task_id}/download")
+    def download_existing_url_task(task_id: str) -> dict[str, Any]:
+        task = _get_task(task_id)
+        _validated_url(task.source)
+        _schedule_download_for_task(task, "web-download-url")
         return _task_payload(task)
 
     @app.delete("/api/tasks/{task_id}", status_code=204)
@@ -504,6 +524,76 @@ def _schedule_run_all_for_task(task: Task, label: str) -> None:
         _RUNNING[task.id] = _EXECUTOR.submit(_run_all_job, task.id, task_lock)
 
 
+def _schedule_download_for_task(task: Task, label: str) -> None:
+    with _LOCK:
+        future = _RUNNING.get(task.id)
+        if future is not None and not future.done():
+            raise HTTPException(status_code=409, detail="Task is already running")
+        task_lock = _acquire_task_lock_for_web(task, label)
+        _RUNNING[task.id] = _EXECUTOR.submit(_download_url_job, task.id, task_lock)
+
+
+def _download_url_job(task_id: str, task_lock: TaskLock | None = None) -> None:
+    store = _store()
+    task = store.get(task_id)
+    try:
+        task.status = TaskStatus.RUNNING
+        task.error = None
+        task.mark_step(PipelineStep.INGEST, StepStatus.RUNNING)
+        store.update(task)
+
+        config = _config()
+        result = download_url_to_artifacts(
+            _validated_url(task.source),
+            config.root,
+            download_config_from_task_config(config, task.config),
+        )
+        incoming = create_task_from_download_artifacts(
+            source=result.media_path,
+            info_path=result.info_path,
+            root=config.root,
+            cover_path=result.cover_path,
+        )
+        task = _downloaded_task_payload(task, incoming)
+        store.update(task)
+    except Exception as exc:
+        task.status = TaskStatus.FAILED
+        task.error = str(exc)
+        task.mark_step(PipelineStep.INGEST, StepStatus.FAILED)
+        store.update(task)
+        raise
+    finally:
+        if task_lock is not None:
+            task_lock.release()
+
+    if _auto_run_all_after_download(task):
+        run_lock = TaskLock(task.folder, "web-auto-run-all-after-download").acquire(blocking=False)
+        _run_all_job(task.id, run_lock)
+
+
+def _downloaded_task_payload(existing: Task, incoming: Task) -> Task:
+    merged = Task(
+        id=existing.id,
+        title=incoming.title,
+        source=incoming.source,
+        folder=incoming.folder,
+        source_key=incoming.source_key,
+        author=incoming.author,
+        status=TaskStatus.PENDING,
+        steps=dict(existing.steps),
+        created_at=existing.created_at,
+        error=None,
+        config=dict(existing.config),
+    )
+    merged.mark_step(PipelineStep.INGEST, StepStatus.SUCCESS)
+    return merged
+
+
+def _auto_run_all_after_download(task: Task) -> bool:
+    config = task.config.get("download") if isinstance(task.config, dict) else None
+    return isinstance(config, dict) and bool(config.get("auto_run_all_after_download"))
+
+
 def _run_step_job(
     task_id: str,
     step: PipelineStep,
@@ -583,6 +673,15 @@ def _clean_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _validated_url(value: Any) -> str:
+    url = str(value or "").strip()
+    if not url:
+        raise HTTPException(status_code=422, detail="URL is required")
+    if urlparse(url).scheme.lower() not in {"http", "https"}:
+        raise HTTPException(status_code=422, detail="Only http:// and https:// video URLs are supported")
+    return url
 
 
 def _normalize_cookies_content(content: str) -> str:

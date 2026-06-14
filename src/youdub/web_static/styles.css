@@ -210,6 +210,12 @@ textarea:focus {
   gap: 12px;
 }
 
+.form-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
 .checkbox-line {
   display: flex;
   align-items: center;
@@ -643,6 +649,10 @@ textarea:focus {
   .workspace {
     grid-template-columns: 1fr;
     grid-template-rows: auto auto auto;
+  }
+
+  .form-actions {
+    grid-template-columns: 1fr;
   }
 
   .create-panel,

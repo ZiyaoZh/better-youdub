@@ -68,7 +68,10 @@
               <span>最大下载高度（0 为不限制）</span>
               <input id="urlMaxHeightInput" type="number" min="0" step="1" placeholder="0" />
             </label>
-            <button class="button primary" type="submit">下载并创建</button>
+            <div class="form-actions">
+              <button class="button primary" type="submit">下载并创建</button>
+              <button id="urlDraftButton" class="button secondary" type="button">先创建任务</button>
+            </div>
           </form>
 
           <form id="localForm" class="create-form hidden">

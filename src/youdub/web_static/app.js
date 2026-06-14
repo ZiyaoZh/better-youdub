@@ -307,7 +307,8 @@ function renderDetail(task, options = {}) {
   $("detailUpdated").textContent = fmtTime(task.updated_at)
   $("detailError").classList.toggle("hidden", !task.error)
   $("detailError").textContent = task.error || ""
-  $("runAllButton").disabled = task.running
+  const hasDownload = taskHasArtifact(task, "download-video")
+  $("runAllButton").disabled = task.running || !hasDownload
   $("deleteButton").disabled = task.running
   $("saveTaskConfigButton").disabled = task.running
   renderSteps(task)
@@ -322,6 +323,7 @@ function renderSteps(task) {
   const grid = $("stepsGrid")
   grid.innerHTML = ""
   grid.appendChild(renderDownloadConfigCard(task))
+  const hasDownload = taskHasArtifact(task, "download-video")
   for (const [step, label] of STEPS) {
     const status = task.steps?.[step] || "pending"
     const configKey = STEP_CONFIG_SECTIONS[step]
@@ -339,7 +341,7 @@ function renderSteps(task) {
         ${configKey ? `<button class="icon-button step-config-button" type="button" title="${label}参数" aria-label="${label}参数">⚙</button>` : ""}
       </div>
       <div class="step-card-actions">
-        <button class="button secondary" type="button" ${task.running ? "disabled" : ""}>${buttonLabel}</button>
+        <button class="button secondary" type="button" ${task.running || !hasDownload ? "disabled" : ""}>${buttonLabel}</button>
       </div>
     `
     const configButton = card.querySelector(".step-config-button")
@@ -359,8 +361,10 @@ function renderSteps(task) {
 }
 
 function renderDownloadConfigCard(task) {
-  const hasDownload = (task.artifacts || []).some((item) => item.key === "download-video")
-  const status = hasDownload ? "success" : "pending"
+  const hasDownload = taskHasArtifact(task, "download-video")
+  const canDownload = isUrlSource(task.source)
+  const status = task.running && !hasDownload ? "running" : hasDownload ? "success" : "pending"
+  const buttonLabel = hasDownload ? "重新下载" : "下载"
   const card = document.createElement("div")
   card.className = "step-card step-card-config-only has-config"
   card.innerHTML = `
@@ -371,6 +375,11 @@ function renderDownloadConfigCard(task) {
       </div>
       <button class="icon-button step-config-button" type="button" title="下载参数" aria-label="下载参数">⚙</button>
     </div>
+    ${canDownload ? `
+      <div class="step-card-actions">
+        <button class="button secondary download-task-button" type="button" ${task.running ? "disabled" : ""}>${buttonLabel}</button>
+      </div>
+    ` : ""}
   `
   card.querySelector(".step-config-button").addEventListener("click", (event) => {
     event.stopPropagation()
@@ -380,7 +389,22 @@ function renderDownloadConfigCard(task) {
     if (event.target.closest("button")) return
     openTaskConfig(task, "download")
   })
+  const downloadButton = card.querySelector(".download-task-button")
+  if (downloadButton) {
+    downloadButton.addEventListener("click", (event) => {
+      event.stopPropagation()
+      downloadTask(task.id).catch((error) => window.alert(error.message))
+    })
+  }
   return card
+}
+
+function taskHasArtifact(task, artifactKey) {
+  return (task.artifacts || []).some((item) => item.key === artifactKey)
+}
+
+function isUrlSource(value) {
+  return /^https?:\/\//i.test(String(value || ""))
 }
 
 function artifactUrl(taskId, artifactKey, params = {}) {
@@ -665,6 +689,11 @@ async function runAll() {
   await refreshTasks()
 }
 
+async function downloadTask(taskId) {
+  await api(`/api/tasks/${taskId}/download`, {method: "POST"})
+  await refreshTasks()
+}
+
 async function deleteSelected() {
   if (!state.selectedId) return
   if (!window.confirm("删除任务记录？任务目录不会被删除。")) return
@@ -710,6 +739,32 @@ async function submitUrl(event) {
     $("urlInput").value = ""
     $("urlCookiesContentInput").value = ""
     setMessage("createMessage", autoRunAll ? "任务已创建，已开始运行完整链路" : "任务已创建")
+    await refreshTasks()
+    selectTask(task.id)
+  } catch (error) {
+    setMessage("createMessage", error.message, true)
+  }
+}
+
+async function submitUrlDraft() {
+  setMessage("createMessage", "")
+  try {
+    const task = await api("/api/tasks/url-draft", {
+      method: "POST",
+      body: JSON.stringify({
+        url: $("urlInput").value,
+        use_cookies: $("urlUseCookies").checked,
+        cookies_path: $("urlCookiesPathInput").value,
+        cookies_content: $("urlCookiesContentInput").value,
+        proxy: $("urlProxyInput").value,
+        max_height: Number($("urlMaxHeightInput").value || 0),
+        force_download: $("urlForce").checked,
+        auto_run_all_after_download: $("urlAutoRunAllAfterDownload").checked,
+      }),
+    })
+    $("urlInput").value = ""
+    $("urlCookiesContentInput").value = ""
+    setMessage("createMessage", "任务已创建")
     await refreshTasks()
     selectTask(task.id)
   } catch (error) {
@@ -777,6 +832,7 @@ function bindEvents() {
     button.addEventListener("click", () => switchCreateTab(button.dataset.createTab))
   })
   $("urlForm").addEventListener("submit", submitUrl)
+  $("urlDraftButton").addEventListener("click", () => submitUrlDraft())
   $("localForm").addEventListener("submit", submitLocal)
   $("uploadForm").addEventListener("submit", submitUpload)
   $("taskConfigForm").addEventListener("submit", saveTaskConfig)
