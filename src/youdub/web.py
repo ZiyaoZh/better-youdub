@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import os
+import secrets
 import shutil
 import tempfile
 import threading
@@ -11,8 +15,8 @@ from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -81,6 +85,7 @@ class YtdlpSettingsUpdate(BaseModel):
 def create_app() -> FastAPI:
     app = FastAPI(title="YouDub WebUI")
     static_dir = Path(__file__).resolve().parent / "web_static"
+    _install_auth_middleware(app)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
@@ -306,6 +311,63 @@ def create_app() -> FastAPI:
         return FileResponse(static_dir / "index.html")
 
     return app
+
+
+def _install_auth_middleware(app: FastAPI) -> None:
+    username = _optional_env("YOUDUB_WEB_USERNAME")
+    password = _optional_env("YOUDUB_WEB_PASSWORD")
+    enabled = username is not None or password is not None
+    complete = username is not None and password is not None
+
+    if not enabled:
+        return
+
+    @app.middleware("http")
+    async def require_basic_auth(request: Request, call_next: Any) -> Response:
+        if not complete:
+            return _auth_required_response()
+        provided = _basic_auth_credentials(request.headers.get("authorization"))
+        if provided is None:
+            return _auth_required_response()
+        provided_username, provided_password = provided
+        if not (
+            secrets.compare_digest(provided_username, username)
+            and secrets.compare_digest(provided_password, password)
+        ):
+            return _auth_required_response()
+        return await call_next(request)
+
+
+def _basic_auth_credentials(header: str | None) -> tuple[str, str] | None:
+    if not header:
+        return None
+    scheme, _, encoded = header.partition(" ")
+    if scheme.lower() != "basic" or not encoded:
+        return None
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return None
+    username, separator, password = decoded.partition(":")
+    if not separator:
+        return None
+    return username, password
+
+
+def _auth_required_response() -> Response:
+    return Response(
+        "Authentication required",
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="YouDub"'},
+    )
+
+
+def _optional_env(name: str) -> str | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
 
 
 app = create_app()

@@ -3,8 +3,9 @@ set -euo pipefail
 
 PYTHON_BIN="${PYTHON:-python3}"
 export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-/tmp/youdub-cache/pycache}"
+export NLTK_DATA="${NLTK_DATA:-/tmp/youdub-cache/nltk_data}"
 
-mkdir -p "$PYTHONPYCACHEPREFIX"
+mkdir -p "$PYTHONPYCACHEPREFIX" "$NLTK_DATA"
 
 echo "[check-gpu] compiling sources"
 "$PYTHON_BIN" -m compileall -q src
@@ -58,6 +59,7 @@ echo "[check-gpu] checking Python GPU/runtime imports"
 "$PYTHON_BIN" - <<'PY'
 import librosa
 import openai
+import os
 import soundfile
 import yt_dlp
 import bilibili_api
@@ -65,6 +67,8 @@ import voxcpm
 from youdub.transcription import WhisperXConfig, prepare_whisperx_runtime
 
 prepare_whisperx_runtime(WhisperXConfig(models_dir="/models"))
+assert os.environ["NLTK_DATA"] != "/nltk_data", os.environ["NLTK_DATA"]
+assert os.access(os.environ["NLTK_DATA"].split(os.pathsep, 1)[0], os.W_OK), os.environ["NLTK_DATA"]
 
 import whisperx
 from whisperx.diarize import DiarizationPipeline

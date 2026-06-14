@@ -30,6 +30,7 @@ fi
 
 mkdir -p \
   data/cache/huggingface \
+  data/cache/nltk \
   data/cache/torch \
   data/config \
   data/cookies \
@@ -68,6 +69,7 @@ docker compose -f "$COMPOSE_FILE" run "${RUN_FLAGS[@]}" \
   -e YOUDUB_SMOKE_SYNTHESIZE="${YOUDUB_SMOKE_SYNTHESIZE:-0}" \
   -e YOUDUB_SMOKE_PREPARE_PUBLISH="${YOUDUB_SMOKE_PREPARE_PUBLISH:-0}" \
   -e YOUDUB_SMOKE_PUBLISH_BILIBILI="${YOUDUB_SMOKE_PUBLISH_BILIBILI:-0}" \
+  -e NLTK_DATA="${NLTK_DATA:-/cache/nltk}" \
   -e YOUDUB_WHISPER_MODEL="${YOUDUB_WHISPER_MODEL:-large-v2}" \
   -e YOUDUB_WHISPER_DEVICE="${YOUDUB_WHISPER_DEVICE:-auto}" \
   -e YOUDUB_WHISPER_BATCH_SIZE="${YOUDUB_WHISPER_BATCH_SIZE:-32}" \

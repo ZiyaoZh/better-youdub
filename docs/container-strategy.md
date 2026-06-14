@@ -117,6 +117,11 @@ docker compose -f compose.gpu.yml run --rm youdub-gpu youdub show-task <task-id>
 docker compose -f compose.gpu.yml up -d
 ```
 
+Compose 默认只把 Web UI 映射到宿主机 `127.0.0.1:${YOUDUB_WEB_PORT:-49173}`。
+远程访问应通过 SSH 隧道或受控反向代理；不要直接把 Web UI 绑定到公网网卡。
+设置 `YOUDUB_WEB_USERNAME` 和 `YOUDUB_WEB_PASSWORD` 后，FastAPI Web UI 会启用
+HTTP Basic Auth。只设置其中一个会拒绝所有请求。
+
 ## 挂载点设计
 
 建议容器内固定路径：
@@ -128,6 +133,7 @@ docker compose -f compose.gpu.yml up -d
 - `/data/logs`：日志
 - `/models`：TTS/Whisper/Demucs 模型文件
 - `/cache/huggingface`：HuggingFace 缓存
+- `/cache/nltk`：NLTK 数据缓存，供 WhisperX/pyannote 依赖链使用，避免写入不可写的 `/nltk_data`
 - `/cache/torch`：Torch 缓存
 
 最终视频合成会使用 FFmpeg `subtitles` filter 烧录字幕，app 镜像需要安装
@@ -145,7 +151,10 @@ YOUDUB_COOKIES_PATH=/data/cookies/cookies.txt
 YOUDUB_YTDLP_PROXY=
 YOUDUB_DOWNLOAD_MAX_HEIGHT=0
 YOUDUB_MODELS_DIR=/models
+YOUDUB_WEB_USERNAME=
+YOUDUB_WEB_PASSWORD=
 HF_HOME=/cache/huggingface
+NLTK_DATA=/cache/nltk
 TORCH_HOME=/cache/torch
 ```
 

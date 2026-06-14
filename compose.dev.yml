@@ -17,6 +17,12 @@ services:
       YOUDUB_COOKIES_PATH: /data/cookies/cookies.txt
       YOUDUB_YTDLP_PROXY: ${YOUDUB_YTDLP_PROXY:-}
       YOUDUB_DOWNLOAD_MAX_HEIGHT: ${YOUDUB_DOWNLOAD_MAX_HEIGHT:-}
+      YOUDUB_WEB_USERNAME: ${YOUDUB_WEB_USERNAME:-}
+      YOUDUB_WEB_PASSWORD: ${YOUDUB_WEB_PASSWORD:-}
+      HOME: /tmp
+      MPLCONFIGDIR: /tmp/youdub-cache/matplotlib
+      XDG_CACHE_HOME: /tmp/youdub-cache/xdg
+      NLTK_DATA: /cache/nltk
     volumes:
       - .:/app
       - ./data/videos:/data/videos
@@ -25,6 +31,7 @@ services:
       - ./data/config:/data/config
       - ./data/cookies:/data/cookies
       - ./models:/models
+      - ./data/cache/nltk:/cache/nltk
     ports:
-      - "${YOUDUB_WEB_PORT:-49173}:8000"
+      - "127.0.0.1:${YOUDUB_WEB_PORT:-49173}:8000"
     command: ["uvicorn", "youdub.web:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

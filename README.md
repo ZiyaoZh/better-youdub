@@ -104,6 +104,8 @@ export YOUDUB_TASKS_PATH="$PWD/data/tasks/tasks.json"
 export YOUDUB_LOG_DIR="$PWD/data/logs"
 export YOUDUB_CONFIG_PATH="$PWD/data/config/youdub.json"
 export YOUDUB_COOKIES_PATH="$PWD/data/cookies/cookies.txt"
+export YOUDUB_WEB_USERNAME=
+export YOUDUB_WEB_PASSWORD=
 python3 -m youdub.web
 ```
 
@@ -118,6 +120,15 @@ Web UI 不会回显 cookies、OpenAI key 或 Bilibili 凭证。`publish-bilibili
 Web 中的“运行完整链路”会按当前运行环境依次执行音频提取、人声分离、识别、翻译、
 TTS、字幕、合成和发布包步骤，因此 GPU/TTS/OpenAI/Hugging Face 等依赖仍需要按
 对应阶段配置好。
+
+设置 `YOUDUB_WEB_USERNAME` 和 `YOUDUB_WEB_PASSWORD` 后，Web UI 会启用 HTTP Basic
+Auth，所有静态页面、API 和产物下载都需要认证。只设置其中一个会拒绝所有请求，
+避免误以为认证已正确启用。Docker Compose 默认只把 Web 端口绑定到
+`127.0.0.1`，不会监听公网网卡；远程访问时使用 SSH 隧道：
+
+```bash
+ssh -L 49173:127.0.0.1:49173 <user>@<server>
+```
 
 `extract-audio` 需要 `ffmpeg`。`separate-audio` 需要 `PATH` 上存在
 `demucs` 可执行程序；当前基础开发环境不一定包含它，需要通过项目依赖文件和
@@ -530,11 +541,18 @@ GPU 环境中启动 Web UI：
 docker compose -f compose.gpu.yml up --build
 ```
 
-Docker 默认宿主机端口是 `49173`，容器内仍监听 `8000`。可以通过
-`YOUDUB_WEB_PORT` 修改宿主机映射：
+Docker 默认宿主机端口是 `49173`，容器内仍监听 `8000`，宿主机只监听
+`127.0.0.1`。可以通过 `YOUDUB_WEB_PORT` 修改宿主机映射：
 
 ```bash
 YOUDUB_WEB_PORT=8080 docker compose -f compose.dev.yml up --build
+```
+
+如需启用 Web 登录：
+
+```bash
+YOUDUB_WEB_USERNAME=<user> YOUDUB_WEB_PASSWORD=<long-random-password> \
+  docker compose -f compose.gpu.yml up --build
 ```
 
 完整重建时使用：
@@ -683,6 +701,12 @@ GPU 镜像和 compose 已设置 `HOME=/tmp`、
 `XDG_CACHE_HOME=/tmp/youdub-cache/xdg`，并在镜像里对 `/tmp/youdub-cache` 设置
 了可写权限。重建镜像后应消失。
 
+`[Errno 13] Permission denied: '/nltk_data'` 是 WhisperX/pyannote 依赖链中的 NLTK
+尝试写入不可写全局目录导致的。GPU 和 dev Compose 默认设置
+`NLTK_DATA=/cache/nltk` 并挂载到 `data/cache/nltk`；代码入口也会在进入 WhisperX
+前把不可写的 `/nltk_data` 纠正到 `/tmp/youdub-cache/nltk_data`。修改后需要重建并
+重启应用容器。
+
 如果 diarization 阶段报错：
 
 ```text
@@ -722,7 +746,10 @@ export PYTHONPATH="$PWD/src"
 - `YOUDUB_COOKIES_PATH=/data/cookies/cookies.txt`
 - `YOUDUB_YTDLP_PROXY=`
 - `YOUDUB_DOWNLOAD_MAX_HEIGHT=0`
+- `YOUDUB_WEB_USERNAME=`
+- `YOUDUB_WEB_PASSWORD=`
 - `HF_HOME=/cache/huggingface`
+- `NLTK_DATA=/cache/nltk`
 - `TORCH_HOME=/cache/torch`
 
 本地开发时可以改成工作区路径：

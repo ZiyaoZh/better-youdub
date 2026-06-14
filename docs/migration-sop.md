@@ -157,6 +157,9 @@ YOUDUB_YTDLP_PROXY=
 YOUDUB_DOWNLOAD_MAX_HEIGHT=0
 YOUDUB_MODELS_DIR=/models
 YOUDUB_LOG_DIR=/data/logs
+NLTK_DATA=/cache/nltk
+YOUDUB_WEB_USERNAME=
+YOUDUB_WEB_PASSWORD=
 OPENAI_API_KEY=
 OPENAI_API_BASE=
 MODEL_NAME=
@@ -251,6 +254,9 @@ BILI_BILI_JCT=
 - TTS 后识别入口：`run-task --step transcribe-tts` 已接入；对 `audio_tts.wav`
   运行 whisper + align，默认 `YOUDUB_TTS_ASR_LANGUAGE=zh` 和
   `YOUDUB_TTS_ASR_INITIAL_PROMPT=以下是普通话的句子。`，用于让 Whisper 输出简体中文。
+- WhisperX 入口会确保 `MPLCONFIGDIR`、`XDG_CACHE_HOME` 和 `NLTK_DATA` 指向可写目录。
+  GPU/dev Compose 默认使用 `NLTK_DATA=/cache/nltk`，避免 NLTK 尝试写入不可写的
+  `/nltk_data`。
 - 字幕入口：`run-task --step subtitle` 已接入；字幕文本以 `translation.json`
   的标准译文为准，时间优先来自 `audio_tts.transcript.json` 中 WhisperX align 的
   词级时间窗口。字幕步骤会把标准译文和 ASR words 展开成全局无标点字符流，做

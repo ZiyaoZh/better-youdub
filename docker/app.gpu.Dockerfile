@@ -8,6 +8,7 @@ ENV TORCH_HOME=/cache/torch
 ENV HOME=/tmp
 ENV MPLCONFIGDIR=/tmp/youdub-cache/matplotlib
 ENV XDG_CACHE_HOME=/tmp/youdub-cache/xdg
+ENV NLTK_DATA=/tmp/youdub-cache/nltk_data
 ENV TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
@@ -42,7 +43,7 @@ RUN ln -sf /usr/bin/ffmpeg /opt/conda/bin/ffmpeg \
   && ffmpeg -hide_banner -filters | awk '$2 == "subtitles" { found = 1 } END { exit found ? 0 : 1 }' \
   && fc-match "Noto Sans CJK SC" | grep -F "Noto Sans CJK" >/dev/null
 
-RUN mkdir -p /tmp/youdub-cache/matplotlib /tmp/youdub-cache/xdg \
+RUN mkdir -p /tmp/youdub-cache/matplotlib /tmp/youdub-cache/xdg /tmp/youdub-cache/nltk_data \
   && chmod -R 1777 /tmp/youdub-cache
 
 WORKDIR /app

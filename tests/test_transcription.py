@@ -83,6 +83,8 @@ def test_prepare_whisperx_runtime_sets_token_and_torch_load_defaults(
     monkeypatch.setenv("TORCH_FORCE_WEIGHTS_ONLY_LOAD", "1")
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mpl"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("NLTK_DATA", "/nltk_data")
+    monkeypatch.setattr(transcription, "RUNTIME_CACHE_DIR", tmp_path / "runtime-cache")
 
     transcription.prepare_whisperx_runtime(
         WhisperXConfig(models_dir=tmp_path / "models", hf_token="hf_test")
@@ -95,6 +97,8 @@ def test_prepare_whisperx_runtime_sets_token_and_torch_load_defaults(
     assert "TORCH_FORCE_WEIGHTS_ONLY_LOAD" not in __import__("os").environ
     assert (tmp_path / "mpl").is_dir()
     assert (tmp_path / "cache").is_dir()
+    assert __import__("os").environ["NLTK_DATA"] == str(tmp_path / "runtime-cache" / "nltk_data")
+    assert (tmp_path / "runtime-cache" / "nltk_data").is_dir()
     assert fake_torch.load("checkpoint.pt", weights_only=True) == "loaded"
     assert calls == [(("checkpoint.pt",), {"weights_only": False})]
 

@@ -178,6 +178,7 @@ python -c "import yt_dlp, openai, librosa, soundfile, audiostretchy"
 python -c "import bilibili_api"
 python -c "import whisperx"
 python -c "import demucs"
+python -c "import os; path=os.environ.get('NLTK_DATA', '/cache/nltk').split(os.pathsep, 1)[0]; os.makedirs(path, exist_ok=True); assert os.access(path, os.W_OK), path"
 deno --version
 ffmpeg -hide_banner -filters | grep -q ' subtitles '
 fc-match "Noto Sans CJK SC"

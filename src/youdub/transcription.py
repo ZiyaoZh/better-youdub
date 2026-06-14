@@ -14,6 +14,7 @@ DIARIZE_OUTPUT = "transcript.diarized.json"
 FINAL_OUTPUT = "transcript.json"
 _TORCH_LOAD_PATCHED = False
 _HUGGINGFACE_HUB_PATCHED = False
+RUNTIME_CACHE_DIR = Path("/tmp/youdub-cache")
 
 
 @dataclass(frozen=True)
@@ -78,12 +79,11 @@ def _clean_optional_text(value: str | None) -> str | None:
 
 
 def prepare_whisperx_runtime(config: WhisperXConfig) -> None:
-    os.environ.setdefault("MPLCONFIGDIR", "/tmp/youdub-cache/matplotlib")
-    os.environ.setdefault("XDG_CACHE_HOME", "/tmp/youdub-cache/xdg")
+    _ensure_runtime_dir_env("MPLCONFIGDIR", RUNTIME_CACHE_DIR / "matplotlib")
+    _ensure_runtime_dir_env("XDG_CACHE_HOME", RUNTIME_CACHE_DIR / "xdg")
+    _ensure_runtime_dir_env("NLTK_DATA", RUNTIME_CACHE_DIR / "nltk_data", replace_unwritable_defaults={Path("/nltk_data")})
     os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
     os.environ.pop("TORCH_FORCE_WEIGHTS_ONLY_LOAD", None)
-    Path(os.environ["MPLCONFIGDIR"]).mkdir(parents=True, exist_ok=True)
-    Path(os.environ["XDG_CACHE_HOME"]).mkdir(parents=True, exist_ok=True)
 
     if config.hf_token:
         _set_env_if_empty("HF_TOKEN", config.hf_token)
@@ -92,6 +92,41 @@ def prepare_whisperx_runtime(config: WhisperXConfig) -> None:
 
     _patch_torch_load_for_legacy_checkpoints()
     _patch_huggingface_hub_download()
+
+
+def _ensure_runtime_dir_env(
+    name: str,
+    default_path: Path,
+    *,
+    replace_unwritable_defaults: set[Path] | None = None,
+) -> Path:
+    replace_unwritable_defaults = replace_unwritable_defaults or set()
+    configured = _first_env_path(os.environ.get(name))
+    if configured is not None and configured not in replace_unwritable_defaults and _ensure_writable_dir(configured):
+        return configured
+
+    os.environ[name] = str(default_path)
+    if not _ensure_writable_dir(default_path):
+        raise PermissionError(f"{name} is not writable: {default_path}")
+    return default_path
+
+
+def _first_env_path(value: str | None) -> Path | None:
+    if not value:
+        return None
+    first = value.split(os.pathsep, 1)[0].strip()
+    return Path(first) if first else None
+
+
+def _ensure_writable_dir(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".youdub-write-test"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True
 
 
 def _set_env_if_empty(name: str, value: str) -> None:

@@ -14,9 +14,13 @@ ensure_writable_mounts() {
     /data/cookies \
     /models \
     /cache/huggingface \
-    /cache/torch
+    /cache/nltk \
+    /cache/torch \
+    /tmp/youdub-cache/matplotlib \
+    /tmp/youdub-cache/xdg \
+    /tmp/youdub-cache/nltk_data
   do
-    if [[ -e "$path" || "$path" == /data/* || "$path" == /cache/* ]]; then
+    if [[ -e "$path" || "$path" == /data/* || "$path" == /cache/* || "$path" == /tmp/youdub-cache/* ]]; then
       mkdir -p "$path"
       if ! gosu "${APP_UID}:${APP_GID}" test -w "$path"; then
         chown -R "${APP_UID}:${APP_GID}" "$path"

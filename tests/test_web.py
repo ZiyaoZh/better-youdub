@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
@@ -19,6 +20,11 @@ def _client(monkeypatch, tmp_path: Path) -> TestClient:
     return TestClient(create_app())
 
 
+def _basic_auth(username: str, password: str) -> dict[str, str]:
+    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
+
+
 def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) -> None:
     client = _client(monkeypatch, tmp_path)
 
@@ -27,6 +33,27 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
         assert response.status_code == 200
 
     assert client.get("/api/health").json() == {"status": "ok"}
+
+
+def test_web_basic_auth_protects_static_and_api(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("YOUDUB_WEB_USERNAME", "alice")
+    monkeypatch.setenv("YOUDUB_WEB_PASSWORD", "secret")
+    client = _client(monkeypatch, tmp_path)
+
+    unauthenticated = client.get("/api/health")
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.headers["www-authenticate"] == 'Basic realm="YouDub"'
+    assert client.get("/", headers=_basic_auth("alice", "wrong")).status_code == 401
+    assert client.get("/api/health", headers=_basic_auth("alice", "secret")).json() == {"status": "ok"}
+    assert client.get("/", headers=_basic_auth("alice", "secret")).status_code == 200
+
+
+def test_web_basic_auth_requires_complete_configuration(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("YOUDUB_WEB_USERNAME", "alice")
+    monkeypatch.delenv("YOUDUB_WEB_PASSWORD", raising=False)
+    client = _client(monkeypatch, tmp_path)
+
+    assert client.get("/api/health", headers=_basic_auth("alice", "secret")).status_code == 401
 
 
 def test_web_creates_local_task_and_lists_artifacts(monkeypatch, tmp_path: Path) -> None:
