@@ -35,6 +35,8 @@ def runtime_options_from_env(config: AppConfig) -> RuntimeOptions:
             hf_token=config.secrets.huggingface.token,
             language=_optional_str_env("YOUDUB_WHISPER_LANGUAGE"),
             initial_prompt=_optional_str_env("YOUDUB_WHISPER_INITIAL_PROMPT"),
+            tts_asr_language=_optional_str_env("YOUDUB_TTS_ASR_LANGUAGE") or "zh",
+            tts_asr_initial_prompt=_optional_str_env("YOUDUB_TTS_ASR_INITIAL_PROMPT") or "以下是普通话的句子。",
         ),
         translation=TranslationConfig(
             api_key=config.secrets.openai.api_key,

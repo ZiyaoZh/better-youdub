@@ -56,6 +56,7 @@ class Task:
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     error: str | None = None
+    config: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -70,6 +71,7 @@ class Task:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "error": self.error,
+            "config": self.config,
         }
 
     @classmethod
@@ -89,6 +91,7 @@ class Task:
             created_at=data.get("created_at", utc_now()),
             updated_at=data.get("updated_at", utc_now()),
             error=data.get("error"),
+            config=data.get("config") if isinstance(data.get("config"), dict) else {},
         )
 
     def mark_step(self, step: PipelineStep, status: StepStatus) -> None:

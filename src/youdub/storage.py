@@ -93,6 +93,7 @@ class TaskStore:
             created_at=existing.created_at,
             updated_at=existing.updated_at,
             error=existing.error,
+            config=dict(existing.config or incoming.config),
         )
 
     def _write_task_metadata(self, task: Task) -> None:

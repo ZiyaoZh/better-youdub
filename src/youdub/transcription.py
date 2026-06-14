@@ -29,6 +29,8 @@ class WhisperXConfig:
     hf_token: str | None = None
     language: str | None = None
     initial_prompt: str | None = None
+    tts_asr_language: str | None = None
+    tts_asr_initial_prompt: str | None = None
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -79,6 +81,9 @@ def _clean_optional_text(value: str | None) -> str | None:
 
 
 def prepare_whisperx_runtime(config: WhisperXConfig) -> None:
+    _ensure_runtime_dir_env("HOME", RUNTIME_CACHE_DIR / "home", replace_unwritable_defaults={Path("/")})
+    _ensure_runtime_dir_env("HF_HOME", RUNTIME_CACHE_DIR / "huggingface")
+    _ensure_runtime_dir_env("TORCH_HOME", RUNTIME_CACHE_DIR / "torch")
     _ensure_runtime_dir_env("MPLCONFIGDIR", RUNTIME_CACHE_DIR / "matplotlib")
     _ensure_runtime_dir_env("XDG_CACHE_HOME", RUNTIME_CACHE_DIR / "xdg")
     _ensure_runtime_dir_env("NLTK_DATA", RUNTIME_CACHE_DIR / "nltk_data", replace_unwritable_defaults={Path("/nltk_data")})
@@ -431,8 +436,12 @@ def _tts_asr_config(config: WhisperXConfig) -> WhisperXConfig:
         batch_size=config.batch_size,
         diarization=False,
         hf_token=config.hf_token,
-        language=_clean_optional_text(os.getenv("YOUDUB_TTS_ASR_LANGUAGE", "zh")),
+        language=_clean_optional_text(config.tts_asr_language)
+        or _clean_optional_text(os.getenv("YOUDUB_TTS_ASR_LANGUAGE", "zh")),
         initial_prompt=_clean_optional_text(
+            config.tts_asr_initial_prompt
+        )
+        or _clean_optional_text(
             os.getenv("YOUDUB_TTS_ASR_INITIAL_PROMPT", "以下是普通话的句子。")
         ),
     )

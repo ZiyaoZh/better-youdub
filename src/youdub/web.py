@@ -10,7 +10,6 @@ import tempfile
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import replace
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 from typing import Any
@@ -21,14 +20,21 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .config import AppConfig
-from .downloader import DownloadConfig, download_url_to_artifacts, supported_js_runtimes
+from .downloader import download_url_to_artifacts, supported_js_runtimes
 from .ingest import create_task_from_download_artifacts, create_task_from_local_media
 from .locking import TaskLock, TaskLockBusy, task_is_locked
 from .models import PipelineStep, Task
 from .pipeline import PipelineRunner
-from .runtime import runtime_options_from_env
 from .storage import TaskStore
 from .synthesis import ffmpeg_has_filter
+from .task_config import (
+    default_task_config,
+    download_config_from_task_config,
+    dry_run_bilibili_options,
+    normalize_task_config_update,
+    public_task_config,
+    runtime_options_from_task_config,
+)
 
 ALLOWED_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".flv", ".wmv"}
 ARTIFACTS: dict[str, tuple[str, str]] = {
@@ -52,6 +58,7 @@ _RUNNING: dict[str, Future[Any]] = {}
 class UrlTaskRequest(BaseModel):
     url: str
     use_cookies: bool = True
+    cookies_path: str | None = None
     proxy: str | None = None
     max_height: int | None = None
     force_download: bool = False
@@ -64,6 +71,10 @@ class LocalTaskRequest(BaseModel):
 
 class RunStepRequest(BaseModel):
     step: PipelineStep
+
+
+class TaskConfigUpdate(BaseModel):
+    config: dict[str, Any]
 
 
 class CookieUpdate(BaseModel):
@@ -130,13 +141,7 @@ def create_app() -> FastAPI:
             result = download_url_to_artifacts(
                 payload.url,
                 config.root,
-                DownloadConfig(
-                    cookies_path=config.cookies_path,
-                    proxy=payload.proxy if payload.proxy is not None else config.ytdlp_proxy,
-                    max_height=payload.max_height if payload.max_height is not None else config.download_max_height,
-                    force=payload.force_download,
-                    use_cookies=payload.use_cookies,
-                ),
+                _download_config_from_url_payload(config, payload),
             )
         except TaskLockBusy as exc:
             raise HTTPException(status_code=409, detail="Task is already running") from exc
@@ -146,11 +151,14 @@ def create_app() -> FastAPI:
             root=config.root,
             cover_path=result.cover_path,
         )
+        task.config = _task_config_for_url_payload(config, payload)
         return _task_payload(_store().upsert(task))
 
     @app.post("/api/tasks/local", status_code=201)
     def create_local_task(payload: LocalTaskRequest) -> dict[str, Any]:
-        task = create_task_from_local_media(Path(payload.source), _config().root, payload.title)
+        config = _config()
+        task = create_task_from_local_media(Path(payload.source), config.root, payload.title)
+        task.config = default_task_config(config)
         _store().add(task)
         return _task_payload(task)
 
@@ -171,6 +179,7 @@ def create_app() -> FastAPI:
             if upload_path.stat().st_size <= 0:
                 raise HTTPException(status_code=422, detail="Uploaded file is empty")
             task = create_task_from_local_media(upload_path, config.root, title or Path(original_name).stem)
+            task.config = default_task_config(config)
             _store().add(task)
             return _task_payload(task)
         finally:
@@ -207,6 +216,24 @@ def create_app() -> FastAPI:
         tasks = [item for item in _store().load_all() if item.id != task.id]
         _store().save_all(tasks)
         return None
+
+    @app.get("/api/task-config/defaults")
+    def get_task_config_defaults() -> dict[str, Any]:
+        return {"config": public_task_config(_config(), {})}
+
+    @app.get("/api/tasks/{task_id}/config")
+    def get_task_config(task_id: str) -> dict[str, Any]:
+        task = _get_task(task_id)
+        return {"config": public_task_config(_config(), task.config)}
+
+    @app.put("/api/tasks/{task_id}/config")
+    def save_task_config(task_id: str, payload: TaskConfigUpdate) -> dict[str, Any]:
+        task = _get_task(task_id)
+        if task_is_locked(task.folder) or _task_running(task.id):
+            raise HTTPException(status_code=409, detail="Cannot edit a running task")
+        task.config = normalize_task_config_update(_config(), task.config, payload.config)
+        _store().update(task)
+        return {"config": public_task_config(_config(), task.config)}
 
     @app.get("/api/tasks/{task_id}/artifacts")
     def list_artifacts(task_id: str) -> dict[str, Any]:
@@ -392,6 +419,23 @@ def _store() -> TaskStore:
     return TaskStore(_config().tasks_path)
 
 
+def _download_config_from_url_payload(config: AppConfig, payload: UrlTaskRequest):
+    return download_config_from_task_config(config, _task_config_for_url_payload(config, payload))
+
+
+def _task_config_for_url_payload(config: AppConfig, payload: UrlTaskRequest) -> dict[str, Any]:
+    task_config = default_task_config(config)
+    task_config["download"] = {
+        **task_config["download"],
+        "use_cookies": payload.use_cookies,
+        "cookies_path": payload.cookies_path if payload.cookies_path is not None else task_config["download"]["cookies_path"],
+        "proxy": payload.proxy if payload.proxy is not None else task_config["download"]["proxy"],
+        "max_height": payload.max_height if payload.max_height is not None else task_config["download"]["max_height"],
+        "force_download": payload.force_download,
+    }
+    return task_config
+
+
 def _get_task(task_id: str) -> Task:
     try:
         return _store().get(task_id)
@@ -403,6 +447,7 @@ def _task_payload(task: Task) -> dict[str, Any]:
     data = task.to_dict()
     data["running"] = _task_running(task.id)
     data["artifacts"] = _artifact_summary(task)
+    data["config"] = public_task_config(_config(), task.config)
     return data
 
 
@@ -443,17 +488,16 @@ def _run_step_job(
     store = _store()
     task = store.get(task_id)
     try:
-        options = runtime_options_from_env(_config())
-        bilibili = options.bilibili
-        if step == PipelineStep.PUBLISH_BILIBILI:
-            bilibili = replace(bilibili, dry_run=True, confirm=False)
+        options = runtime_options_from_task_config(_config(), task.config)
+        if step == PipelineStep.PUBLISH_BILIBILI and not options.bilibili.dry_run and not options.bilibili.confirm:
+            options = dry_run_bilibili_options(options)
         task = PipelineRunner(
             whisperx_config=options.whisperx,
             translation_config=options.translation,
             tts_config=options.tts,
             synthesis_config=options.synthesis,
             publish_config=options.publish,
-            bilibili_publish_config=bilibili,
+            bilibili_publish_config=options.bilibili,
         ).run_step(task, step, task_lock=task_lock)
     finally:
         try:

@@ -241,6 +241,10 @@ BILI_BILI_JCT=
   重复启动同一任务的下载、单步或完整链路会被拒绝；Web API 返回 `409 Task is
   already running`。该锁用于当前单实例/共享卷部署下保护任务产物，不替代后续
   多 worker 队列和数据库事务设计。
+- Web UI 已改为任务级参数模型：新任务会保存默认配置快照，任务详情页可独立覆盖
+  下载、WhisperX、翻译、TTS、合成、发布包和 Bilibili 参数。URL 下载发生在任务
+  创建前，因此 URL 创建表单也提供下载参数。空密钥字段运行时回退到环境变量或
+  `/data/config/youdub.json`，任务级密钥在 API 响应中以 `********` 脱敏。
 - FFmpeg 音频提取：生成 `audio.wav`
 - Demucs 步骤入口：`run-task --step separate-audio` 已接入；当前基础开发环境若没有 `demucs` 可执行文件，会明确失败并把任务步骤标记为 `failed`
 - 翻译步骤入口：`run-task --step translate` 已接入；模型调用可通过
@@ -254,9 +258,11 @@ BILI_BILI_JCT=
 - TTS 后识别入口：`run-task --step transcribe-tts` 已接入；对 `audio_tts.wav`
   运行 whisper + align，默认 `YOUDUB_TTS_ASR_LANGUAGE=zh` 和
   `YOUDUB_TTS_ASR_INITIAL_PROMPT=以下是普通话的句子。`，用于让 Whisper 输出简体中文。
-- WhisperX 入口会确保 `MPLCONFIGDIR`、`XDG_CACHE_HOME` 和 `NLTK_DATA` 指向可写目录。
-  GPU/dev Compose 默认使用 `NLTK_DATA=/cache/nltk`，避免 NLTK 尝试写入不可写的
-  `/nltk_data`。
+- WhisperX 入口会确保 `HOME`、`HF_HOME`、`TORCH_HOME`、`MPLCONFIGDIR`、
+  `XDG_CACHE_HOME` 和 `NLTK_DATA` 指向可写目录。GPU/dev Compose 默认使用
+  `NLTK_DATA=/cache/nltk`，避免 NLTK 尝试写入不可写的 `/nltk_data`；裸跑 WebUI
+  或缺少 home 的非 root 用户会兜底到 `/tmp/youdub-cache`，避免依赖链写入
+  `/.cache`。
 - 字幕入口：`run-task --step subtitle` 已接入；字幕文本以 `translation.json`
   的标准译文为准，时间优先来自 `audio_tts.transcript.json` 中 WhisperX align 的
   词级时间窗口。字幕步骤会把标准译文和 ASR words 展开成全局无标点字符流，做
@@ -274,7 +280,9 @@ BILI_BILI_JCT=
 - Bilibili 发布入口：`run-task --step publish-bilibili` 已接入；默认要求
   `--publish-dry-run` 或 `--publish-confirm`。dry-run 不触发真实上传，输出
   `bilibili.dry-run.json`；真实上传需要通过环境变量提供 `BILI_SESSDATA` 和
-  `BILI_BILI_JCT`，成功后写入 `bilibili.json`。
+  `BILI_BILI_JCT`，通过 `bilibili-api-python` 提交单 P `video.mp4`、封面、
+  标题、简介和标签，成功后写入 `bilibili.json`。Web UI 默认仍安全 dry-run；
+  任务级 Bilibili 参数中关闭 `dry_run` 并开启 `confirm` 后会走同一真实上传逻辑。
 
 ## Docker 验证命令
 

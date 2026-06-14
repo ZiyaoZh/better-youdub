@@ -15,7 +15,6 @@
         </div>
         <div class="topbar-actions">
           <button id="refreshButton" class="icon-button" title="刷新" type="button">↻</button>
-          <button id="settingsButton" class="button secondary" type="button">设置</button>
         </div>
       </header>
 
@@ -45,6 +44,18 @@
                 <span>重新下载</span>
               </label>
             </div>
+            <label>
+              <span>Cookies 文件路径</span>
+              <input id="urlCookiesPathInput" placeholder="/data/cookies/cookies.txt" />
+            </label>
+            <label>
+              <span>yt-dlp 代理</span>
+              <input id="urlProxyInput" placeholder="http://127.0.0.1:7890" />
+            </label>
+            <label>
+              <span>最大下载高度（0 为不限制）</span>
+              <input id="urlMaxHeightInput" type="number" min="0" step="1" placeholder="0" />
+            </label>
             <button class="button primary" type="submit">下载并创建</button>
           </form>
 
@@ -116,7 +127,11 @@
             <div id="artifactList" class="artifact-list"></div>
 
             <div id="videoPreview" class="video-preview hidden">
-              <video id="finalVideo" controls preload="metadata"></video>
+              <div class="video-preview-actions">
+                <button id="openVideoPreviewButton" class="button secondary" type="button">打开播放器</button>
+                <button id="closeVideoPreviewButton" class="button secondary hidden" type="button">停止加载</button>
+              </div>
+              <video id="finalVideo" class="hidden" controls preload="none"></video>
             </div>
 
             <div id="detailError" class="error-box hidden"></div>
@@ -125,41 +140,20 @@
       </main>
     </div>
 
-    <aside id="settingsDrawer" class="drawer" aria-hidden="true">
-      <div class="drawer-backdrop" data-close-settings></div>
+    <aside id="configDrawer" class="drawer" aria-hidden="true">
+      <div class="drawer-backdrop" data-close-config></div>
       <div class="drawer-panel">
         <div class="drawer-head">
-          <h2>设置</h2>
-          <button class="icon-button" data-close-settings type="button">×</button>
+          <h2 id="configDrawerTitle">任务参数</h2>
+          <button class="icon-button" data-close-config title="关闭" type="button">×</button>
         </div>
-        <form id="settingsForm" class="settings-form">
-          <label>
-            <span>YouTube cookies</span>
-            <textarea id="cookiesInput" rows="8" placeholder="粘贴 Netscape 格式 cookies.txt 内容。已保存时不会回显明文。"></textarea>
-          </label>
-          <div class="settings-note" id="cookieInfo"></div>
-          <label>
-            <span>yt-dlp 代理</span>
-            <input id="proxyInput" placeholder="http://127.0.0.1:7890" />
-          </label>
-          <label>
-            <span>最大下载高度（0 为不限制）</span>
-            <input id="maxHeightInput" type="number" min="0" step="1" placeholder="0" />
-          </label>
-          <label>
-            <span>OpenAI Base URL</span>
-            <input id="openaiBaseInput" placeholder="https://api.openai.com/v1" />
-          </label>
-          <label>
-            <span>OpenAI API Key</span>
-            <input id="openaiKeyInput" type="password" placeholder="已保存时显示 ********" />
-          </label>
-          <label>
-            <span>模型</span>
-            <input id="openaiModelInput" placeholder="gpt-4o-mini" />
-          </label>
-          <button class="button primary" type="submit">保存设置</button>
-          <div id="settingsMessage" class="message"></div>
+        <form id="taskConfigForm" class="task-config-form">
+          <div id="taskConfigTabs" class="config-tabs"></div>
+          <div id="taskConfigFields" class="config-fields"></div>
+          <div class="config-actions">
+            <button id="saveTaskConfigButton" class="button primary" type="submit">保存任务参数</button>
+            <div id="taskConfigMessage" class="message"></div>
+          </div>
         </form>
       </div>
     </aside>

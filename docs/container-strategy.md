@@ -159,7 +159,7 @@ TORCH_HOME=/cache/torch
 ```
 
 `YOUDUB_DOWNLOAD_MAX_HEIGHT=0` 表示不限制下载高度。Compose 默认不注入具体高度，
-以便 Web UI 写入 `/data/config/youdub.json` 的设置可以生效。
+以便 `/data/config/youdub.json` 的运行时默认值和 Web UI 任务级下载参数按预期生效。
 
 ## Compose 服务建议
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
 from dataclasses import dataclass
@@ -20,6 +21,10 @@ BILIBILI_JSON = "bilibili.json"
 BILIBILI_DRY_RUN_JSON = "bilibili.dry-run.json"
 COVER_OUTPUT = "cover.jpg"
 COVER_CANDIDATES = ("download.jpg", "download.jpeg", "download.png", "download.webp")
+BILIBILI_UPLOAD_RETRIES = 5
+BILIBILI_UPLOAD_RETRY_DELAY_SECONDS = 10.0
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -175,31 +180,78 @@ async def _upload_bilibili(
 
     source = config.source or package.get("source_url") or None
     credential = Credential(sessdata=config.sessdata, bili_jct=config.bili_jct)
-    page = video_uploader.VideoUploaderPage(
-        path=str((task_dir / package["video_path"]).resolve()),
-        title=str(package["title"]),
-        description="",
-    )
-    meta = video_uploader.VideoMeta(
-        tid=config.tid,
-        title=str(package["title"]),
-        original=config.original,
-        source=source,
-        desc=str(package["description"]),
-        tags=list(package["tags"])[:10],
-        cover=str((task_dir / package["cover_path"]).resolve()),
-        dynamic=str(package["title"]),
-        watermark=config.watermark,
-    )
-    uploader = video_uploader.VideoUploader(
-        pages=[page],
-        meta=meta,
-        credential=credential,
-    )
-    result = await uploader.start()
-    if not isinstance(result, dict):
-        return {"result": result, "uploaded_at": datetime.now(timezone.utc).isoformat()}
-    return {**result, "uploaded_at": datetime.now(timezone.utc).isoformat()}
+    last_error: Exception | None = None
+
+    for attempt in range(1, BILIBILI_UPLOAD_RETRIES + 1):
+        try:
+            page = video_uploader.VideoUploaderPage(
+                path=str((task_dir / package["video_path"]).resolve()),
+                title=str(package["title"]),
+                description="",
+            )
+            meta = video_uploader.VideoMeta(
+                tid=config.tid,
+                title=str(package["title"]),
+                original=config.original,
+                source=source,
+                desc=str(package["description"]),
+                tags=list(package["tags"])[:10],
+                cover=str((task_dir / package["cover_path"]).resolve()),
+                dynamic=str(package["title"]),
+                watermark=config.watermark,
+            )
+            uploader = video_uploader.VideoUploader(
+                pages=[page],
+                meta=meta,
+                credential=credential,
+            )
+            _attach_bilibili_upload_logging(uploader)
+            result = await uploader.start()
+            return _bilibili_upload_result(result)
+        except Exception as exc:
+            last_error = exc
+            LOGGER.exception("Bilibili upload attempt %s/%s failed", attempt, BILIBILI_UPLOAD_RETRIES)
+            if attempt < BILIBILI_UPLOAD_RETRIES:
+                await asyncio.sleep(BILIBILI_UPLOAD_RETRY_DELAY_SECONDS)
+
+    raise RuntimeError(f"Bilibili upload failed after {BILIBILI_UPLOAD_RETRIES} attempts") from last_error
+
+
+def _attach_bilibili_upload_logging(uploader: Any) -> None:
+    on = getattr(uploader, "on", None)
+    if not callable(on):
+        return
+
+    def register(event: str, handler: Any) -> None:
+        decorator = on(event)
+        if callable(decorator):
+            decorator(handler)
+
+    async def on_start() -> None:
+        LOGGER.info("Bilibili upload started")
+
+    async def on_progress(page_idx: int, total_size: int, finished_size: int) -> None:
+        if total_size <= 0:
+            LOGGER.info("Bilibili upload page %s progress: %s bytes", page_idx + 1, finished_size)
+            return
+        percent = finished_size / total_size * 100
+        LOGGER.info("Bilibili upload page %s progress: %.2f%%", page_idx + 1, percent)
+
+    async def on_completed(result: Any) -> None:
+        LOGGER.info("Bilibili upload completed: %s", result)
+
+    register("start", on_start)
+    register("progress", on_progress)
+    register("completed", on_completed)
+
+
+def _bilibili_upload_result(result: Any) -> dict[str, Any]:
+    payload = dict(result) if isinstance(result, dict) else {"result": result}
+    payload.setdefault("schema_version", 1)
+    payload["status"] = "uploaded"
+    payload["platform"] = "bilibili"
+    payload["uploaded_at"] = datetime.now(timezone.utc).isoformat()
+    return payload
 
 
 def _validate_publish_package(task_dir: Path, package: dict[str, Any]) -> None:

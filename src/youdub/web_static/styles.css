@@ -29,6 +29,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
   letter-spacing: 0;
@@ -165,8 +166,7 @@ textarea {
   color: white;
 }
 
-.create-form,
-.settings-form {
+.create-form {
   display: grid;
   gap: 12px;
 }
@@ -179,6 +179,7 @@ label {
 }
 
 input,
+select,
 textarea {
   width: 100%;
   border: 1px solid var(--border);
@@ -197,6 +198,7 @@ textarea {
 }
 
 input:focus,
+select:focus,
 textarea:focus {
   outline: 2px solid rgba(15, 118, 110, 0.2);
   border-color: var(--accent);
@@ -262,6 +264,55 @@ textarea:focus {
 .button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.drawer {
+  position: fixed;
+  inset: 0;
+  display: none;
+  z-index: 20;
+}
+
+.drawer.open {
+  display: block;
+}
+
+.drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(17, 24, 39, 0.36);
+}
+
+.drawer-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: min(640px, 100vw);
+  height: 100%;
+  overflow: auto;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  padding: 18px;
+  box-shadow: -8px 0 24px rgba(16, 24, 40, 0.14);
+}
+
+.drawer-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin: -18px -18px 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.drawer-head h2 {
+  margin: 0;
+  font-size: 18px;
 }
 
 .task-list {
@@ -404,6 +455,54 @@ textarea:focus {
   margin: 16px 0;
 }
 
+.task-config-form {
+  display: grid;
+  gap: 12px;
+}
+
+.config-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.config-tab {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-height: 32px;
+  padding: 6px 10px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.config-tab.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.config-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.config-checkbox {
+  min-height: 38px;
+  align-self: end;
+}
+
+.config-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
 .section-title {
   margin: 20px 0 10px;
   color: var(--muted);
@@ -414,7 +513,7 @@ textarea:focus {
 
 .steps-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 8px;
 }
 
@@ -424,7 +523,28 @@ textarea:focus {
   padding: 10px;
   display: grid;
   gap: 8px;
+  align-content: space-between;
   background: var(--panel-alt);
+  min-height: 104px;
+  transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+
+.step-card.has-config {
+  cursor: pointer;
+}
+
+.step-card.has-config:hover,
+.step-card.has-config:focus-within {
+  border-color: rgba(15, 118, 110, 0.36);
+  background: #f7fbfa;
+  box-shadow: 0 1px 4px rgba(16, 24, 40, 0.08);
+}
+
+.step-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
 }
 
 .step-card h3 {
@@ -432,9 +552,29 @@ textarea:focus {
   font-size: 13px;
 }
 
+.step-card .status-badge {
+  margin-top: 7px;
+}
+
+.step-card-actions {
+  display: grid;
+}
+
 .step-card .button {
   min-height: 32px;
   padding: 6px 10px;
+}
+
+.step-card .icon-button {
+  width: 32px;
+  min-height: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  font-size: 15px;
+}
+
+.step-card-config-only {
+  min-height: 80px;
 }
 
 .artifact-list {
@@ -455,6 +595,13 @@ textarea:focus {
 
 .video-preview {
   margin-top: 14px;
+}
+
+.video-preview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 
 .video-preview video {
@@ -478,54 +625,6 @@ textarea:focus {
   border-radius: 6px;
   padding: 10px;
   font-size: 13px;
-}
-
-.drawer {
-  position: fixed;
-  inset: 0;
-  display: none;
-  z-index: 20;
-}
-
-.drawer.open {
-  display: block;
-}
-
-.drawer-backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgba(17, 24, 39, 0.36);
-}
-
-.drawer-panel {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: min(520px, 100vw);
-  height: 100%;
-  overflow: auto;
-  background: var(--panel);
-  border-left: 1px solid var(--border);
-  padding: 18px;
-}
-
-.drawer-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-.drawer-head h2 {
-  margin: 0;
-  font-size: 18px;
-}
-
-.settings-note {
-  color: var(--muted);
-  font-size: 12px;
-  margin-top: -6px;
 }
 
 .hidden {
@@ -564,6 +663,10 @@ textarea:focus {
   }
 
   .meta-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .config-fields {
     grid-template-columns: 1fr;
   }
 

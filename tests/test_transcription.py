@@ -79,8 +79,11 @@ def test_prepare_whisperx_runtime_sets_token_and_torch_load_defaults(
     monkeypatch.setenv("HF_TOKEN", "")
     monkeypatch.delenv("HF_READ_TOKEN", raising=False)
     monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    monkeypatch.delenv("HF_HOME", raising=False)
+    monkeypatch.delenv("TORCH_HOME", raising=False)
     monkeypatch.delenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", raising=False)
     monkeypatch.setenv("TORCH_FORCE_WEIGHTS_ONLY_LOAD", "1")
+    monkeypatch.setenv("HOME", "/")
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mpl"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setenv("NLTK_DATA", "/nltk_data")
@@ -95,6 +98,12 @@ def test_prepare_whisperx_runtime_sets_token_and_torch_load_defaults(
     assert __import__("os").environ["HUGGING_FACE_HUB_TOKEN"] == "hf_test"
     assert __import__("os").environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] == "1"
     assert "TORCH_FORCE_WEIGHTS_ONLY_LOAD" not in __import__("os").environ
+    assert __import__("os").environ["HOME"] == str(tmp_path / "runtime-cache" / "home")
+    assert __import__("os").environ["HF_HOME"] == str(tmp_path / "runtime-cache" / "huggingface")
+    assert __import__("os").environ["TORCH_HOME"] == str(tmp_path / "runtime-cache" / "torch")
+    assert (tmp_path / "runtime-cache" / "home").is_dir()
+    assert (tmp_path / "runtime-cache" / "huggingface").is_dir()
+    assert (tmp_path / "runtime-cache" / "torch").is_dir()
     assert (tmp_path / "mpl").is_dir()
     assert (tmp_path / "cache").is_dir()
     assert __import__("os").environ["NLTK_DATA"] == str(tmp_path / "runtime-cache" / "nltk_data")

@@ -6,7 +6,13 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from youdub.downloader import DownloadResult
 from youdub.locking import TaskLock
+from youdub.models import PipelineStep, StepStatus, TaskStatus
+from youdub.translation import TranslationConfig
+from youdub.transcription import WhisperXConfig
+from youdub.tts import TTSConfig
+from youdub import web as web_module
 from youdub.web import create_app
 
 
@@ -81,6 +87,229 @@ def test_web_creates_local_task_and_lists_artifacts(monkeypatch, tmp_path: Path)
     artifacts = client.get(f"/api/tasks/{task['id']}/artifacts").json()["artifacts"]
     assert artifacts[0]["key"] == "download-video"
     assert artifacts[0]["url"] == f"/api/tasks/{task['id']}/artifacts/download-video"
+
+
+def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+
+    defaults = client.get("/api/task-config/defaults")
+    assert defaults.status_code == 200
+    assert defaults.json()["config"]["download"]["max_height"] == 0
+
+    task = client.post("/api/tasks/local", json={"source": str(source), "title": "Config Smoke"}).json()
+    assert task["config"]["whisperx"]["model_name"] == "large-v2"
+    assert task["config"]["translation"]["api_key"] == ""
+
+    updated = client.put(
+        f"/api/tasks/{task['id']}/config",
+        json={
+            "config": {
+                **task["config"],
+                "download": {
+                    **task["config"]["download"],
+                    "proxy": "http://127.0.0.1:7890",
+                    "max_height": 720,
+                },
+                "translation": {
+                    **task["config"]["translation"],
+                    "api_key": "sk-task",
+                    "base_url": "https://example.test/v1",
+                    "model": "gpt-task",
+                },
+                "whisperx": {
+                    **task["config"]["whisperx"],
+                    "batch_size": 12,
+                },
+            }
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["config"]["translation"]["api_key"] == "********"
+    assert updated.json()["config"]["download"]["max_height"] == 720
+
+    config_path = tmp_path / "tasks" / "tasks.json"
+    saved_task = json.loads(config_path.read_text(encoding="utf-8"))[0]
+    assert saved_task["config"]["translation"]["api_key"] == "sk-task"
+    assert saved_task["config"]["whisperx"]["batch_size"] == 12
+
+    masked_payload = updated.json()["config"]
+    masked_payload["translation"]["model"] = "gpt-task-2"
+    masked = client.put(f"/api/tasks/{task['id']}/config", json={"config": masked_payload})
+    assert masked.status_code == 200
+    saved_task = json.loads(config_path.read_text(encoding="utf-8"))[0]
+    assert saved_task["config"]["translation"]["api_key"] == "sk-task"
+    assert saved_task["config"]["translation"]["model"] == "gpt-task-2"
+
+
+def test_web_url_task_uses_and_saves_download_config(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_download(url: str, root: Path, config: object) -> DownloadResult:
+        captured["url"] = url
+        captured["root"] = root
+        captured["config"] = config
+        task_dir = root / "Web" / "20260614 Sample__abc123"
+        task_dir.mkdir(parents=True)
+        info = {
+            "extractor_key": "YouTube",
+            "id": "abc123",
+            "title": "Sample",
+            "uploader": "Web",
+            "upload_date": "20260614",
+        }
+        info_path = task_dir / "download.info.json"
+        media_path = task_dir / "download.mp4"
+        info_path.write_text(json.dumps(info), encoding="utf-8")
+        media_path.write_bytes(b"video")
+        return DownloadResult(
+            task_dir=task_dir,
+            info_path=info_path,
+            media_path=media_path,
+            cover_path=None,
+            info=info,
+            source_key="youtube:abc123",
+        )
+
+    monkeypatch.setattr(web_module, "download_url_to_artifacts", fake_download)
+
+    response = client.post(
+        "/api/tasks/url",
+        json={
+            "url": "https://example.test/watch?v=abc123",
+            "use_cookies": False,
+            "cookies_path": "/tmp/custom-cookies.txt",
+            "proxy": "http://127.0.0.1:7890",
+            "max_height": 720,
+            "force_download": True,
+        },
+    )
+
+    assert response.status_code == 201
+    assert captured["url"] == "https://example.test/watch?v=abc123"
+    assert captured["config"].cookies_path is None
+    assert captured["config"].use_cookies is False
+    assert captured["config"].proxy == "http://127.0.0.1:7890"
+    assert captured["config"].max_height == 720
+    assert captured["config"].force is True
+    task = response.json()
+    assert task["config"]["download"] == {
+        "use_cookies": False,
+        "cookies_path": "/tmp/custom-cookies.txt",
+        "proxy": "http://127.0.0.1:7890",
+        "max_height": 720,
+        "force_download": True,
+    }
+
+
+def test_web_run_step_uses_saved_task_config(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-env")
+    monkeypatch.setenv("HF_READ_TOKEN", "hf-env")
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task = client.post("/api/tasks/local", json={"source": str(source), "title": "Run Config"}).json()
+    config = task["config"]
+    config["translation"]["api_key"] = "sk-task"
+    config["translation"]["model"] = "gpt-task"
+    config["translation"]["target_language"] = "繁體中文"
+    config["whisperx"]["model_name"] = "medium"
+    config["whisperx"]["hf_token"] = "hf-task"
+    config["tts"]["cfg_value"] = 3.5
+    updated = client.put(f"/api/tasks/{task['id']}/config", json={"config": config})
+    assert updated.status_code == 200
+
+    captured = {}
+
+    class FakeRunner:
+        def __init__(
+            self,
+            *,
+            whisperx_config: WhisperXConfig,
+            translation_config: TranslationConfig,
+            tts_config: TTSConfig,
+            **kwargs: object,
+        ) -> None:
+            captured["whisperx"] = whisperx_config
+            captured["translation"] = translation_config
+            captured["tts"] = tts_config
+
+        def run_step(self, task, step: PipelineStep, task_lock=None):
+            task.status = TaskStatus.SUCCESS
+            task.mark_step(step, StepStatus.SUCCESS)
+            return task
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+
+    web_module._run_step_job(task["id"], PipelineStep.TRANSLATE)
+
+    assert captured["translation"].api_key == "sk-task"
+    assert captured["translation"].model == "gpt-task"
+    assert captured["translation"].target_language == "繁體中文"
+    assert captured["whisperx"].model_name == "medium"
+    assert captured["whisperx"].hf_token == "hf-task"
+    assert captured["tts"].hf_token == "hf-env"
+    assert captured["tts"].cfg_value == 3.5
+
+
+def test_web_bilibili_step_defaults_to_dry_run_until_confirmed(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task = client.post("/api/tasks/local", json={"source": str(source), "title": "Bili Config"}).json()
+    captured = {}
+
+    class FakeRunner:
+        def __init__(self, **kwargs: object) -> None:
+            captured["bilibili"] = kwargs["bilibili_publish_config"]
+
+        def run_step(self, task, step: PipelineStep, task_lock=None):
+            task.status = TaskStatus.SUCCESS
+            task.mark_step(step, StepStatus.SUCCESS)
+            return task
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+
+    web_module._run_step_job(task["id"], PipelineStep.PUBLISH_BILIBILI)
+
+    assert captured["bilibili"].dry_run is True
+    assert captured["bilibili"].confirm is False
+
+
+def test_web_bilibili_step_uses_confirmed_real_upload_config(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task = client.post("/api/tasks/local", json={"source": str(source), "title": "Bili Real"}).json()
+    config = task["config"]
+    config["bilibili"]["sessdata"] = "sess-task"
+    config["bilibili"]["bili_jct"] = "jct-task"
+    config["bilibili"]["dry_run"] = False
+    config["bilibili"]["confirm"] = True
+    updated = client.put(f"/api/tasks/{task['id']}/config", json={"config": config})
+    assert updated.status_code == 200
+    captured = {}
+
+    class FakeRunner:
+        def __init__(self, **kwargs: object) -> None:
+            captured["bilibili"] = kwargs["bilibili_publish_config"]
+
+        def run_step(self, task, step: PipelineStep, task_lock=None):
+            task.status = TaskStatus.SUCCESS
+            task.mark_step(step, StepStatus.SUCCESS)
+            return task
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+
+    web_module._run_step_job(task["id"], PipelineStep.PUBLISH_BILIBILI)
+
+    assert captured["bilibili"].dry_run is False
+    assert captured["bilibili"].confirm is True
+    assert captured["bilibili"].sessdata == "sess-task"
+    assert captured["bilibili"].bili_jct == "jct-task"
 
 
 def test_web_refuses_to_start_locked_task(monkeypatch, tmp_path: Path) -> None:
