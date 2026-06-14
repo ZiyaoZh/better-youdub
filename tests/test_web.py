@@ -97,6 +97,7 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     defaults = client.get("/api/task-config/defaults")
     assert defaults.status_code == 200
     assert defaults.json()["config"]["download"]["max_height"] == 0
+    assert defaults.json()["config"]["download"]["auto_run_all_after_download"] is False
 
     task = client.post("/api/tasks/local", json={"source": str(source), "title": "Config Smoke"}).json()
     assert task["config"]["whisperx"]["model_name"] == "large-v2"
@@ -201,7 +202,59 @@ def test_web_url_task_uses_and_saves_download_config(monkeypatch, tmp_path: Path
         "proxy": "http://127.0.0.1:7890",
         "max_height": 720,
         "force_download": True,
+        "auto_run_all_after_download": False,
     }
+
+
+def test_web_url_task_can_auto_run_all_after_download(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_download(url: str, root: Path, config: object) -> DownloadResult:
+        task_dir = root / "Web" / "20260614 AutoRun__abc123"
+        task_dir.mkdir(parents=True)
+        info = {
+            "extractor_key": "YouTube",
+            "id": "abc123",
+            "title": "AutoRun",
+            "uploader": "Web",
+            "upload_date": "20260614",
+        }
+        info_path = task_dir / "download.info.json"
+        media_path = task_dir / "download.mp4"
+        info_path.write_text(json.dumps(info), encoding="utf-8")
+        media_path.write_bytes(b"video")
+        return DownloadResult(
+            task_dir=task_dir,
+            info_path=info_path,
+            media_path=media_path,
+            cover_path=None,
+            info=info,
+            source_key="youtube:abc123",
+        )
+
+    def fake_schedule_run_all(task, label: str) -> None:
+        captured["task_id"] = task.id
+        captured["label"] = label
+
+    monkeypatch.setattr(web_module, "download_url_to_artifacts", fake_download)
+    monkeypatch.setattr(web_module, "_schedule_run_all_for_task", fake_schedule_run_all)
+
+    response = client.post(
+        "/api/tasks/url",
+        json={
+            "url": "https://example.test/watch?v=abc123",
+            "auto_run_all_after_download": True,
+        },
+    )
+
+    assert response.status_code == 201
+    task = response.json()
+    assert captured == {
+        "task_id": task["id"],
+        "label": "web-auto-run-all-after-download",
+    }
+    assert task["config"]["download"]["auto_run_all_after_download"] is True
 
 
 def test_web_url_task_accepts_cookies_content_without_echoing_it(monkeypatch, tmp_path: Path) -> None:

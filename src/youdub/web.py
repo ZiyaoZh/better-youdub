@@ -63,6 +63,7 @@ class UrlTaskRequest(BaseModel):
     proxy: str | None = None
     max_height: int | None = None
     force_download: bool = False
+    auto_run_all_after_download: bool = False
 
 
 class LocalTaskRequest(BaseModel):
@@ -154,7 +155,10 @@ def create_app() -> FastAPI:
             cover_path=result.cover_path,
         )
         task.config = _task_config_for_url_payload(config, payload)
-        return _task_payload(_store().upsert(task))
+        task = _store().upsert(task)
+        if payload.auto_run_all_after_download:
+            _schedule_run_all_for_task(task, "web-auto-run-all-after-download")
+        return _task_payload(task)
 
     @app.post("/api/tasks/local", status_code=201)
     def create_local_task(payload: LocalTaskRequest) -> dict[str, Any]:
@@ -201,12 +205,7 @@ def create_app() -> FastAPI:
     @app.post("/api/tasks/{task_id}/run-all")
     def run_all(task_id: str) -> dict[str, Any]:
         task = _get_task(task_id)
-        with _LOCK:
-            future = _RUNNING.get(task_id)
-            if future is not None and not future.done():
-                raise HTTPException(status_code=409, detail="Task is already running")
-            task_lock = _acquire_task_lock_for_web(task, "web-run-all")
-            _RUNNING[task_id] = _EXECUTOR.submit(_run_all_job, task.id, task_lock)
+        _schedule_run_all_for_task(task, "web-run-all")
         return _task_payload(task)
 
     @app.delete("/api/tasks/{task_id}", status_code=204)
@@ -435,6 +434,7 @@ def _task_config_for_url_payload(config: AppConfig, payload: UrlTaskRequest) -> 
         "proxy": payload.proxy if payload.proxy is not None else task_config["download"]["proxy"],
         "max_height": payload.max_height if payload.max_height is not None else task_config["download"]["max_height"],
         "force_download": payload.force_download,
+        "auto_run_all_after_download": payload.auto_run_all_after_download,
     }
     return task_config
 
@@ -493,6 +493,15 @@ def _acquire_task_lock_for_web(task: Task, label: str) -> TaskLock:
         return TaskLock(task.folder, label).acquire(blocking=False)
     except TaskLockBusy as exc:
         raise HTTPException(status_code=409, detail="Task is already running") from exc
+
+
+def _schedule_run_all_for_task(task: Task, label: str) -> None:
+    with _LOCK:
+        future = _RUNNING.get(task.id)
+        if future is not None and not future.done():
+            raise HTTPException(status_code=409, detail="Task is already running")
+        task_lock = _acquire_task_lock_for_web(task, label)
+        _RUNNING[task.id] = _EXECUTOR.submit(_run_all_job, task.id, task_lock)
 
 
 def _run_step_job(

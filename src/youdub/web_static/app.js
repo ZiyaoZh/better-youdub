@@ -21,6 +21,7 @@ const CONFIG_SECTIONS = [
       ["proxy", "yt-dlp 代理", "text"],
       ["max_height", "最大下载高度", "integer", {min: 0}],
       ["force_download", "重新下载", "boolean"],
+      ["auto_run_all_after_download", "下载完成自动运行全流程", "boolean"],
     ],
   },
   {
@@ -219,6 +220,9 @@ function fillUrlDownloadDefaults() {
   if ($("urlProxyInput")) $("urlProxyInput").value = download.proxy || ""
   if ($("urlMaxHeightInput")) $("urlMaxHeightInput").value = String(download.max_height ?? 0)
   if ($("urlUseCookies")) $("urlUseCookies").checked = download.use_cookies !== false
+  if ($("urlAutoRunAllAfterDownload")) {
+    $("urlAutoRunAllAfterDownload").checked = Boolean(download.auto_run_all_after_download)
+  }
 }
 
 async function refreshDoctor() {
@@ -675,6 +679,7 @@ async function submitUrl(event) {
   event.preventDefault()
   setMessage("createMessage", "")
   try {
+    const autoRunAll = $("urlAutoRunAllAfterDownload").checked
     const task = await api("/api/tasks/url", {
       method: "POST",
       body: JSON.stringify({
@@ -685,11 +690,12 @@ async function submitUrl(event) {
         proxy: $("urlProxyInput").value,
         max_height: Number($("urlMaxHeightInput").value || 0),
         force_download: $("urlForce").checked,
+        auto_run_all_after_download: autoRunAll,
       }),
     })
     $("urlInput").value = ""
     $("urlCookiesContentInput").value = ""
-    setMessage("createMessage", "任务已创建")
+    setMessage("createMessage", autoRunAll ? "任务已创建，已开始运行完整链路" : "任务已创建")
     await refreshTasks()
     selectTask(task.id)
   } catch (error) {

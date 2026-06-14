@@ -245,8 +245,9 @@ BILI_BILI_JCT=
   下载、WhisperX、翻译、TTS、合成、发布包和 Bilibili 参数。URL 下载发生在任务
   创建前，因此 URL 创建表单也提供下载参数，并支持一次性粘贴 Netscape cookies
   内容写入 `YOUDUB_COOKIES_PATH` 后用于本次下载。cookies 内容不写入任务配置，
-  不在 API 响应中回显。空密钥字段运行时回退到环境变量或 `/data/config/youdub.json`，
-  任务级密钥在 API 响应中以 `********` 脱敏。
+  不在 API 响应中回显。URL 创建表单的“下载完成自动运行全流程”会在下载成功并
+  upsert 任务后提交现有后台 `run-all` 作业。空密钥字段运行时回退到环境变量或
+  `/data/config/youdub.json`，任务级密钥在 API 响应中以 `********` 脱敏。
 - FFmpeg 音频提取：生成 `audio.wav`
 - Demucs 步骤入口：`run-task --step separate-audio` 已接入；当前基础开发环境若没有 `demucs` 可执行文件，会明确失败并把任务步骤标记为 `failed`
 - 翻译步骤入口：`run-task --step translate` 已接入；模型调用可通过
