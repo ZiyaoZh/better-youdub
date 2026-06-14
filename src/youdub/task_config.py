@@ -35,7 +35,6 @@ def default_task_config(config: AppConfig, *, include_secrets: bool = False) -> 
             "proxy": config.ytdlp_proxy or "",
             "max_height": config.download_max_height,
             "force_download": False,
-            "auto_run_all_after_download": False,
         },
         "whisperx": whisperx,
         "translation": _config_dict(options.translation),

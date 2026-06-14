@@ -64,7 +64,6 @@ class UrlTaskRequest(BaseModel):
     proxy: str | None = None
     max_height: int | None = None
     force_download: bool = False
-    auto_run_all_after_download: bool = False
 
 
 class LocalTaskRequest(BaseModel):
@@ -158,8 +157,6 @@ def create_app() -> FastAPI:
         )
         task.config = _task_config_for_url_payload(config, payload)
         task = _store().upsert(task)
-        if payload.auto_run_all_after_download:
-            _schedule_run_all_for_task(task, "web-auto-run-all-after-download")
         return _task_payload(task)
 
     @app.post("/api/tasks/url-draft", status_code=201)
@@ -255,6 +252,21 @@ def create_app() -> FastAPI:
         task.config = normalize_task_config_update(_config(), task.config, payload.config)
         _store().update(task)
         return {"config": public_task_config(_config(), task.config)}
+
+    @app.post("/api/tasks/{task_id}/download-cookies")
+    def save_task_download_cookies(task_id: str, payload: CookieUpdate) -> dict[str, Any]:
+        task = _get_task(task_id)
+        if task_is_locked(task.folder) or _task_running(task.id):
+            raise HTTPException(status_code=409, detail="Cannot edit a running task")
+        content = _clean_text(payload.content)
+        if not content:
+            return _task_cookies_payload(task)
+        path = _task_download_cookies_path(task)
+        if path is None:
+            raise HTTPException(status_code=422, detail="Cookies path is not configured")
+        _write_cookies_file(path, content)
+        _ensure_task_download_cookies_path(task, path)
+        return _task_cookies_payload(task)
 
     @app.get("/api/tasks/{task_id}/artifacts")
     def list_artifacts(task_id: str) -> dict[str, Any]:
@@ -454,7 +466,6 @@ def _task_config_for_url_payload(config: AppConfig, payload: UrlTaskRequest) -> 
         "proxy": payload.proxy if payload.proxy is not None else task_config["download"]["proxy"],
         "max_height": payload.max_height if payload.max_height is not None else task_config["download"]["max_height"],
         "force_download": payload.force_download,
-        "auto_run_all_after_download": payload.auto_run_all_after_download,
     }
     return task_config
 
@@ -566,10 +577,6 @@ def _download_url_job(task_id: str, task_lock: TaskLock | None = None) -> None:
         if task_lock is not None:
             task_lock.release()
 
-    if _auto_run_all_after_download(task):
-        run_lock = TaskLock(task.folder, "web-auto-run-all-after-download").acquire(blocking=False)
-        _run_all_job(task.id, run_lock)
-
 
 def _downloaded_task_payload(existing: Task, incoming: Task) -> Task:
     merged = Task(
@@ -587,11 +594,6 @@ def _downloaded_task_payload(existing: Task, incoming: Task) -> Task:
     )
     merged.mark_step(PipelineStep.INGEST, StepStatus.SUCCESS)
     return merged
-
-
-def _auto_run_all_after_download(task: Task) -> bool:
-    config = task.config.get("download") if isinstance(task.config, dict) else None
-    return isinstance(config, dict) and bool(config.get("auto_run_all_after_download"))
 
 
 def _run_step_job(
@@ -625,6 +627,7 @@ def _run_step_job(
 
 def _run_all_job(task_id: str, task_lock: TaskLock | None = None) -> None:
     try:
+        task_lock = _download_for_run_all_if_needed(task_id, task_lock)
         for step in (
             PipelineStep.EXTRACT_AUDIO,
             PipelineStep.SEPARATE_AUDIO,
@@ -640,6 +643,16 @@ def _run_all_job(task_id: str, task_lock: TaskLock | None = None) -> None:
     finally:
         if task_lock is not None:
             task_lock.release()
+
+
+def _download_for_run_all_if_needed(task_id: str, task_lock: TaskLock | None) -> TaskLock | None:
+    task = _store().get(task_id)
+    if (task.folder / "download.mp4").exists():
+        return task_lock
+    _validated_url(task.source)
+    _download_url_job(task_id, task_lock=task_lock)
+    task = _store().get(task_id)
+    return TaskLock(task.folder, "web-run-all").acquire(blocking=False)
 
 
 def _nonempty_file(path: Path | None) -> bool:
@@ -666,6 +679,38 @@ def _set_or_clear(data: dict[str, Any], key: str, value: str) -> None:
         data[key] = value
     else:
         data.pop(key, None)
+
+
+def _task_download_cookies_path(task: Task) -> Path | None:
+    config = _config()
+    public_config = public_task_config(config, task.config)
+    download = public_config.get("download")
+    cookies_path = download.get("cookies_path") if isinstance(download, dict) else None
+    text = _clean_text(cookies_path)
+    if text:
+        return Path(text)
+    return config.cookies_path
+
+
+def _ensure_task_download_cookies_path(task: Task, path: Path) -> None:
+    config = _config()
+    normalized = normalize_task_config_update(config, task.config, task.config)
+    download = normalized.setdefault("download", {})
+    if not _clean_text(download.get("cookies_path")):
+        download["cookies_path"] = str(path)
+    download["use_cookies"] = True
+    task.config = normalized
+    _store().update(task)
+
+
+def _task_cookies_payload(task: Task) -> dict[str, Any]:
+    path = _task_download_cookies_path(task)
+    return {
+        "path": str(path) if path else None,
+        "exists": _nonempty_file(path),
+        "size": path.stat().st_size if _nonempty_file(path) else 0,
+        **_cookies_summary(path),
+    }
 
 
 def _clean_text(value: Any) -> str | None:

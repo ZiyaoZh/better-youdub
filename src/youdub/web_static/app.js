@@ -18,10 +18,10 @@ const CONFIG_SECTIONS = [
     fields: [
       ["use_cookies", "使用 cookies", "boolean"],
       ["cookies_path", "Cookies 文件路径", "text"],
+      ["cookies_content", "Cookies 内容（可选，仅保存时写入文件）", "textarea", {transient: true}],
       ["proxy", "yt-dlp 代理", "text"],
       ["max_height", "最大下载高度", "integer", {min: 0}],
       ["force_download", "重新下载", "boolean"],
-      ["auto_run_all_after_download", "下载完成自动运行全流程", "boolean"],
     ],
   },
   {
@@ -148,6 +148,7 @@ const state = {
   defaultConfig: null,
   configTab: "download",
   configDirty: false,
+  configTransient: {},
   configTaskId: null,
   configDraft: null,
   configDrawerOpen: false,
@@ -216,18 +217,6 @@ function setMessage(id, text, isError = false) {
 async function loadDefaultConfig() {
   const payload = await api("/api/task-config/defaults")
   state.defaultConfig = payload.config
-  fillUrlDownloadDefaults()
-}
-
-function fillUrlDownloadDefaults() {
-  const download = state.defaultConfig?.download || {}
-  if ($("urlCookiesPathInput")) $("urlCookiesPathInput").value = download.cookies_path || ""
-  if ($("urlProxyInput")) $("urlProxyInput").value = download.proxy || ""
-  if ($("urlMaxHeightInput")) $("urlMaxHeightInput").value = String(download.max_height ?? 0)
-  if ($("urlUseCookies")) $("urlUseCookies").checked = download.use_cookies !== false
-  if ($("urlAutoRunAllAfterDownload")) {
-    $("urlAutoRunAllAfterDownload").checked = Boolean(download.auto_run_all_after_download)
-  }
 }
 
 async function refreshDoctor() {
@@ -287,6 +276,7 @@ function renderTasks() {
 async function selectTask(taskId) {
   state.selectedId = taskId
   state.configDirty = false
+  state.configTransient = {}
   state.configTaskId = null
   state.configDraft = null
   const task = await api(`/api/tasks/${taskId}`)
@@ -308,7 +298,7 @@ function renderDetail(task, options = {}) {
   $("detailError").classList.toggle("hidden", !task.error)
   $("detailError").textContent = task.error || ""
   const hasDownload = taskHasArtifact(task, "download-video")
-  $("runAllButton").disabled = task.running || !hasDownload
+  $("runAllButton").disabled = task.running || (!hasDownload && !isUrlSource(task.source))
   $("deleteButton").disabled = task.running
   $("saveTaskConfigButton").disabled = task.running
   renderSteps(task)
@@ -532,7 +522,8 @@ function renderTaskConfig(task, options = {}) {
   const values = config[activeSection.key] || {}
   fields.innerHTML = ""
   for (const [key, label, type, meta = {}] of activeSection.fields) {
-    fields.appendChild(renderConfigField(activeSection.key, key, label, type, meta, values[key]))
+    const value = meta.transient ? transientConfigValue(activeSection.key, key) : values[key]
+    fields.appendChild(renderConfigField(activeSection.key, key, label, type, meta, value))
   }
   setMessage("taskConfigMessage", state.configDirty ? "有未保存修改" : "")
 }
@@ -563,6 +554,7 @@ function ensureTaskConfigDraft(task, force = false) {
   if (force || state.configTaskId !== task.id || !state.configDraft) {
     state.configTaskId = task.id
     state.configDraft = cloneConfig(task.config || state.defaultConfig || {})
+    state.configTransient = {}
   }
   return state.configDraft
 }
@@ -578,7 +570,7 @@ function renderConfigField(section, key, labelText, type, meta, value) {
 
   if (type === "boolean") {
     label.innerHTML = `
-      <input id="${id}" data-config-section="${section}" data-config-key="${key}" data-config-type="${type}" type="checkbox" ${value ? "checked" : ""} />
+      <input id="${id}" data-config-section="${section}" data-config-key="${key}" data-config-type="${type}"${transientDataAttribute(meta)} type="checkbox" ${value ? "checked" : ""} />
       <span>${labelText}</span>
     `
   } else if (type === "select") {
@@ -588,12 +580,12 @@ function renderConfigField(section, key, labelText, type, meta, value) {
     }).join("")
     label.innerHTML = `
       <span>${labelText}</span>
-      <select id="${id}" data-config-section="${section}" data-config-key="${key}" data-config-type="${type}">${options}</select>
+      <select id="${id}" data-config-section="${section}" data-config-key="${key}" data-config-type="${type}"${transientDataAttribute(meta)}>${options}</select>
     `
   } else if (type === "textarea") {
     label.innerHTML = `
       <span>${labelText}</span>
-      <textarea id="${id}" data-config-section="${section}" data-config-key="${key}" data-config-type="${type}" spellcheck="false">${escapeHtml(value ?? "")}</textarea>
+      <textarea id="${id}" data-config-section="${section}" data-config-key="${key}" data-config-type="${type}"${transientDataAttribute(meta)} spellcheck="false">${escapeHtml(value ?? "")}</textarea>
     `
   } else {
     const inputType = type === "secret" ? "password" : type === "integer" || type === "number" ? "number" : "text"
@@ -604,7 +596,7 @@ function renderConfigField(section, key, labelText, type, meta, value) {
     ].filter(Boolean).join(" ")
     label.innerHTML = `
       <span>${labelText}</span>
-      <input id="${id}" data-config-section="${section}" data-config-key="${key}" data-config-type="${type}" type="${inputType}" ${attrs} value="${escapeHtml(value ?? "")}" />
+      <input id="${id}" data-config-section="${section}" data-config-key="${key}" data-config-type="${type}"${transientDataAttribute(meta)} type="${inputType}" ${attrs} value="${escapeHtml(value ?? "")}" />
     `
   }
 
@@ -629,7 +621,13 @@ function updateTaskConfigDraftValue(input) {
   const section = input.dataset.configSection
   const key = input.dataset.configKey
   const type = input.dataset.configType
+  const transient = input.dataset.configTransient === "true"
   if (!section || !key || !type) return
+  if (transient) {
+    state.configTransient[section] = state.configTransient[section] || {}
+    state.configTransient[section][key] = input.value
+    return
+  }
   if (!state.configDraft) {
     state.configDraft = cloneConfig(state.defaultConfig || {})
   }
@@ -653,6 +651,14 @@ function configInputId(section, key) {
   return `config-${section}-${key}`
 }
 
+function transientConfigValue(section, key) {
+  return state.configTransient?.[section]?.[key] || ""
+}
+
+function transientDataAttribute(meta) {
+  return meta.transient ? ' data-config-transient="true"' : ""
+}
+
 async function saveTaskConfig(event) {
   event.preventDefault()
   if (!state.selectedId) return
@@ -663,11 +669,18 @@ async function saveTaskConfig(event) {
       method: "PUT",
       body: JSON.stringify({config: state.configDraft || {}}),
     })
+    const cookiesContent = transientConfigValue("download", "cookies_content").trim()
+    if (cookiesContent) {
+      await api(`/api/tasks/${state.selectedId}/download-cookies`, {
+        method: "POST",
+        body: JSON.stringify({content: cookiesContent}),
+      })
+    }
     state.configDirty = false
+    state.configTransient = {}
     state.configDraft = cloneConfig(payload.config)
     state.configTaskId = state.selectedId
     const task = await api(`/api/tasks/${state.selectedId}`)
-    task.config = payload.config
     renderDetail(task, {forceConfig: true})
     setMessage("taskConfigMessage", "已保存")
   } catch (error) {
@@ -700,6 +713,7 @@ async function deleteSelected() {
   await api(`/api/tasks/${state.selectedId}`, {method: "DELETE"})
   state.selectedId = null
   state.configDirty = false
+  state.configTransient = {}
   state.configTaskId = null
   state.configDraft = null
   closeTaskConfig()
@@ -709,62 +723,19 @@ async function deleteSelected() {
   await refreshTasks()
 }
 
-function switchCreateTab(name) {
-  document.querySelectorAll("[data-create-tab]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.createTab === name)
-  })
-  $("urlForm").classList.toggle("hidden", name !== "url")
-  $("localForm").classList.toggle("hidden", name !== "local")
-  $("uploadForm").classList.toggle("hidden", name !== "upload")
-}
-
 async function submitUrl(event) {
   event.preventDefault()
-  setMessage("createMessage", "")
-  try {
-    const autoRunAll = $("urlAutoRunAllAfterDownload").checked
-    const task = await api("/api/tasks/url", {
-      method: "POST",
-      body: JSON.stringify({
-        url: $("urlInput").value,
-        use_cookies: $("urlUseCookies").checked,
-        cookies_path: $("urlCookiesPathInput").value,
-        cookies_content: $("urlCookiesContentInput").value,
-        proxy: $("urlProxyInput").value,
-        max_height: Number($("urlMaxHeightInput").value || 0),
-        force_download: $("urlForce").checked,
-        auto_run_all_after_download: autoRunAll,
-      }),
-    })
-    $("urlInput").value = ""
-    $("urlCookiesContentInput").value = ""
-    setMessage("createMessage", autoRunAll ? "任务已创建，已开始运行完整链路" : "任务已创建")
-    await refreshTasks()
-    selectTask(task.id)
-  } catch (error) {
-    setMessage("createMessage", error.message, true)
-  }
-}
-
-async function submitUrlDraft() {
   setMessage("createMessage", "")
   try {
     const task = await api("/api/tasks/url-draft", {
       method: "POST",
       body: JSON.stringify({
         url: $("urlInput").value,
-        use_cookies: $("urlUseCookies").checked,
-        cookies_path: $("urlCookiesPathInput").value,
-        cookies_content: $("urlCookiesContentInput").value,
-        proxy: $("urlProxyInput").value,
-        max_height: Number($("urlMaxHeightInput").value || 0),
-        force_download: $("urlForce").checked,
-        auto_run_all_after_download: $("urlAutoRunAllAfterDownload").checked,
       }),
     })
     $("urlInput").value = ""
-    $("urlCookiesContentInput").value = ""
     setMessage("createMessage", "任务已创建")
+    closeCreateDialog()
     await refreshTasks()
     selectTask(task.id)
   } catch (error) {
@@ -772,45 +743,16 @@ async function submitUrlDraft() {
   }
 }
 
-async function submitLocal(event) {
-  event.preventDefault()
+function openCreateDialog() {
   setMessage("createMessage", "")
-  try {
-    const task = await api("/api/tasks/local", {
-      method: "POST",
-      body: JSON.stringify({
-        source: $("localSourceInput").value,
-        title: $("localTitleInput").value,
-      }),
-    })
-    setMessage("createMessage", "任务已创建")
-    await refreshTasks()
-    selectTask(task.id)
-  } catch (error) {
-    setMessage("createMessage", error.message, true)
-  }
+  $("createDialog").classList.add("open")
+  $("createDialog").setAttribute("aria-hidden", "false")
+  window.setTimeout(() => $("urlInput").focus(), 0)
 }
 
-async function submitUpload(event) {
-  event.preventDefault()
-  setMessage("createMessage", "")
-  const file = $("uploadFileInput").files[0]
-  if (!file) {
-    setMessage("createMessage", "请选择视频文件", true)
-    return
-  }
-  const form = new FormData()
-  form.append("file", file)
-  form.append("title", $("uploadTitleInput").value)
-  try {
-    const task = await api("/api/tasks/upload", {method: "POST", body: form})
-    $("uploadFileInput").value = ""
-    setMessage("createMessage", "任务已创建")
-    await refreshTasks()
-    selectTask(task.id)
-  } catch (error) {
-    setMessage("createMessage", error.message, true)
-  }
+function closeCreateDialog() {
+  $("createDialog").classList.remove("open")
+  $("createDialog").setAttribute("aria-hidden", "true")
 }
 
 function escapeHtml(value) {
@@ -828,13 +770,9 @@ function bindEvents() {
     refreshDoctor()
     refreshTasks()
   })
-  document.querySelectorAll("[data-create-tab]").forEach((button) => {
-    button.addEventListener("click", () => switchCreateTab(button.dataset.createTab))
-  })
+  $("newTaskButton").addEventListener("click", openCreateDialog)
+  document.querySelectorAll("[data-close-create]").forEach((node) => node.addEventListener("click", closeCreateDialog))
   $("urlForm").addEventListener("submit", submitUrl)
-  $("urlDraftButton").addEventListener("click", () => submitUrlDraft())
-  $("localForm").addEventListener("submit", submitLocal)
-  $("uploadForm").addEventListener("submit", submitUpload)
   $("taskConfigForm").addEventListener("submit", saveTaskConfig)
   document.querySelectorAll("[data-close-config]").forEach((node) => node.addEventListener("click", closeTaskConfig))
   $("runAllButton").addEventListener("click", () => runAll().catch((error) => window.alert(error.message)))
