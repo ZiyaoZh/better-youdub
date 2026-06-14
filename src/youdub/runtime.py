@@ -7,7 +7,14 @@ from pathlib import Path
 from .config import AppConfig
 from .publishing import BilibiliPublishConfig, PublishPackageConfig
 from .synthesis import SynthesisConfig
-from .translation import TranslationConfig
+from .translation import (
+    DEFAULT_CONTEXT_EXTRA_PROMPT,
+    DEFAULT_CORRECTION_PROMPT,
+    DEFAULT_SEGMENT_EXTRA_PROMPT,
+    DEFAULT_SUMMARY_EXTRA_PROMPT,
+    DEFAULT_TRANSLATION_EXTRA_PROMPT,
+    TranslationConfig,
+)
 from .transcription import WhisperXConfig
 from .tts import TTSConfig
 
@@ -50,6 +57,11 @@ def runtime_options_from_env(config: AppConfig) -> RuntimeOptions:
             retry_max_backoff_seconds=_float_env("YOUDUB_TRANSLATION_RETRY_MAX_BACKOFF_SECONDS", 8.0),
             force_json_output=_bool_env("YOUDUB_TRANSLATION_FORCE_JSON_OUTPUT", True),
             temperature=_float_env("YOUDUB_TRANSLATION_TEMPERATURE", 0.0),
+            extra_prompt=config.translation_prompts.extra_prompt or DEFAULT_TRANSLATION_EXTRA_PROMPT,
+            summary_extra_prompt=config.translation_prompts.summary_extra_prompt or DEFAULT_SUMMARY_EXTRA_PROMPT,
+            context_extra_prompt=config.translation_prompts.context_extra_prompt or DEFAULT_CONTEXT_EXTRA_PROMPT,
+            segment_extra_prompt=config.translation_prompts.segment_extra_prompt or DEFAULT_SEGMENT_EXTRA_PROMPT,
+            correction_prompt=config.translation_prompts.correction_prompt or DEFAULT_CORRECTION_PROMPT,
         ),
         tts=TTSConfig(
             model=os.getenv("YOUDUB_TTS_MODEL", os.getenv("VOXCPM_MODEL", "openbmb/VoxCPM2")),

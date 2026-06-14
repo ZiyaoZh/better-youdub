@@ -16,6 +16,8 @@ CONTEXT_OUTPUT = "translation.context.json"
 SEGMENTS_OUTPUT = "translation.segments.json"
 FINAL_OUTPUT = "translation.json"
 TASK_SUMMARY_FIELDS = ("title", "author", "summary", "tags")
+SUMMARY_SCHEMA_VERSION = 1
+SUMMARY_PROMPT_VERSION = "summary-v2"
 CONTEXT_SCHEMA_VERSION = 1
 SEGMENTS_SCHEMA_VERSION = 2
 CONTEXT_PROMPT_VERSION = "translation-context-v1"
@@ -23,6 +25,42 @@ TRANSLATION_PROMPT_VERSION = "translation-v2"
 _ALL_SPLIT_PUNCTUATION = ",，、;；:：.!?。！？"
 _SOURCE_SENTENCE_ENDINGS = ".!?。！？;；"
 MIN_TRANSLATION_PART_DURATION = 0.2
+
+DEFAULT_TRANSLATION_EXTRA_PROMPT = ""
+DEFAULT_SUMMARY_EXTRA_PROMPT = (
+    "Translate and localize the video title, summary, and tags into natural target-language wording. "
+    "Prefer concise titles suitable for publishing. Tags should be short, searchable phrases rather than sentences."
+)
+DEFAULT_CONTEXT_EXTRA_PROMPT = (
+    "Build a practical glossary for this exact video. Include recurring proper nouns, domain terms, game terms, "
+    "technical terms, acronyms, and names whose translation must stay consistent. "
+    "For ASR corrections, only include high-confidence mistakes that are strongly supported by the full context."
+)
+DEFAULT_SEGMENT_EXTRA_PROMPT = (
+    "Write the translation as spoken dubbing copy from a native creator's point of view. "
+    "Use idiomatic, natural, concise wording in the target language. Avoid translationese. "
+    "Do not add audience-addressing filler, explanations, labels, markdown, LaTeX, or special formatting."
+)
+DEFAULT_CORRECTION_PROMPT = (
+    "If the video is about Bloons TD 6 or related games, apply these term preferences. "
+    "Keep MOAB, BFB, ZOMG, DDT, BAD, and Ninja Kiwi in English. Translate paragon as 模范, "
+    "Bloonarius as 充气机, Lych as 巫妖, Vortex as 空气大师, DreadBloon as 恐怖气球, "
+    "Phayze as 菲兹, BLASTAPOPOULOS as 轰炸飞艇, diamondback as 菱背, Blons as 金发女郎, "
+    "CHIMPS as 超猩猩模式, pops as 击破数, Popsaiden as 波塞冬, and Bloons TD Battles 2 as 气球塔防对战2. "
+    "first targeting, strong targeting, and last targeting should be translated as 第一个目标, 强力目标, and 最后一个目标. "
+    "When ASR says tax or tag in a tower context, it is likely Tack and should be translated as 图钉. "
+    "Hero names: Quincy=昆西, Gwendolin=格温多琳, Striker Jones=先锋琼斯, Obyn Greenfoot=奥本, "
+    "Rosalia=罗莎莉娅, Captain Churchill=上尉丘吉尔, Benjamin=本杰明, Pat Fusty=帕特, "
+    "Ezili=艾泽里, Adora=阿多拉, Etienne=艾蒂安, Sauda=萨乌达, Admiral Brickell=海军上将布里克尔, "
+    "Psi=灵机, Geraldo=杰拉尔多, Corvus=科沃斯, Silas=西拉斯, Dan D'Monke=丹. "
+    "Tower names: Dart Monkey=毛毛, Boomerang Monkey=回旋镖猴, Bomb Shooter=大炮, Tack Shooter=图钉塔, "
+    "Ice Monkey=冰猴, Glue Gunner=胶水猴, Desperado=亡命猴, Sniper Monkey=狙击猴, "
+    "Monkey Sub=潜水艇猴, Monkey Buccaneer=海盗猴, Monkey Ace=王牌飞行员, Heli Pilot=直升机, "
+    "Mortar Monkey=迫击炮猴, Dartling Gunner=机枪猴, Wizard Monkey=法师猴, Super Monkey=超猴, "
+    "Ninja Monkey=忍者猴, Alchemist=炼金术士, Druid=德鲁伊, Mer Monkey=人鱼猴, Banana Farm=香蕉农场, "
+    "Spike Factory=刺钉工厂, Monkey Village=猴村, Engineer Monkey=工程师猴, Beast Handler=驯兽大师. "
+    "Do not add or preserve unnecessary audience callouts such as 兄弟们, 家人们, or 朋友们 unless they are essential source meaning."
+)
 
 
 @dataclass(frozen=True)
@@ -39,6 +77,11 @@ class TranslationConfig:
     retry_max_backoff_seconds: float = 8.0
     force_json_output: bool = True
     temperature: float = 0.0
+    extra_prompt: str = DEFAULT_TRANSLATION_EXTRA_PROMPT
+    summary_extra_prompt: str = DEFAULT_SUMMARY_EXTRA_PROMPT
+    context_extra_prompt: str = DEFAULT_CONTEXT_EXTRA_PROMPT
+    segment_extra_prompt: str = DEFAULT_SEGMENT_EXTRA_PROMPT
+    correction_prompt: str = DEFAULT_CORRECTION_PROMPT
 
     def validate(self) -> None:
         if not self.api_key:
@@ -121,9 +164,11 @@ def ensure_summary(
     config: TranslationConfig,
 ) -> dict[str, Any]:
     summary_path = task_dir / SUMMARY_OUTPUT
+    source_hash = _summary_source_hash(info, transcript, config)
+    prompt_hash = _summary_prompt_hash(config)
     if summary_path.exists():
         summary = _read_json_object(summary_path)
-        if _valid_summary(summary):
+        if _valid_summary(summary, source_hash, prompt_hash, config):
             return summary
 
     author = _author_from_info(info)
@@ -139,12 +184,17 @@ def ensure_summary(
     messages = [
         {
             "role": "system",
-            "content": (
-                "You translate video metadata for a dubbing pipeline. "
-                "Return one JSON object with keys: title, summary, tags. "
-                "title and summary must be natural spoken-style text in the target language. "
-                "tags must be a JSON array of short strings in the target language. "
-                "Do not add markdown or commentary."
+            "content": _prompt_with_optional_sections(
+                (
+                    "You translate video metadata for a dubbing pipeline. "
+                    "Return one JSON object with keys: title, summary, tags. "
+                    "title and summary must be natural spoken-style text in the target language. "
+                    "tags must be a JSON array of short strings in the target language. "
+                    "Do not add markdown or commentary."
+                ),
+                ("Global translation instructions", config.extra_prompt),
+                ("Summary-specific instructions", config.summary_extra_prompt),
+                ("Correction and glossary rules", config.correction_prompt),
             ),
         },
         {
@@ -167,6 +217,12 @@ def ensure_summary(
         raise ValueError("Summary translation returned an empty summary")
 
     summary = {
+        "schema_version": SUMMARY_SCHEMA_VERSION,
+        "prompt_version": SUMMARY_PROMPT_VERSION,
+        "target_language": config.target_language,
+        "model": config.model,
+        "source_hash": source_hash,
+        "prompt_hash": prompt_hash,
         "title": title,
         "author": author,
         "summary": summary_text,
@@ -184,10 +240,11 @@ def ensure_translation_context(
     config: TranslationConfig,
 ) -> dict[str, Any]:
     context_path = task_dir / CONTEXT_OUTPUT
-    source_hash = _translation_context_source_hash(info, transcript, config)
+    source_hash = _translation_context_source_hash(info, summary, transcript, config)
+    prompt_hash = _translation_context_prompt_hash(config)
     if context_path.exists():
         existing = _read_json_object(context_path)
-        if _valid_translation_context(existing, source_hash, config):
+        if _valid_translation_context(existing, source_hash, prompt_hash, config):
             return existing
 
     payload = {
@@ -203,16 +260,21 @@ def ensure_translation_context(
     messages = [
         {
             "role": "system",
-            "content": (
-                "You prepare context for a video subtitle translation pipeline. "
-                "Read the metadata and full transcript, then return one JSON object with keys: "
-                "content_summary, glossary, corrections. "
-                "content_summary must be 3-5 concise sentences in the target language. "
-                "glossary must contain useful recurring names, brands, game terms, technical terms, "
-                "and acronyms as objects with source and target. If a term should remain unchanged, "
-                "set target equal to source. "
-                "corrections must contain only high-confidence ASR mistakes as objects with wrong and correct. "
-                "Do not include ordinary words, speculative corrections, markdown, or commentary."
+            "content": _prompt_with_optional_sections(
+                (
+                    "You prepare context for a video subtitle translation pipeline. "
+                    "Read the metadata and full transcript, then return one JSON object with keys: "
+                    "content_summary, glossary, corrections. "
+                    "content_summary must be 3-5 concise sentences in the target language. "
+                    "glossary must contain useful recurring names, brands, game terms, technical terms, "
+                    "and acronyms as objects with source and target. If a term should remain unchanged, "
+                    "set target equal to source. "
+                    "corrections must contain only high-confidence ASR mistakes as objects with wrong and correct. "
+                    "Do not include ordinary words, speculative corrections, markdown, or commentary."
+                ),
+                ("Global translation instructions", config.extra_prompt),
+                ("Context-building instructions", config.context_extra_prompt),
+                ("Correction and glossary rules", config.correction_prompt),
             ),
         },
         {
@@ -242,6 +304,7 @@ def ensure_translation_context(
         "status": status,
         "target_language": config.target_language,
         "source_hash": source_hash,
+        "prompt_hash": prompt_hash,
         "content_summary": result["content_summary"],
         "glossary": result["glossary"],
         "corrections": result["corrections"],
@@ -262,7 +325,8 @@ def ensure_segment_translations(
 ) -> list[dict[str, Any]]:
     output_path = task_dir / SEGMENTS_OUTPUT
     context_hash = _stable_hash(_translation_context_for_prompt(context))
-    existing = _load_existing_segment_translations(output_path, context_hash, config)
+    prompt_hash = _segment_translation_prompt_hash(config)
+    existing = _load_existing_segment_translations(output_path, context_hash, prompt_hash, config)
     complete: dict[int, dict[str, Any]] = {}
     pending: list[dict[str, Any]] = []
 
@@ -293,7 +357,7 @@ def ensure_segment_translations(
             }
         _write_json(
             output_path,
-            _segment_cache_payload(complete, context_hash, config),
+            _segment_cache_payload(complete, context_hash, prompt_hash, config),
         )
 
     missing = [
@@ -305,7 +369,7 @@ def ensure_segment_translations(
         raise ValueError(f"Missing translations for segment ids: {missing}")
 
     ordered = [complete[index] for index in range(len(transcript))]
-    _write_json(output_path, _segment_cache_payload(complete, context_hash, config))
+    _write_json(output_path, _segment_cache_payload(complete, context_hash, prompt_hash, config))
     return ordered
 
 
@@ -523,16 +587,21 @@ def _translate_batch(
     messages = [
         {
             "role": "system",
-            "content": (
-                "You translate spoken transcript segments for dubbing. "
-                "Return only a JSON object with one key named segments. "
-                "segments must be an array of objects, and each object must contain "
-                "segment_id and translation. "
-                "translation must be complete, natural, concise, punctuated, and suitable for speech synthesis. "
-                "Translate one source segment into exactly one target-language string. "
-                "Use the supplied glossary consistently. Apply supplied ASR corrections silently before translation. "
-                "Preserve names, brands, jargon, obvious acronyms, code, commands, paths, URLs, versions, and file names when appropriate. "
-                "Do not return empty strings, punctuation-only strings, markdown, labels, or explanations."
+            "content": _prompt_with_optional_sections(
+                (
+                    "You translate spoken transcript segments for dubbing. "
+                    "Return only a JSON object with one key named segments. "
+                    "segments must be an array of objects, and each object must contain "
+                    "segment_id and translation. "
+                    "translation must be complete, natural, concise, punctuated, and suitable for speech synthesis. "
+                    "Translate one source segment into exactly one target-language string. "
+                    "Use the supplied glossary consistently. Apply supplied ASR corrections silently before translation. "
+                    "Preserve names, brands, jargon, obvious acronyms, code, commands, paths, URLs, versions, and file names when appropriate. "
+                    "Do not return empty strings, punctuation-only strings, markdown, labels, or explanations."
+                ),
+                ("Global translation instructions", config.extra_prompt),
+                ("Segment translation instructions", config.segment_extra_prompt),
+                ("Correction and glossary rules", config.correction_prompt),
             ),
         },
         {
@@ -859,6 +928,7 @@ def _normalize_segment_translation_response(
 def _load_existing_segment_translations(
     path: Path,
     context_hash: str,
+    prompt_hash: str,
     config: TranslationConfig,
 ) -> dict[int, dict[str, Any]]:
     if not path.exists():
@@ -879,6 +949,8 @@ def _load_existing_segment_translations(
         return {}
     if data.get("context_hash") != context_hash:
         return {}
+    if data.get("prompt_hash") != prompt_hash:
+        return {}
     items = data.get("segments")
     if not isinstance(items, list):
         return {}
@@ -897,6 +969,7 @@ def _load_existing_segment_translations(
 def _segment_cache_payload(
     complete: dict[int, dict[str, Any]],
     context_hash: str,
+    prompt_hash: str,
     config: TranslationConfig,
 ) -> dict[str, Any]:
     return {
@@ -905,6 +978,7 @@ def _segment_cache_payload(
         "target_language": config.target_language,
         "model": config.model,
         "context_hash": context_hash,
+        "prompt_hash": prompt_hash,
         "segments": [complete[index] for index in sorted(complete)],
     }
 
@@ -1176,7 +1250,7 @@ def _full_transcript_text(transcript: list[dict[str, Any]]) -> str:
     )
 
 
-def _translation_context_source_hash(
+def _summary_source_hash(
     info: dict[str, Any],
     transcript: list[dict[str, Any]],
     config: TranslationConfig,
@@ -1189,7 +1263,62 @@ def _translation_context_source_hash(
             "tags": _string_list(info.get("tags"), limit=20),
             "categories": _string_list(info.get("categories"), limit=10),
             "target_language": config.target_language,
+            "transcript_excerpt": _transcript_excerpt(transcript),
+        }
+    )
+
+
+def _summary_prompt_hash(config: TranslationConfig) -> str:
+    return _stable_hash(
+        {
+            "prompt_version": SUMMARY_PROMPT_VERSION,
+            "extra_prompt": _clean_text(config.extra_prompt),
+            "summary_extra_prompt": _clean_text(config.summary_extra_prompt),
+            "correction_prompt": _clean_text(config.correction_prompt),
+        }
+    )
+
+
+def _translation_context_source_hash(
+    info: dict[str, Any],
+    summary: dict[str, Any],
+    transcript: list[dict[str, Any]],
+    config: TranslationConfig,
+) -> str:
+    return _stable_hash(
+        {
+            "title": _title_from_info(info),
+            "author": _author_from_info(info),
+            "description": str(info.get("description") or "").strip(),
+            "translated_title": _clean_text(summary.get("title")),
+            "translated_summary": _clean_text(summary.get("summary")),
+            "translated_tags": _string_list(summary.get("tags"), limit=20),
+            "tags": _string_list(info.get("tags"), limit=20),
+            "categories": _string_list(info.get("categories"), limit=10),
+            "target_language": config.target_language,
             "transcript": _full_transcript_text(transcript),
+        }
+    )
+
+
+def _translation_context_prompt_hash(config: TranslationConfig) -> str:
+    return _stable_hash(
+        {
+            "prompt_version": CONTEXT_PROMPT_VERSION,
+            "extra_prompt": _clean_text(config.extra_prompt),
+            "context_extra_prompt": _clean_text(config.context_extra_prompt),
+            "correction_prompt": _clean_text(config.correction_prompt),
+        }
+    )
+
+
+def _segment_translation_prompt_hash(config: TranslationConfig) -> str:
+    return _stable_hash(
+        {
+            "prompt_version": TRANSLATION_PROMPT_VERSION,
+            "extra_prompt": _clean_text(config.extra_prompt),
+            "segment_extra_prompt": _clean_text(config.segment_extra_prompt),
+            "correction_prompt": _clean_text(config.correction_prompt),
         }
     )
 
@@ -1197,6 +1326,7 @@ def _translation_context_source_hash(
 def _valid_translation_context(
     context: dict[str, Any],
     source_hash: str,
+    prompt_hash: str,
     config: TranslationConfig,
 ) -> bool:
     return (
@@ -1204,6 +1334,7 @@ def _valid_translation_context(
         and context.get("prompt_version") == CONTEXT_PROMPT_VERSION
         and context.get("target_language") == config.target_language
         and context.get("source_hash") == source_hash
+        and context.get("prompt_hash") == prompt_hash
         and context.get("status") == "success"
         and isinstance(context.get("glossary"), list)
         and isinstance(context.get("corrections"), list)
@@ -1278,7 +1409,12 @@ def _stable_hash(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _valid_summary(summary: dict[str, Any]) -> bool:
+def _valid_summary(
+    summary: dict[str, Any],
+    source_hash: str,
+    prompt_hash: str,
+    config: TranslationConfig,
+) -> bool:
     if not all(field in summary for field in TASK_SUMMARY_FIELDS):
         return False
     if not _clean_text(summary.get("title")):
@@ -1287,7 +1423,14 @@ def _valid_summary(summary: dict[str, Any]) -> bool:
         return False
     if not _clean_text(summary.get("summary")):
         return False
-    return isinstance(summary.get("tags"), list)
+    return (
+        isinstance(summary.get("tags"), list)
+        and summary.get("schema_version") == SUMMARY_SCHEMA_VERSION
+        and summary.get("prompt_version") == SUMMARY_PROMPT_VERSION
+        and summary.get("target_language") == config.target_language
+        and summary.get("source_hash") == source_hash
+        and summary.get("prompt_hash") == prompt_hash
+    )
 
 
 def _title_from_info(info: dict[str, Any]) -> str:
@@ -1336,6 +1479,23 @@ def _clean_text(value: Any) -> str:
     if text.startswith("翻译：") or text.startswith("翻译:"):
         text = text.split(":", 1)[-1].split("：", 1)[-1].strip()
     return re.sub(r"\s+", " ", text)
+
+
+def _prompt_with_optional_sections(base: str, *sections: tuple[str, str | None]) -> str:
+    content = base.strip()
+    for title, prompt in sections:
+        prompt = _clean_multiline_prompt(prompt)
+        if not prompt:
+            continue
+        content = f"{content}\n\n{title}:\n{prompt}"
+    return content
+
+
+def _clean_multiline_prompt(value: str | None) -> str:
+    if value is None:
+        return ""
+    lines = [line.rstrip() for line in str(value).strip().splitlines()]
+    return "\n".join(lines).strip()
 
 
 def _chunked(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:

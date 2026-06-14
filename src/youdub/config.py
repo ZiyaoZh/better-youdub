@@ -61,6 +61,15 @@ class HuggingFaceConfig:
 
 
 @dataclass(frozen=True)
+class TranslationPromptConfig:
+    extra_prompt: str | None = None
+    summary_extra_prompt: str | None = None
+    context_extra_prompt: str | None = None
+    segment_extra_prompt: str | None = None
+    correction_prompt: str | None = None
+
+
+@dataclass(frozen=True)
 class SecretsConfig:
     openai: OpenAIConfig
     huggingface: HuggingFaceConfig
@@ -100,6 +109,7 @@ class AppConfig:
     cookies_path: Path | None
     ytdlp_proxy: str | None
     download_max_height: int
+    translation_prompts: TranslationPromptConfig
     secrets: SecretsConfig
 
     @classmethod
@@ -108,6 +118,7 @@ class AppConfig:
         config_path = Path(os.getenv("YOUDUB_CONFIG_PATH", "/data/config/youdub.json"))
         data = _load_json_object(config_path)
         ytdlp = _section(data, "ytdlp")
+        translation = _section(data, "translation")
         cookies_value = _clean(os.getenv("YOUDUB_COOKIES_PATH"))
         return cls(
             root=root,
@@ -120,6 +131,18 @@ class AppConfig:
             download_max_height=_int_or_default(
                 _clean(os.getenv("YOUDUB_DOWNLOAD_MAX_HEIGHT")) or ytdlp.get("max_height"),
                 0,
+            ),
+            translation_prompts=TranslationPromptConfig(
+                extra_prompt=_clean(os.getenv("YOUDUB_TRANSLATION_EXTRA_PROMPT"))
+                or _clean(translation.get("extra_prompt")),
+                summary_extra_prompt=_clean(os.getenv("YOUDUB_TRANSLATION_SUMMARY_EXTRA_PROMPT"))
+                or _clean(translation.get("summary_extra_prompt")),
+                context_extra_prompt=_clean(os.getenv("YOUDUB_TRANSLATION_CONTEXT_EXTRA_PROMPT"))
+                or _clean(translation.get("context_extra_prompt")),
+                segment_extra_prompt=_clean(os.getenv("YOUDUB_TRANSLATION_SEGMENT_EXTRA_PROMPT"))
+                or _clean(translation.get("segment_extra_prompt")),
+                correction_prompt=_clean(os.getenv("YOUDUB_TRANSLATION_CORRECTION_PROMPT"))
+                or _clean(translation.get("correction_prompt")),
             ),
             secrets=SecretsConfig.from_file_and_env(config_path),
         )

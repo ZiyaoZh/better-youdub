@@ -2,10 +2,12 @@ from types import SimpleNamespace
 
 from youdub.translation import (
     CONTEXT_OUTPUT,
+    SUMMARY_OUTPUT,
     SEGMENTS_OUTPUT,
     TranslationConfig,
     _chat_json,
     align_translation_parts,
+    ensure_summary,
     ensure_segment_translations,
     ensure_translation_context,
     _normalize_translation_context_response,
@@ -289,7 +291,14 @@ def test_translate_batch_retries_after_incomplete_json(monkeypatch) -> None:
 def test_translate_batch_includes_context_terms(monkeypatch) -> None:
     monkeypatch.setattr("youdub.translation.time.sleep", lambda *_args: None)
     client = _FakeClient([_response('{"segments":[{"segment_id":0,"translation":"飞镖猴。"}]}')])
-    config = TranslationConfig(api_key="sk-test", model="gpt-test", max_retries=1)
+    config = TranslationConfig(
+        api_key="sk-test",
+        model="gpt-test",
+        max_retries=1,
+        extra_prompt="全局翻译提示",
+        segment_extra_prompt="使用中文主播口吻。",
+        correction_prompt="把 tax shooter 视为 Tack Shooter。",
+    )
 
     translated = _translate_batch(
         client=client,
@@ -305,9 +314,13 @@ def test_translate_batch_includes_context_terms(monkeypatch) -> None:
     )
 
     payload = client.chat.completions.calls[0]["messages"][1]["content"]
+    system_prompt = client.chat.completions.calls[0]["messages"][0]["content"]
     assert translated == [{"segment_id": 0, "translation": "飞镖猴。"}]
     assert "Dart Monkey" in payload
     assert "Tack Shooter" in payload
+    assert "全局翻译提示" in system_prompt
+    assert "使用中文主播口吻" in system_prompt
+    assert "tax shooter" in system_prompt
 
 
 def test_translate_batch_rejects_punctuation_only_translation(monkeypatch) -> None:
@@ -370,7 +383,38 @@ def test_ensure_translation_context_writes_cache(tmp_path) -> None:
     assert context["status"] == "success"
     assert context["content_summary"] == "摘要"
     assert context["glossary"] == [{"source": "Dart Monkey", "target": "飞镖猴"}]
+    assert context["prompt_hash"]
     assert (tmp_path / CONTEXT_OUTPUT).exists()
+
+
+def test_ensure_summary_includes_custom_prompts_and_cache_metadata(tmp_path) -> None:
+    client = _FakeClient([_response('{"title":"标题","summary":"摘要","tags":["标签"]}')])
+    config = TranslationConfig(
+        api_key="sk-test",
+        model="gpt-test",
+        max_retries=1,
+        extra_prompt="全局提示",
+        summary_extra_prompt="摘要提示",
+        correction_prompt="术语提示",
+    )
+    transcript = [{"start": 0.0, "end": 1.0, "text": "Dart Monkey."}]
+
+    summary = ensure_summary(
+        tmp_path,
+        {"title": "Demo", "uploader": "Author"},
+        transcript,
+        client,
+        config,
+    )
+
+    system_prompt = client.chat.completions.calls[0]["messages"][0]["content"]
+    assert summary["title"] == "标题"
+    assert summary["prompt_hash"]
+    assert summary["source_hash"]
+    assert (tmp_path / SUMMARY_OUTPUT).exists()
+    assert "全局提示" in system_prompt
+    assert "摘要提示" in system_prompt
+    assert "术语提示" in system_prompt
 
 
 def test_segment_translation_cache_uses_metadata(tmp_path, monkeypatch) -> None:
@@ -389,5 +433,73 @@ def test_segment_translation_cache_uses_metadata(tmp_path, monkeypatch) -> None:
     assert first == second
     assert cache["schema_version"] == 2
     assert cache["prompt_version"] == "translation-v2"
+    assert cache["prompt_hash"]
     assert cache["segments"][0]["translation"] == "飞镖猴。"
     assert len(client.chat.completions.calls) == 1
+
+
+def test_translation_context_cache_changes_when_prompt_changes(tmp_path) -> None:
+    client = _FakeClient(
+        [
+            _response('{"content_summary":"摘要A","glossary":[],"corrections":[]}'),
+            _response('{"content_summary":"摘要B","glossary":[],"corrections":[]}'),
+        ]
+    )
+    transcript = [{"start": 0.0, "end": 1.0, "text": "Dart Monkey."}]
+    info = {"title": "Demo", "uploader": "Author"}
+    summary = {"title": "标题", "author": "作者", "summary": "摘要"}
+    config_a = TranslationConfig(
+        api_key="sk-test",
+        model="gpt-test",
+        max_retries=1,
+        context_extra_prompt="提示A",
+    )
+    config_b = TranslationConfig(
+        api_key="sk-test",
+        model="gpt-test",
+        max_retries=1,
+        context_extra_prompt="提示B",
+    )
+
+    first = ensure_translation_context(tmp_path, info, summary, transcript, client, config_a)
+    second = ensure_translation_context(tmp_path, info, summary, transcript, client, config_b)
+
+    assert first["content_summary"] == "摘要A"
+    assert second["content_summary"] == "摘要B"
+    assert first["prompt_hash"] != second["prompt_hash"]
+    assert len(client.chat.completions.calls) == 2
+
+
+def test_segment_translation_cache_changes_when_prompt_changes(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("youdub.translation.time.sleep", lambda *_args: None)
+    client = _FakeClient(
+        [
+            _response('{"segments":[{"segment_id":0,"translation":"飞镖猴A。"}]}'),
+            _response('{"segments":[{"segment_id":0,"translation":"飞镖猴B。"}]}'),
+        ]
+    )
+    info = {"title": "Demo", "uploader": "Author"}
+    summary = {"title": "标题", "author": "作者", "summary": "摘要"}
+    context = {"content_summary": "上下文", "glossary": [], "corrections": []}
+    transcript = [{"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00", "text": "Dart Monkey."}]
+    config_a = TranslationConfig(
+        api_key="sk-test",
+        model="gpt-test",
+        max_retries=1,
+        segment_extra_prompt="提示A",
+    )
+    config_b = TranslationConfig(
+        api_key="sk-test",
+        model="gpt-test",
+        max_retries=1,
+        segment_extra_prompt="提示B",
+    )
+
+    first = ensure_segment_translations(tmp_path, info, summary, context, transcript, client, config_a)
+    second = ensure_segment_translations(tmp_path, info, summary, context, transcript, client, config_b)
+    cache = __import__("json").loads((tmp_path / SEGMENTS_OUTPUT).read_text(encoding="utf-8"))
+
+    assert first[0]["translation"] == "飞镖猴A。"
+    assert second[0]["translation"] == "飞镖猴B。"
+    assert cache["segments"][0]["translation"] == "飞镖猴B。"
+    assert len(client.chat.completions.calls) == 2

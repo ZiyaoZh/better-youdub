@@ -176,6 +176,7 @@
   "target_language": "简体中文",
   "model": "gpt-...",
   "context_hash": "...",
+  "prompt_hash": "...",
   "segments": [
     {
       "segment_id": 0,
@@ -193,7 +194,7 @@
 
 - 句级翻译最容易保证语义完整
 - 句级缓存可以增量写入，失败后只补缺失句子
-- 缓存元数据可在目标语言、提示词版本或上下文变化时主动失效
+- 缓存元数据可在目标语言、模型、提示词版本、任务级提示词或上下文变化时主动失效
 - 后续如果切句规则调整，可以只重算 `translation.json`，不再消耗翻译 token
 
 ### `translation.json`
@@ -236,6 +237,31 @@
 
 - 10 到 30 句
 - 或按字符数/估算 token 数限制批大小
+
+## 任务级提示词参数
+
+新项目把旧项目里散落在翻译函数中的风格、术语和特殊修正规则收敛为任务级提示词，
+而不是继续维护硬编码替换表。翻译配置包含：
+
+- `extra_prompt`：附加到摘要、上下文和分段翻译请求。
+- `summary_extra_prompt`：只影响 `summary.json`。
+- `context_extra_prompt`：只影响 `translation.context.json` 的全文摘要、术语表和 ASR 纠错。
+- `segment_extra_prompt`：只影响 `translation.segments.json` 的句级译文。
+- `correction_prompt`：表达术语、ASR 错听和译后特殊修正策略。
+
+默认 `correction_prompt` 迁入旧项目气球塔防 6 相关术语、英雄/塔名称、常见错听和
+观众称呼过滤策略。执行时它会参与 `translation.context.json` 的 `glossary` /
+`corrections` 生成，也会直接附加到句级翻译请求中。这样可以覆盖旧项目的提示词功能，
+同时避免在本地代码里做不可解释的 `replace()`。
+
+缓存必须随提示词变化失效：
+
+- `summary.json` 记录摘要源 hash 和摘要提示词 hash。
+- `translation.context.json` 记录上下文源 hash 和上下文提示词 hash。
+- `translation.segments.json` 记录上下文 hash 和分段提示词 hash。
+
+因此用户在 Web UI 修改任务级提示词后，相关缓存会重新生成；只调整字幕切分或合成参数
+时仍可复用已完成的句级翻译。
 
 ## TTS 后字幕切分方案
 

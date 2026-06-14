@@ -495,6 +495,14 @@ textarea:focus {
   align-self: end;
 }
 
+.config-textarea-field {
+  grid-column: 1 / -1;
+}
+
+.config-textarea-field textarea {
+  min-height: 180px;
+}
+
 .config-actions {
   display: flex;
   align-items: center;

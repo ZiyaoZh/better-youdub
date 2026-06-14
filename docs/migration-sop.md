@@ -252,7 +252,10 @@ BILI_BILI_JCT=
 - Demucs 步骤入口：`run-task --step separate-audio` 已接入；当前基础开发环境若没有 `demucs` 可执行文件，会明确失败并把任务步骤标记为 `failed`
 - 翻译步骤入口：`run-task --step translate` 已接入；模型调用可通过
   `translation.context.json` 复用全文上下文，并通过 `translation.segments.json`
-  复用带目标语言、提示词版本和上下文 hash 的句级翻译缓存
+  复用带目标语言、模型、提示词版本、任务级提示词 hash 和上下文 hash 的句级翻译缓存。
+  翻译参数支持全局额外提示词、摘要提示词、上下文提示词、分段翻译提示词和纠错/术语
+  提示词；默认纠错提示词已迁入旧项目的核心术语、常见错听和特殊修正策略，不再新增
+  硬编码替换表
 - TTS 步骤入口：`run-task --step tts` 已接入；默认使用 Hugging Face 上的
   `openbmb/VoxCPM2`，运行时下载到 `HF_HOME` 缓存，并根据 `translation.json`
   与 `audio_vocals.wav` 生成分段配音和 `audio_tts.wav`。混音阶段默认对 TTS
@@ -283,9 +286,11 @@ BILI_BILI_JCT=
 - Bilibili 发布入口：`run-task --step publish-bilibili` 已接入；默认要求
   `--publish-dry-run` 或 `--publish-confirm`。dry-run 不触发真实上传，输出
   `bilibili.dry-run.json`；真实上传需要通过环境变量提供 `BILI_SESSDATA` 和
-  `BILI_BILI_JCT`，通过 `bilibili-api-python` 提交单 P `video.mp4`、封面、
-  标题、简介和标签，成功后写入 `bilibili.json`。Web UI 默认仍安全 dry-run；
-  任务级 Bilibili 参数中关闭 `dry_run` 并开启 `confirm` 后会走同一真实上传逻辑。
+  `BILI_BILI_JCT`，通过 Nemo2011/bilibili-api 对应的 pip 包
+  `bilibili-api-python==17.4.1` 提交单 P `video.mp4`、封面、标题、简介和标签。
+  上传依赖显式锁定 `aiohttp==3.13.2`，并在项目入口禁用 `br` 响应压缩，避免新版
+  `aiohttp` 与 `Brotli` 解压接口不兼容。成功后写入 `bilibili.json`。Web UI
+  默认仍安全 dry-run；任务级 Bilibili 参数中关闭 `dry_run` 并开启 `confirm` 后会走同一真实上传逻辑。
 
 ## Docker 验证命令
 

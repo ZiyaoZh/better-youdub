@@ -6,5 +6,12 @@
     "api_key": "",
     "base_url": "",
     "model": ""
+  },
+  "translation": {
+    "extra_prompt": "",
+    "summary_extra_prompt": "",
+    "context_extra_prompt": "",
+    "segment_extra_prompt": "",
+    "correction_prompt": ""
   }
 }

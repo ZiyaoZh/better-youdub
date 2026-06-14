@@ -125,6 +125,42 @@ def test_publish_to_bilibili_writes_real_upload_result(tmp_path: Path, monkeypat
     assert captured["config"].sessdata == "sess"
 
 
+def test_bilibili_headers_disable_brotli_without_dropping_other_headers() -> None:
+    headers = {
+        "User-Agent": "ua",
+        "Referer": "https://www.bilibili.com",
+        "accept-encoding": "gzip, deflate, br",
+    }
+
+    patched = publishing._bilibili_headers_without_brotli(headers)
+
+    assert patched["User-Agent"] == "ua"
+    assert patched["Referer"] == "https://www.bilibili.com"
+    assert patched["Accept-Encoding"] == "gzip, deflate"
+    assert "accept-encoding" not in patched
+
+
+def test_bilibili_request_args_disable_brotli_for_keyword_headers() -> None:
+    args, kwargs = publishing._bilibili_request_args_without_brotli(
+        (),
+        {"headers": {"Accept-Encoding": "gzip, deflate, br", "User-Agent": "ua"}},
+    )
+
+    assert args == ()
+    assert kwargs["headers"]["Accept-Encoding"] == "gzip, deflate"
+    assert kwargs["headers"]["User-Agent"] == "ua"
+
+
+def test_bilibili_request_args_disable_brotli_for_positional_headers() -> None:
+    args, kwargs = publishing._bilibili_request_args_without_brotli(
+        ("GET", "https://api.bilibili.com", {}, {}, {}, {"Accept-Encoding": "br"}),
+        {},
+    )
+
+    assert kwargs == {}
+    assert args[5]["Accept-Encoding"] == "gzip, deflate"
+
+
 def test_upload_bilibili_uses_video_uploader_api(tmp_path: Path, monkeypatch) -> None:
     _write_publish_inputs(tmp_path)
     monkeypatch.setattr(publishing, "_run_command", lambda command: Path(command[-1]).write_bytes(b"jpg"))

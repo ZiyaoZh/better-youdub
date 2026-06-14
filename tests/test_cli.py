@@ -21,6 +21,35 @@ def test_run_task_parser_accepts_synthesis_and_publish_steps() -> None:
     assert dry_run.publish_dry_run is True
 
 
+def test_run_task_parser_accepts_translation_prompt_options() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "run-task",
+            "task1",
+            "--step",
+            "translate",
+            "--translation-extra-prompt",
+            "全局提示",
+            "--translation-summary-extra-prompt",
+            "摘要提示",
+            "--translation-context-extra-prompt",
+            "上下文提示",
+            "--translation-segment-extra-prompt",
+            "分段提示",
+            "--translation-correction-prompt",
+            "纠错提示",
+        ]
+    )
+
+    assert args.translation_extra_prompt == "全局提示"
+    assert args.translation_summary_extra_prompt == "摘要提示"
+    assert args.translation_context_extra_prompt == "上下文提示"
+    assert args.translation_segment_extra_prompt == "分段提示"
+    assert args.translation_correction_prompt == "纠错提示"
+
+
 def test_create_url_task_parser_accepts_download_options() -> None:
     parser = build_parser()
 

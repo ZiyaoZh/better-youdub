@@ -128,7 +128,9 @@ Web UI 的参数配置是任务级的。URL 创建表单提供下载参数，因
 “下载完成自动运行全流程”后，URL 下载成功并创建任务后会立即提交后台完整链路，
 等同于自动点击该任务的“运行完整链路”。任务创建后，步骤卡片上的设置入口会打开
 “任务参数”抽屉，保存该任务自己的下载、WhisperX、翻译、TTS、合成、发布包和
-Bilibili 参数快照。空的密钥字段会继续回退到环境变量或运行时配置文件；为单个任务
+Bilibili 参数快照。翻译参数中可以配置额外提示词、摘要提示词、上下文提示词、
+分段翻译提示词和纠错/术语提示词；这些提示词会随任务配置保存，修改后会让相关翻译
+缓存失效并重新请求模型。空的密钥字段会继续回退到环境变量或运行时配置文件；为单个任务
 填写密钥时，接口响应只返回 `********`，后续保存该掩码会保留原值。
 
 设置 `YOUDUB_WEB_USERNAME` 和 `YOUDUB_WEB_PASSWORD` 后，Web UI 会启用 HTTP Basic
@@ -214,9 +216,23 @@ JavaScript runtime；`doctor` 和 WebUI `/api/doctor` 会显示 `ytdlp_js_runtim
 其中 `translation.context.json` 会基于视频元信息和完整转录文本生成字幕翻译上下
 文，包括目标语言摘要、术语表和高置信度 ASR 纠错。`translation.segments.json`
 是带缓存元数据的句级翻译缓存，会记录目标语言、提示词版本和上下文 hash；当上下
-文或提示词版本变化时会重新翻译句级缓存。最终 `translation.json` 由本地切分和
+文、模型、提示词版本或任务级提示词 hash 变化时会重新翻译句级缓存。最终
+`translation.json` 由本地切分和
 句级翻译缓存生成，每条记录保留完整译文句子，`part_id` 固定为 0，不需要再次调用
 模型。
+
+翻译阶段支持以下任务级提示词参数，Web UI 的翻译参数抽屉可直接编辑：
+
+- `extra_prompt`：附加到摘要、上下文和分段翻译的全局提示词。
+- `summary_extra_prompt`：只影响 `summary.json` 的标题、摘要和标签生成。
+- `context_extra_prompt`：只影响 `translation.context.json` 的全文摘要、术语表和 ASR 纠错提取。
+- `segment_extra_prompt`：只影响句级字幕翻译。
+- `correction_prompt`：表达术语、ASR 错听和译后特殊修正策略。
+
+默认 `correction_prompt` 已迁入旧项目里用于气球塔防 6 的核心术语、英雄/塔名称、
+常见错听和观众称呼过滤策略。新项目不会把这些规则做成硬编码 `replace` 表；它们会
+作为大模型提示词参与上下文生成和句级翻译。需要处理其他领域时，直接覆盖任务级提示词
+即可。
 
 翻译请求默认会优先尝试结构化 JSON 输出：
 
@@ -233,6 +249,11 @@ JavaScript runtime；`doctor` 和 WebUI `/api/doctor` 会显示 `ytdlp_js_runtim
 - `YOUDUB_TRANSLATION_RETRY_MAX_BACKOFF_SECONDS`
 - `YOUDUB_TRANSLATION_FORCE_JSON_OUTPUT`
 - `YOUDUB_TRANSLATION_TEMPERATURE`
+- `YOUDUB_TRANSLATION_EXTRA_PROMPT`
+- `YOUDUB_TRANSLATION_SUMMARY_EXTRA_PROMPT`
+- `YOUDUB_TRANSLATION_CONTEXT_EXTRA_PROMPT`
+- `YOUDUB_TRANSLATION_SEGMENT_EXTRA_PROMPT`
+- `YOUDUB_TRANSLATION_CORRECTION_PROMPT`
 
 `tts` 依赖 GPU 依赖集中的 `voxcpm` Python 包，默认使用 Hugging Face 模型
 `openbmb/VoxCPM2`。首次运行会下载大模型，缓存位置由 `HF_HOME` 控制；GPU 容器
@@ -370,6 +391,9 @@ export YOUDUB_SUBTITLE_FONT=
 `publish-bilibili` 默认不会无确认上传。使用 `--publish-dry-run` 只校验发布包和
 文件路径，写出 `bilibili.dry-run.json`；真实上传会通过 `bilibili-api-python`
 提交 `video.mp4`、`cover.jpg`、标题、简介和标签，成功后写出 `bilibili.json`。
+这里使用的是 Nemo2011/bilibili-api 对应的 pip 包 `bilibili-api-python==17.4.1`，
+并显式锁定 `aiohttp==3.13.2`，同时上传入口会禁用 `br` 响应压缩，避免新版
+`aiohttp` 与 `Brotli` 解压接口不兼容导致 `Can not decode content-encoding: br`。
 真实上传需要设置 Bilibili 凭证，并显式传入 `--publish-confirm`：
 
 ```bash
@@ -466,6 +490,13 @@ YOUDUB_CONFIG_PATH=/data/config/youdub.json
     "api_key": "sk-...",
     "base_url": "https://api.example.com/v1",
     "model": "gpt-..."
+  },
+  "translation": {
+    "extra_prompt": "",
+    "summary_extra_prompt": "",
+    "context_extra_prompt": "",
+    "segment_extra_prompt": "",
+    "correction_prompt": ""
   }
 }
 ```
@@ -486,6 +517,11 @@ export OPENAI_MODEL=gpt-...
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL` 或 `OPENAI_API_BASE`
 - `OPENAI_MODEL` 或 `MODEL_NAME`
+- `YOUDUB_TRANSLATION_EXTRA_PROMPT`
+- `YOUDUB_TRANSLATION_SUMMARY_EXTRA_PROMPT`
+- `YOUDUB_TRANSLATION_CONTEXT_EXTRA_PROMPT`
+- `YOUDUB_TRANSLATION_SEGMENT_EXTRA_PROMPT`
+- `YOUDUB_TRANSLATION_CORRECTION_PROMPT`
 
 `doctor` 命令只会显示这些密钥是否已配置，不会打印真实密钥内容。
 

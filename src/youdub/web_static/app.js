@@ -57,6 +57,11 @@ const CONFIG_SECTIONS = [
       ["retry_max_backoff_seconds", "最大退避秒数", "number", {min: 0}],
       ["force_json_output", "强制 JSON 输出", "boolean"],
       ["temperature", "Temperature", "number", {min: 0, step: 0.1}],
+      ["extra_prompt", "全局额外提示词", "textarea"],
+      ["summary_extra_prompt", "摘要提示词", "textarea"],
+      ["context_extra_prompt", "上下文提示词", "textarea"],
+      ["segment_extra_prompt", "分段翻译提示词", "textarea"],
+      ["correction_prompt", "纠错和术语提示词", "textarea"],
     ],
   },
   {
@@ -540,7 +545,11 @@ function ensureTaskConfigDraft(task, force = false) {
 
 function renderConfigField(section, key, labelText, type, meta, value) {
   const label = document.createElement("label")
-  label.className = type === "boolean" ? "checkbox-line config-checkbox" : ""
+  label.className = type === "boolean"
+    ? "checkbox-line config-checkbox"
+    : type === "textarea"
+      ? "config-textarea-field"
+      : ""
   const id = configInputId(section, key)
 
   if (type === "boolean") {
@@ -557,6 +566,11 @@ function renderConfigField(section, key, labelText, type, meta, value) {
       <span>${labelText}</span>
       <select id="${id}" data-config-section="${section}" data-config-key="${key}" data-config-type="${type}">${options}</select>
     `
+  } else if (type === "textarea") {
+    label.innerHTML = `
+      <span>${labelText}</span>
+      <textarea id="${id}" data-config-section="${section}" data-config-key="${key}" data-config-type="${type}" spellcheck="false">${escapeHtml(value ?? "")}</textarea>
+    `
   } else {
     const inputType = type === "secret" ? "password" : type === "integer" || type === "number" ? "number" : "text"
     const attrs = [
@@ -570,7 +584,7 @@ function renderConfigField(section, key, labelText, type, meta, value) {
     `
   }
 
-  label.querySelector("input, select").addEventListener("input", (event) => {
+  label.querySelector("input, select, textarea").addEventListener("input", (event) => {
     updateTaskConfigDraftValue(event.target)
     state.configDirty = true
     setMessage("taskConfigMessage", "有未保存修改")

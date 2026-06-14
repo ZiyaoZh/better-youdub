@@ -4,6 +4,7 @@ openai>=1.30.0
 audiostretchy
 opencc-python-reimplemented>=0.1.7
 bilibili-api-python==17.4.1
+aiohttp==3.13.2
 yt-dlp
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.0

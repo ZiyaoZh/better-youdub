@@ -23,6 +23,7 @@ COVER_OUTPUT = "cover.jpg"
 COVER_CANDIDATES = ("download.jpg", "download.jpeg", "download.png", "download.webp")
 BILIBILI_UPLOAD_RETRIES = 5
 BILIBILI_UPLOAD_RETRY_DELAY_SECONDS = 10.0
+BILIBILI_ACCEPT_ENCODING = "gzip, deflate"
 
 LOGGER = logging.getLogger(__name__)
 
@@ -178,6 +179,7 @@ async def _upload_bilibili(
             "Install project runtime dependencies before uploading."
         ) from exc
 
+    _configure_bilibili_api_transport()
     source = config.source or package.get("source_url") or None
     credential = Credential(sessdata=config.sessdata, bili_jct=config.bili_jct)
     last_error: Exception | None = None
@@ -215,6 +217,59 @@ async def _upload_bilibili(
                 await asyncio.sleep(BILIBILI_UPLOAD_RETRY_DELAY_SECONDS)
 
     raise RuntimeError(f"Bilibili upload failed after {BILIBILI_UPLOAD_RETRIES} attempts") from last_error
+
+
+def _configure_bilibili_api_transport() -> None:
+    try:
+        from bilibili_api.utils import network as bilibili_network
+    except ImportError:
+        return
+
+    headers = getattr(bilibili_network, "HEADERS", None)
+    if isinstance(headers, dict):
+        patched_headers = _bilibili_headers_without_brotli(headers)
+        headers.clear()
+        headers.update(patched_headers)
+
+    try:
+        from bilibili_api.clients import AioHTTPClient as aiohttp_client_module
+    except ImportError:
+        return
+
+    client_class = getattr(aiohttp_client_module, "AioHTTPClient", None)
+    original_request = getattr(client_class, "request", None)
+    if not callable(original_request) or getattr(original_request, "_youdub_no_brotli", False):
+        return
+
+    async def request_without_brotli(self: Any, *args: Any, **kwargs: Any) -> Any:
+        patched_args, patched_kwargs = _bilibili_request_args_without_brotli(args, kwargs)
+        return await original_request(self, *patched_args, **patched_kwargs)
+
+    setattr(request_without_brotli, "_youdub_no_brotli", True)
+    setattr(client_class, "request", request_without_brotli)
+
+
+def _bilibili_request_args_without_brotli(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    args_list = list(args)
+    patched_kwargs = dict(kwargs)
+    header_position = 5
+    if len(args_list) > header_position:
+        args_list[header_position] = _bilibili_headers_without_brotli(args_list[header_position])
+    else:
+        patched_kwargs["headers"] = _bilibili_headers_without_brotli(patched_kwargs.get("headers"))
+    return tuple(args_list), patched_kwargs
+
+
+def _bilibili_headers_without_brotli(headers: Any) -> dict[str, Any]:
+    patched = dict(headers or {})
+    for key in list(patched):
+        if key.lower() == "accept-encoding":
+            del patched[key]
+    patched["Accept-Encoding"] = BILIBILI_ACCEPT_ENCODING
+    return patched
 
 
 def _attach_bilibili_upload_logging(uploader: Any) -> None:

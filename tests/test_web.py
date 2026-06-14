@@ -98,6 +98,7 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert defaults.status_code == 200
     assert defaults.json()["config"]["download"]["max_height"] == 0
     assert defaults.json()["config"]["download"]["auto_run_all_after_download"] is False
+    assert "Bloons TD 6" in defaults.json()["config"]["translation"]["correction_prompt"]
 
     task = client.post("/api/tasks/local", json={"source": str(source), "title": "Config Smoke"}).json()
     assert task["config"]["whisperx"]["model_name"] == "large-v2"
@@ -118,6 +119,8 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
                     "api_key": "sk-task",
                     "base_url": "https://example.test/v1",
                     "model": "gpt-task",
+                    "segment_extra_prompt": "使用中文主播口吻。",
+                    "correction_prompt": "把 tax shooter 视为 Tack Shooter。",
                 },
                 "whisperx": {
                     **task["config"]["whisperx"],
@@ -133,6 +136,8 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     config_path = tmp_path / "tasks" / "tasks.json"
     saved_task = json.loads(config_path.read_text(encoding="utf-8"))[0]
     assert saved_task["config"]["translation"]["api_key"] == "sk-task"
+    assert saved_task["config"]["translation"]["segment_extra_prompt"] == "使用中文主播口吻。"
+    assert saved_task["config"]["translation"]["correction_prompt"] == "把 tax shooter 视为 Tack Shooter。"
     assert saved_task["config"]["whisperx"]["batch_size"] == 12
 
     masked_payload = updated.json()["config"]
@@ -326,6 +331,8 @@ def test_web_run_step_uses_saved_task_config(monkeypatch, tmp_path: Path) -> Non
     config["translation"]["api_key"] = "sk-task"
     config["translation"]["model"] = "gpt-task"
     config["translation"]["target_language"] = "繁體中文"
+    config["translation"]["segment_extra_prompt"] = "使用台灣中文口吻。"
+    config["translation"]["correction_prompt"] = "把 tax shooter 视为 Tack Shooter。"
     config["whisperx"]["model_name"] = "medium"
     config["whisperx"]["hf_token"] = "hf-task"
     config["tts"]["cfg_value"] = 3.5
@@ -359,6 +366,8 @@ def test_web_run_step_uses_saved_task_config(monkeypatch, tmp_path: Path) -> Non
     assert captured["translation"].api_key == "sk-task"
     assert captured["translation"].model == "gpt-task"
     assert captured["translation"].target_language == "繁體中文"
+    assert captured["translation"].segment_extra_prompt == "使用台灣中文口吻。"
+    assert captured["translation"].correction_prompt == "把 tax shooter 视为 Tack Shooter。"
     assert captured["whisperx"].model_name == "medium"
     assert captured["whisperx"].hf_token == "hf-task"
     assert captured["tts"].hf_token == "hf-env"

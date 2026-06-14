@@ -17,7 +17,14 @@ from .publishing import BilibiliPublishConfig, PublishPackageConfig
 from .synthesis import SynthesisConfig, ffmpeg_has_filter
 from .storage import TaskStore
 from .tts import TTSConfig
-from .translation import TranslationConfig
+from .translation import (
+    DEFAULT_CONTEXT_EXTRA_PROMPT,
+    DEFAULT_CORRECTION_PROMPT,
+    DEFAULT_SEGMENT_EXTRA_PROMPT,
+    DEFAULT_SUMMARY_EXTRA_PROMPT,
+    DEFAULT_TRANSLATION_EXTRA_PROMPT,
+    TranslationConfig,
+)
 from .transcription import WhisperXConfig
 
 
@@ -146,6 +153,31 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.getenv("YOUDUB_TRANSLATION_BATCH_SIZE", "20")),
         help="Number of transcript segments per translation request",
+    )
+    run_task.add_argument(
+        "--translation-extra-prompt",
+        default=None,
+        help="Additional prompt applied to all translation model requests",
+    )
+    run_task.add_argument(
+        "--translation-summary-extra-prompt",
+        default=None,
+        help="Additional prompt applied to summary translation",
+    )
+    run_task.add_argument(
+        "--translation-context-extra-prompt",
+        default=None,
+        help="Additional prompt applied to translation context generation",
+    )
+    run_task.add_argument(
+        "--translation-segment-extra-prompt",
+        default=None,
+        help="Additional prompt applied to segment translation",
+    )
+    run_task.add_argument(
+        "--translation-correction-prompt",
+        default=None,
+        help="Prompt for glossary, ASR correction, and special translation fixes",
     )
     run_task.add_argument(
         "--tts-model",
@@ -420,6 +452,31 @@ def cmd_run_task(config: AppConfig, args: argparse.Namespace) -> int:
         retry_max_backoff_seconds=float(os.getenv("YOUDUB_TRANSLATION_RETRY_MAX_BACKOFF_SECONDS", "8")),
         force_json_output=os.getenv("YOUDUB_TRANSLATION_FORCE_JSON_OUTPUT", "1") not in {"0", "false", "False"},
         temperature=float(os.getenv("YOUDUB_TRANSLATION_TEMPERATURE", "0")),
+        extra_prompt=_arg_or_config_prompt(
+            args.translation_extra_prompt,
+            config.translation_prompts.extra_prompt,
+            DEFAULT_TRANSLATION_EXTRA_PROMPT,
+        ),
+        summary_extra_prompt=_arg_or_config_prompt(
+            args.translation_summary_extra_prompt,
+            config.translation_prompts.summary_extra_prompt,
+            DEFAULT_SUMMARY_EXTRA_PROMPT,
+        ),
+        context_extra_prompt=_arg_or_config_prompt(
+            args.translation_context_extra_prompt,
+            config.translation_prompts.context_extra_prompt,
+            DEFAULT_CONTEXT_EXTRA_PROMPT,
+        ),
+        segment_extra_prompt=_arg_or_config_prompt(
+            args.translation_segment_extra_prompt,
+            config.translation_prompts.segment_extra_prompt,
+            DEFAULT_SEGMENT_EXTRA_PROMPT,
+        ),
+        correction_prompt=_arg_or_config_prompt(
+            args.translation_correction_prompt,
+            config.translation_prompts.correction_prompt,
+            DEFAULT_CORRECTION_PROMPT,
+        ),
     )
     tts_config = TTSConfig(
         model=args.tts_model,
@@ -502,6 +559,12 @@ def _bool_env(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value not in {"0", "false", "False"}
+
+
+def _arg_or_config_prompt(arg_value: str | None, config_value: str | None, default: str) -> str:
+    if arg_value is not None:
+        return arg_value
+    return config_value or default
 
 
 def _existing_nonempty_file(path: Path | None) -> bool:
