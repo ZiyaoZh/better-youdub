@@ -24,10 +24,10 @@ class TTSConfig:
     hf_token: str | None = None
     load_denoiser: bool = False
     cfg_value: float = 2.0
-    inference_timesteps: int = 10
-    min_reference_ms: int = 1200
-    start_pad_ms: int = 80
-    end_pad_ms: int = 160
+    inference_timesteps: int = 20
+    min_reference_ms: int = 1500
+    start_pad_ms: int = 150
+    end_pad_ms: int = 300
     align_audio: bool = True
     stretch_base_min: float = 0.8
     stretch_base_max: float = 1.2
@@ -109,8 +109,8 @@ def split_reference_audio(
     vocals_path: Path,
     entries: list[dict[str, Any]],
     task_dir: Path,
-    start_pad_ms: int = 80,
-    end_pad_ms: int = 160,
+    start_pad_ms: int = 150,
+    end_pad_ms: int = 300,
 ) -> Path:
     if not vocals_path.exists():
         raise FileNotFoundError(vocals_path)

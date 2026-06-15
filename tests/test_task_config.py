@@ -1,7 +1,14 @@
 from pathlib import Path
 
 from youdub.config import AppConfig
-from youdub.task_config import MASKED_SECRET, default_task_config, normalize_task_config_update, runtime_options_from_task_config
+from youdub.task_config import (
+    MASKED_SECRET,
+    WEB_TRANSLATION_BASE_URL_DEFAULT,
+    WEB_TRANSLATION_MODEL_DEFAULT,
+    default_task_config,
+    normalize_task_config_update,
+    runtime_options_from_task_config,
+)
 
 
 def test_task_config_empty_secret_defaults_fall_back_to_runtime_secrets(monkeypatch, tmp_path: Path) -> None:
@@ -86,6 +93,54 @@ def test_task_config_loads_translation_prompts_from_runtime_config(monkeypatch, 
     assert options.translation.context_extra_prompt == "上下文提示"
     assert options.translation.segment_extra_prompt == "分段提示"
     assert options.translation.correction_prompt == "纠错提示"
+
+
+def test_task_config_exposes_web_translation_defaults(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("YOUDUB_ROOT", str(tmp_path / "videos"))
+    monkeypatch.setenv("YOUDUB_TASKS_PATH", str(tmp_path / "tasks" / "tasks.json"))
+    monkeypatch.setenv("YOUDUB_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("YOUDUB_MODELS_DIR", str(tmp_path / "models"))
+    monkeypatch.setenv("YOUDUB_CONFIG_PATH", str(tmp_path / "config" / "youdub.json"))
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+
+    config = AppConfig.from_env()
+    task_config = default_task_config(config)
+    options = runtime_options_from_task_config(config, task_config)
+
+    assert task_config["translation"]["base_url"] == WEB_TRANSLATION_BASE_URL_DEFAULT
+    assert task_config["translation"]["model"] == WEB_TRANSLATION_MODEL_DEFAULT
+    assert options.translation.base_url == WEB_TRANSLATION_BASE_URL_DEFAULT
+    assert options.translation.model == WEB_TRANSLATION_MODEL_DEFAULT
+
+
+def test_task_config_exposes_web_tts_defaults(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("YOUDUB_ROOT", str(tmp_path / "videos"))
+    monkeypatch.setenv("YOUDUB_TASKS_PATH", str(tmp_path / "tasks" / "tasks.json"))
+    monkeypatch.setenv("YOUDUB_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("YOUDUB_MODELS_DIR", str(tmp_path / "models"))
+    monkeypatch.setenv("YOUDUB_CONFIG_PATH", str(tmp_path / "config" / "youdub.json"))
+    monkeypatch.delenv("YOUDUB_TTS_INFERENCE_TIMESTEPS", raising=False)
+    monkeypatch.delenv("VOXCPM_INFERENCE_TIMESTEPS", raising=False)
+    monkeypatch.delenv("YOUDUB_TTS_MIN_REFERENCE_MS", raising=False)
+    monkeypatch.delenv("VOXCPM_MIN_REFERENCE_MS", raising=False)
+    monkeypatch.delenv("YOUDUB_TTS_START_PAD_MS", raising=False)
+    monkeypatch.delenv("YOUDUB_TTS_END_PAD_MS", raising=False)
+
+    config = AppConfig.from_env()
+    task_config = default_task_config(config)
+    options = runtime_options_from_task_config(config, task_config)
+
+    assert task_config["tts"]["inference_timesteps"] == 15
+    assert task_config["tts"]["min_reference_ms"] == 1500
+    assert task_config["tts"]["start_pad_ms"] == 150
+    assert task_config["tts"]["end_pad_ms"] == 300
+    assert options.tts.inference_timesteps == 15
+    assert options.tts.min_reference_ms == 1500
+    assert options.tts.start_pad_ms == 150
+    assert options.tts.end_pad_ms == 300
 
 
 def test_task_config_partial_update_preserves_sections_and_masked_secrets(monkeypatch, tmp_path: Path) -> None:

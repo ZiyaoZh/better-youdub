@@ -23,11 +23,20 @@ SECRET_FIELDS: dict[str, set[str]] = {
     "bilibili": {"sessdata", "bili_jct"},
 }
 
+WEB_TTS_INFERENCE_TIMESTEPS_DEFAULT = 15
+WEB_TRANSLATION_BASE_URL_DEFAULT = "https://sg.uiuiapi.com/v1"
+WEB_TRANSLATION_MODEL_DEFAULT = "gemini-3.1-flash-lite-preview"
+
 
 def default_task_config(config: AppConfig, *, include_secrets: bool = False) -> dict[str, Any]:
     options = runtime_options_from_env(config)
     whisperx = _config_dict(options.whisperx)
     whisperx.pop("models_dir", None)
+    tts = _config_dict(options.tts)
+    tts["inference_timesteps"] = WEB_TTS_INFERENCE_TIMESTEPS_DEFAULT
+    translation = _config_dict(options.translation)
+    translation["base_url"] = translation["base_url"] or WEB_TRANSLATION_BASE_URL_DEFAULT
+    translation["model"] = translation["model"] or WEB_TRANSLATION_MODEL_DEFAULT
     defaults = {
         "download": {
             "use_cookies": True,
@@ -37,11 +46,14 @@ def default_task_config(config: AppConfig, *, include_secrets: bool = False) -> 
             "force_download": False,
         },
         "whisperx": whisperx,
-        "translation": _config_dict(options.translation),
-        "tts": _config_dict(options.tts),
+        "translation": translation,
+        "tts": tts,
         "synthesis": _config_dict(options.synthesis),
         "publish": _config_dict(options.publish),
         "bilibili": _config_dict(options.bilibili),
+        "workflow": {
+            "include_bilibili_upload": False,
+        },
     }
     if not include_secrets:
         for section, fields in SECRET_FIELDS.items():

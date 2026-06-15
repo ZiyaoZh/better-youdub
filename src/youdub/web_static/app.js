@@ -124,6 +124,13 @@ const CONFIG_SECTIONS = [
       ["confirm", "确认真实上传", "boolean"],
     ],
   },
+  {
+    key: "workflow",
+    label: "流程",
+    fields: [
+      ["include_bilibili_upload", "完整链路包含 Bilibili", "boolean"],
+    ],
+  },
 ]
 
 const STEP_CONFIG_SECTIONS = {
@@ -258,13 +265,14 @@ function renderTasks() {
     return
   }
   for (const task of state.tasks) {
+    const effectiveStatus = task.running ? "running" : task.status
     const item = document.createElement("button")
     item.type = "button"
     item.className = `task-item ${task.id === state.selectedId ? "active" : ""}`
     item.innerHTML = `
       <span class="task-title">${escapeHtml(task.title || task.source || task.id)}</span>
       <span class="task-meta">
-        <span class="status-badge ${statusClass(task.status)}">${statusLabel(task.running ? "running" : task.status)}</span>
+        <span class="status-badge ${statusClass(effectiveStatus)}">${statusLabel(effectiveStatus)}</span>
         <span>${fmtTime(task.updated_at)}</span>
       </span>
     `
@@ -345,7 +353,7 @@ function renderSteps(task) {
         openTaskConfig(task, configKey)
       })
     }
-    card.querySelector(".step-card-actions button").addEventListener("click", () => runStep(task.id, step))
+    card.querySelector(".step-card-actions button").addEventListener("click", () => runStep(task, step))
     grid.appendChild(card)
   }
 }
@@ -383,7 +391,7 @@ function renderDownloadConfigCard(task) {
   if (downloadButton) {
     downloadButton.addEventListener("click", (event) => {
       event.stopPropagation()
-      downloadTask(task.id).catch((error) => window.alert(error.message))
+      downloadTask(task).catch((error) => window.alert(error.message))
     })
   }
   return card
@@ -688,10 +696,12 @@ async function saveTaskConfig(event) {
   }
 }
 
-async function runStep(taskId, step) {
-  await api(`/api/tasks/${taskId}/run`, {
+async function runStep(task, step) {
+  const force = await confirmRerunIfCompleted(task, step)
+  if (force === null) return
+  await api(`/api/tasks/${task.id}/run`, {
     method: "POST",
-    body: JSON.stringify({step}),
+    body: JSON.stringify({step, force}),
   })
   await refreshTasks()
 }
@@ -702,9 +712,28 @@ async function runAll() {
   await refreshTasks()
 }
 
-async function downloadTask(taskId) {
-  await api(`/api/tasks/${taskId}/download`, {method: "POST"})
+async function downloadTask(task) {
+  const force = await confirmRerunIfCompleted(task, "ingest")
+  if (force === null) return
+  await api(`/api/tasks/${task.id}/download`, {
+    method: "POST",
+    body: JSON.stringify({force}),
+  })
   await refreshTasks()
+}
+
+async function confirmRerunIfCompleted(task, step) {
+  const completion = task.step_completion?.[step]
+  if (!completion?.complete) return false
+  const label = stepLabel(step)
+  const ok = window.confirm(`${label}已完成。重新运行会清理该步骤及后续步骤产物，是否继续？`)
+  return ok ? true : null
+}
+
+function stepLabel(step) {
+  if (step === "ingest") return "下载"
+  const item = STEPS.find(([key]) => key === step)
+  return item ? item[1] : step
 }
 
 async function deleteSelected() {

@@ -205,14 +205,26 @@ def build_parser() -> argparse.ArgumentParser:
     run_task.add_argument(
         "--tts-inference-timesteps",
         type=int,
-        default=int(os.getenv("YOUDUB_TTS_INFERENCE_TIMESTEPS", os.getenv("VOXCPM_INFERENCE_TIMESTEPS", "10"))),
+        default=int(os.getenv("YOUDUB_TTS_INFERENCE_TIMESTEPS", os.getenv("VOXCPM_INFERENCE_TIMESTEPS", "20"))),
         help="VoxCPM2 inference timesteps",
     )
     run_task.add_argument(
         "--tts-min-reference-ms",
         type=int,
-        default=int(os.getenv("YOUDUB_TTS_MIN_REFERENCE_MS", os.getenv("VOXCPM_MIN_REFERENCE_MS", "1200"))),
+        default=int(os.getenv("YOUDUB_TTS_MIN_REFERENCE_MS", os.getenv("VOXCPM_MIN_REFERENCE_MS", "1500"))),
         help="Minimum vocal reference length before falling back to a longer reference",
+    )
+    run_task.add_argument(
+        "--tts-start-pad-ms",
+        type=int,
+        default=int(os.getenv("YOUDUB_TTS_START_PAD_MS", "150")),
+        help="Milliseconds of source vocal audio to prepend to each TTS reference segment",
+    )
+    run_task.add_argument(
+        "--tts-end-pad-ms",
+        type=int,
+        default=int(os.getenv("YOUDUB_TTS_END_PAD_MS", "300")),
+        help="Milliseconds of source vocal audio to append to each TTS reference segment",
     )
     run_task.add_argument(
         "--no-tts-align-audio",
@@ -486,6 +498,8 @@ def cmd_run_task(config: AppConfig, args: argparse.Namespace) -> int:
         cfg_value=args.tts_cfg_value,
         inference_timesteps=args.tts_inference_timesteps,
         min_reference_ms=args.tts_min_reference_ms,
+        start_pad_ms=args.tts_start_pad_ms,
+        end_pad_ms=args.tts_end_pad_ms,
         align_audio=args.tts_align_audio,
         stretch_base_min=args.tts_stretch_base_min,
         stretch_base_max=args.tts_stretch_base_max,

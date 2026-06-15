@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 from youdub.downloader import DownloadResult
 from youdub.locking import TaskLock
 from youdub.models import PipelineStep, StepStatus, TaskStatus
+from youdub.task_config import WEB_TRANSLATION_BASE_URL_DEFAULT, WEB_TRANSLATION_MODEL_DEFAULT
 from youdub.translation import TranslationConfig
 from youdub.transcription import WhisperXConfig
 from youdub.tts import TTSConfig
@@ -17,6 +19,8 @@ from youdub.web import create_app
 
 
 def _client(monkeypatch, tmp_path: Path) -> TestClient:
+    web_module._RUNNING.clear()
+    web_module._TASK_ALIASES.clear()
     monkeypatch.setenv("YOUDUB_ROOT", str(tmp_path / "videos"))
     monkeypatch.setenv("YOUDUB_TASKS_PATH", str(tmp_path / "tasks" / "tasks.json"))
     monkeypatch.setenv("YOUDUB_LOG_DIR", str(tmp_path / "logs"))
@@ -90,6 +94,10 @@ def test_web_creates_local_task_and_lists_artifacts(monkeypatch, tmp_path: Path)
 
 
 def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("MODEL_NAME", raising=False)
     client = _client(monkeypatch, tmp_path)
     source = tmp_path / "sample.mp4"
     source.write_bytes(b"video")
@@ -99,10 +107,16 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert defaults.json()["config"]["download"]["max_height"] == 0
     assert "auto_run_all_after_download" not in defaults.json()["config"]["download"]
     assert "Bloons TD 6" in defaults.json()["config"]["translation"]["correction_prompt"]
+    assert defaults.json()["config"]["translation"]["base_url"] == WEB_TRANSLATION_BASE_URL_DEFAULT
+    assert defaults.json()["config"]["translation"]["model"] == WEB_TRANSLATION_MODEL_DEFAULT
+    assert defaults.json()["config"]["tts"]["inference_timesteps"] == 15
 
     task = client.post("/api/tasks/local", json={"source": str(source), "title": "Config Smoke"}).json()
     assert task["config"]["whisperx"]["model_name"] == "large-v2"
     assert task["config"]["translation"]["api_key"] == ""
+    assert task["config"]["translation"]["base_url"] == WEB_TRANSLATION_BASE_URL_DEFAULT
+    assert task["config"]["translation"]["model"] == WEB_TRANSLATION_MODEL_DEFAULT
+    assert task["config"]["tts"]["inference_timesteps"] == 15
 
     updated = client.put(
         f"/api/tasks/{task['id']}/config",
@@ -237,6 +251,22 @@ def test_web_can_create_url_draft_before_download(monkeypatch, tmp_path: Path) -
     assert task["config"]["download"]["max_height"] == 720
 
 
+def test_web_url_draft_reuses_existing_task_by_normalized_url(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+
+    first = client.post(
+        "/api/tasks/url-draft",
+        json={"url": "https://example.test/watch?v=abc123&b=2"},
+    ).json()
+    second = client.post(
+        "/api/tasks/url-draft",
+        json={"url": "https://EXAMPLE.test/watch?b=2&v=abc123#ignored"},
+    ).json()
+
+    assert second["id"] == first["id"]
+    assert len(client.get("/api/tasks").json()["tasks"]) == 1
+
+
 def test_web_downloads_url_draft_with_saved_config_and_hydrates_same_task(monkeypatch, tmp_path: Path) -> None:
     client = _client(monkeypatch, tmp_path)
     draft = client.post(
@@ -294,10 +324,50 @@ def test_web_downloads_url_draft_with_saved_config_and_hydrates_same_task(monkey
     assert task["folder"] == str(tmp_path / "videos" / "Web" / "20260614 Hydrated")
     assert task["steps"]["ingest"] == "success"
     assert task["artifacts"][0]["key"] == "download-video"
+    assert not Path(draft["folder"]).exists()
     assert task["config"]["download"]["max_height"] == 360
     assert task["config"]["translation"]["model"] == "gpt-task"
     assert captured["url"] == "https://example.test/watch?v=abc123"
     assert captured["config"].max_height == 360
+
+
+def test_web_url_draft_download_merges_existing_stable_task(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+
+    def fake_initial_download(url: str, root: Path, config: object) -> DownloadResult:
+        task_dir = root / "Web" / "20260614 Existing"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        info = {
+            "extractor_key": "YouTube",
+            "id": "abc123",
+            "title": "Existing",
+            "uploader": "Web",
+            "upload_date": "20260614",
+            "webpage_url": url,
+        }
+        info_path = task_dir / "download.info.json"
+        media_path = task_dir / "download.mp4"
+        info_path.write_text(json.dumps(info), encoding="utf-8")
+        media_path.write_bytes(b"video")
+        return DownloadResult(task_dir, info_path, media_path, None, info, "youtube:abc123")
+
+    monkeypatch.setattr(web_module, "download_url_to_artifacts", fake_initial_download)
+    existing = client.post("/api/tasks/url", json={"url": "https://example.test/watch?v=abc123"}).json()
+    draft = client.post("/api/tasks/url-draft", json={"url": "https://example.test/other?v=abc123"}).json()
+
+    config = draft["config"]
+    config["translation"]["model"] = "gpt-draft"
+    assert client.put(f"/api/tasks/{draft['id']}/config", json={"config": config}).status_code == 200
+    response = client.post(f"/api/tasks/{draft['id']}/download")
+
+    assert response.status_code == 200
+    web_module._RUNNING[draft["id"]].result(timeout=2)
+    tasks = client.get("/api/tasks").json()["tasks"]
+    assert [task["id"] for task in tasks] == [existing["id"]]
+    merged = client.get(f"/api/tasks/{draft['id']}").json()
+    assert merged["id"] == existing["id"]
+    assert merged["config"]["translation"]["model"] == "gpt-draft"
+    assert not Path(draft["folder"]).exists()
 
 
 def test_web_run_all_downloads_url_draft_before_pipeline_steps(monkeypatch, tmp_path: Path) -> None:
@@ -371,6 +441,236 @@ def test_web_run_all_downloads_url_draft_before_pipeline_steps(monkeypatch, tmp_
     assert task["source_key"] == "youtube:abc123"
     assert task["steps"]["ingest"] == "success"
     assert task["steps"]["prepare-publish"] == "success"
+
+
+def test_web_run_all_includes_bilibili_only_when_enabled(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task = client.post("/api/tasks/local", json={"source": str(source), "title": "Run All Bili"}).json()
+    captured = {"steps": []}
+
+    class FakeRunner:
+        def __init__(self, **kwargs: object) -> None:
+            captured["bilibili"] = kwargs["bilibili_publish_config"]
+
+        def run_step(self, task, step: PipelineStep, task_lock=None):
+            captured["steps"].append(step.value)
+            task.status = TaskStatus.SUCCESS
+            task.mark_step(step, StepStatus.SUCCESS)
+            return task
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+
+    web_module._run_all_job(task["id"])
+    assert captured["steps"][-1] == "prepare-publish"
+    assert "publish-bilibili" not in captured["steps"]
+
+    task = client.get(f"/api/tasks/{task['id']}").json()
+    config = task["config"]
+    config["workflow"]["include_bilibili_upload"] = True
+    config["bilibili"]["dry_run"] = False
+    config["bilibili"]["confirm"] = False
+    assert client.put(f"/api/tasks/{task['id']}/config", json={"config": config}).status_code == 200
+    captured["steps"].clear()
+
+    web_module._run_all_job(task["id"])
+
+    assert captured["steps"][-1] == "publish-bilibili"
+    assert captured["bilibili"].dry_run is True
+    assert captured["bilibili"].confirm is False
+
+
+def test_web_run_all_skips_only_steps_with_success_status_and_outputs(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task_payload = client.post("/api/tasks/local", json={"source": str(source), "title": "Skip Complete"}).json()
+    store = web_module._store()
+    task = store.get(task_payload["id"])
+    (task.folder / "audio.wav").write_bytes(b"audio")
+    task.mark_step(PipelineStep.EXTRACT_AUDIO, StepStatus.SUCCESS)
+    task.mark_step(PipelineStep.SEPARATE_AUDIO, StepStatus.SUCCESS)
+    store.update(task)
+    captured = {"steps": []}
+
+    class FakeRunner:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def run_step(self, task, step: PipelineStep, task_lock=None):
+            captured["steps"].append(step.value)
+            task.status = TaskStatus.SUCCESS
+            task.mark_step(step, StepStatus.SUCCESS)
+            return task
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+
+    web_module._run_all_job(task.id)
+
+    assert captured["steps"][0] == "separate-audio"
+    assert "extract-audio" not in captured["steps"]
+
+
+def test_web_run_step_requires_force_when_step_outputs_are_complete(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task_payload = client.post("/api/tasks/local", json={"source": str(source), "title": "Force Step"}).json()
+    store = web_module._store()
+    task = store.get(task_payload["id"])
+    (task.folder / "audio.wav").write_bytes(b"audio")
+    task.mark_step(PipelineStep.EXTRACT_AUDIO, StepStatus.SUCCESS)
+    store.update(task)
+
+    response = client.post(f"/api/tasks/{task.id}/run", json={"step": "extract-audio"})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Step is already completed"
+
+
+def test_web_run_step_allows_success_status_without_required_outputs(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task_payload = client.post("/api/tasks/local", json={"source": str(source), "title": "Missing Output"}).json()
+    store = web_module._store()
+    task = store.get(task_payload["id"])
+    task.mark_step(PipelineStep.EXTRACT_AUDIO, StepStatus.SUCCESS)
+    store.update(task)
+    started = threading.Event()
+
+    def fake_job(*args: object, **kwargs: object) -> None:
+        started.set()
+
+    monkeypatch.setattr(web_module, "_run_step_job", fake_job)
+
+    response = client.post(f"/api/tasks/{task.id}/run", json={"step": "extract-audio"})
+
+    assert response.status_code == 200
+    web_module._RUNNING[task.id].result(timeout=2)
+    assert started.is_set()
+
+
+def test_web_force_rerun_cleans_step_and_downstream_outputs(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task_payload = client.post("/api/tasks/local", json={"source": str(source), "title": "Clean Downstream"}).json()
+    store = web_module._store()
+    task = store.get(task_payload["id"])
+    for name in (
+        "audio.wav",
+        "audio_vocals.wav",
+        "audio_instruments.wav",
+        "transcript.json",
+        "translation.json",
+        "audio_tts.wav",
+        "subtitles.srt",
+        "video.mp4",
+        "publish.json",
+        "bilibili.dry-run.json",
+    ):
+        (task.folder / name).write_bytes(b"old")
+    for step in (
+        PipelineStep.EXTRACT_AUDIO,
+        PipelineStep.SEPARATE_AUDIO,
+        PipelineStep.TRANSCRIBE,
+        PipelineStep.TRANSLATE,
+        PipelineStep.TTS,
+        PipelineStep.SUBTITLE,
+        PipelineStep.SYNTHESIZE,
+        PipelineStep.PREPARE_PUBLISH,
+        PipelineStep.PUBLISH_BILIBILI,
+    ):
+        task.mark_step(step, StepStatus.SUCCESS)
+    store.update(task)
+
+    class FakeRunner:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def run_step(self, task, step: PipelineStep, task_lock=None):
+            (task.folder / "audio_vocals.wav").write_bytes(b"new vocals")
+            (task.folder / "audio_instruments.wav").write_bytes(b"new instruments")
+            task.status = TaskStatus.SUCCESS
+            task.mark_step(step, StepStatus.SUCCESS)
+            return task
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+
+    web_module._run_step_job(task.id, PipelineStep.SEPARATE_AUDIO)
+    task = store.get(task.id)
+
+    assert (task.folder / "audio.wav").read_bytes() == b"old"
+    assert (task.folder / "audio_vocals.wav").read_bytes() == b"new vocals"
+    assert not (task.folder / "transcript.json").exists()
+    assert not (task.folder / "translation.json").exists()
+    assert not (task.folder / "video.mp4").exists()
+    assert task.steps[PipelineStep.SEPARATE_AUDIO.value] == StepStatus.SUCCESS
+    assert task.steps[PipelineStep.TRANSLATE.value] == StepStatus.PENDING
+
+
+def test_web_schedules_without_holding_task_lock(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task = client.post("/api/tasks/local", json={"source": str(source), "title": "Queued"}).json()
+    started = threading.Event()
+    release = threading.Event()
+
+    def delayed_job(*args: object, **kwargs: object) -> None:
+        started.set()
+        release.wait(timeout=2)
+
+    monkeypatch.setattr(web_module, "_run_step_job", delayed_job)
+
+    response = client.post(f"/api/tasks/{task['id']}/run", json={"step": "extract-audio"})
+
+    assert response.status_code == 200
+    assert response.json()["running"] is True
+    assert response.json()["status"] == "running"
+    assert response.json()["steps"]["extract-audio"] == "running"
+    probe = TaskLock(Path(task["folder"]), "probe").acquire(blocking=False)
+    probe.release()
+    release.set()
+    web_module._RUNNING[task["id"]].result(timeout=2)
+
+
+def test_web_runs_different_tasks_concurrently(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    first_source = tmp_path / "first.mp4"
+    second_source = tmp_path / "second.mp4"
+    first_source.write_bytes(b"first")
+    second_source.write_bytes(b"second")
+    first = client.post("/api/tasks/local", json={"source": str(first_source), "title": "First"}).json()
+    second = client.post("/api/tasks/local", json={"source": str(second_source), "title": "Second"}).json()
+    started: set[str] = set()
+    started_lock = threading.Lock()
+    both_started = threading.Event()
+    release = threading.Event()
+
+    def delayed_job(task_id: str, *args: object, **kwargs: object) -> None:
+        with started_lock:
+            started.add(task_id)
+            if len(started) == 2:
+                both_started.set()
+        release.wait(timeout=2)
+
+    monkeypatch.setattr(web_module, "_run_step_job", delayed_job)
+
+    first_response = client.post(f"/api/tasks/{first['id']}/run", json={"step": "extract-audio"})
+    second_response = client.post(f"/api/tasks/{second['id']}/run", json={"step": "extract-audio"})
+
+    try:
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        assert both_started.wait(timeout=1)
+        assert started == {first["id"], second["id"]}
+    finally:
+        release.set()
+        web_module._RUNNING[first["id"]].result(timeout=2)
+        web_module._RUNNING[second["id"]].result(timeout=2)
 
 
 def test_web_url_task_accepts_cookies_content_without_echoing_it(monkeypatch, tmp_path: Path) -> None:

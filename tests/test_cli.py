@@ -50,6 +50,43 @@ def test_run_task_parser_accepts_translation_prompt_options() -> None:
     assert args.translation_correction_prompt == "纠错提示"
 
 
+def test_run_task_parser_uses_current_tts_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("YOUDUB_TTS_INFERENCE_TIMESTEPS", raising=False)
+    monkeypatch.delenv("VOXCPM_INFERENCE_TIMESTEPS", raising=False)
+    monkeypatch.delenv("YOUDUB_TTS_MIN_REFERENCE_MS", raising=False)
+    monkeypatch.delenv("VOXCPM_MIN_REFERENCE_MS", raising=False)
+    monkeypatch.delenv("YOUDUB_TTS_START_PAD_MS", raising=False)
+    monkeypatch.delenv("YOUDUB_TTS_END_PAD_MS", raising=False)
+    parser = build_parser()
+
+    defaults = parser.parse_args(["run-task", "task1", "--step", "tts"])
+    overrides = parser.parse_args(
+        [
+            "run-task",
+            "task1",
+            "--step",
+            "tts",
+            "--tts-inference-timesteps",
+            "24",
+            "--tts-min-reference-ms",
+            "1800",
+            "--tts-start-pad-ms",
+            "200",
+            "--tts-end-pad-ms",
+            "400",
+        ]
+    )
+
+    assert defaults.tts_inference_timesteps == 20
+    assert defaults.tts_min_reference_ms == 1500
+    assert defaults.tts_start_pad_ms == 150
+    assert defaults.tts_end_pad_ms == 300
+    assert overrides.tts_inference_timesteps == 24
+    assert overrides.tts_min_reference_ms == 1800
+    assert overrides.tts_start_pad_ms == 200
+    assert overrides.tts_end_pad_ms == 400
+
+
 def test_create_url_task_parser_accepts_download_options() -> None:
     parser = build_parser()
 

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 from pathlib import Path
 
 from .ingest import TASK_METADATA_NAME
 from .models import Task
+
+_STORE_LOCK = threading.RLock()
 
 
 class TaskStore:
@@ -13,35 +16,38 @@ class TaskStore:
         self.path = path
 
     def load_all(self) -> list[Task]:
-        if not self.path.exists():
-            return []
-        with self.path.open("r", encoding="utf-8") as file:
-            raw = json.load(file)
-        if not isinstance(raw, list):
-            raise ValueError(f"Expected task list in {self.path}")
-        return [Task.from_dict(item) for item in raw]
+        with _STORE_LOCK:
+            if not self.path.exists():
+                return []
+            with self.path.open("r", encoding="utf-8") as file:
+                raw = json.load(file)
+            if not isinstance(raw, list):
+                raise ValueError(f"Expected task list in {self.path}")
+            return [Task.from_dict(item) for item in raw]
 
     def save_all(self, tasks: list[Task]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = [task.to_dict() for task in tasks]
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=self.path.parent,
-            delete=False,
-        ) as temp:
-            json.dump(payload, temp, ensure_ascii=False, indent=2)
-            temp.write("\n")
-            temp_path = Path(temp.name)
-        temp_path.replace(self.path)
+        with _STORE_LOCK:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            payload = [task.to_dict() for task in tasks]
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=self.path.parent,
+                delete=False,
+            ) as temp:
+                json.dump(payload, temp, ensure_ascii=False, indent=2)
+                temp.write("\n")
+                temp_path = Path(temp.name)
+            temp_path.replace(self.path)
 
     def add(self, task: Task) -> None:
-        tasks = self.load_all()
-        if any(existing.id == task.id for existing in tasks):
-            raise ValueError(f"Task already exists: {task.id}")
-        tasks.append(task)
-        self.save_all(tasks)
-        self._write_task_metadata(task)
+        with _STORE_LOCK:
+            tasks = self.load_all()
+            if any(existing.id == task.id for existing in tasks):
+                raise ValueError(f"Task already exists: {task.id}")
+            tasks.append(task)
+            self.save_all(tasks)
+            self._write_task_metadata(task)
 
     def get(self, task_id: str) -> Task:
         for task in self.load_all():
@@ -56,29 +62,39 @@ class TaskStore:
         return None
 
     def update(self, task: Task) -> None:
-        tasks = self.load_all()
-        for index, existing in enumerate(tasks):
-            if existing.id == task.id:
-                tasks[index] = task
-                self.save_all(tasks)
-                self._write_task_metadata(task)
-                return
-        raise KeyError(f"Task not found: {task.id}")
+        with _STORE_LOCK:
+            tasks = self.load_all()
+            for index, existing in enumerate(tasks):
+                if existing.id == task.id:
+                    tasks[index] = task
+                    self.save_all(tasks)
+                    self._write_task_metadata(task)
+                    return
+            raise KeyError(f"Task not found: {task.id}")
 
     def upsert(self, task: Task) -> Task:
-        tasks = self.load_all()
-        for index, existing in enumerate(tasks):
-            if existing.id == task.id:
-                merged = self._merge(existing, task)
-                tasks[index] = merged
-                self.save_all(tasks)
-                self._write_task_metadata(merged)
-                return merged
+        with _STORE_LOCK:
+            tasks = self.load_all()
+            for index, existing in enumerate(tasks):
+                if existing.id == task.id:
+                    merged = self._merge(existing, task)
+                    tasks[index] = merged
+                    self.save_all(tasks)
+                    self._write_task_metadata(merged)
+                    return merged
 
-        tasks.append(task)
-        self.save_all(tasks)
-        self._write_task_metadata(task)
-        return task
+            tasks.append(task)
+            self.save_all(tasks)
+            self._write_task_metadata(task)
+            return task
+
+    def delete(self, task_id: str) -> None:
+        with _STORE_LOCK:
+            tasks = self.load_all()
+            remaining = [task for task in tasks if task.id != task_id]
+            if len(remaining) == len(tasks):
+                raise KeyError(f"Task not found: {task_id}")
+            self.save_all(remaining)
 
     def _merge(self, existing: Task, incoming: Task) -> Task:
         return Task(

@@ -160,12 +160,17 @@ YOUDUB_LOG_DIR=/data/logs
 NLTK_DATA=/cache/nltk
 YOUDUB_WEB_USERNAME=
 YOUDUB_WEB_PASSWORD=
+YOUDUB_WEB_MAX_WORKERS=3
 OPENAI_API_KEY=
 OPENAI_API_BASE=
 MODEL_NAME=
 HF_READ_TOKEN=
 YOUDUB_TTS_MODEL=openbmb/VoxCPM2
 YOUDUB_TTS_MODEL_DIR=
+YOUDUB_TTS_INFERENCE_TIMESTEPS=20
+YOUDUB_TTS_MIN_REFERENCE_MS=1500
+YOUDUB_TTS_START_PAD_MS=150
+YOUDUB_TTS_END_PAD_MS=300
 BILI_SESSDATA=
 BILI_BILI_JCT=
 ```
@@ -241,17 +246,27 @@ BILI_BILI_JCT=
   重复启动同一任务的下载、单步或完整链路会被拒绝；Web API 返回 `409 Task is
   already running`。该锁用于当前单实例/共享卷部署下保护任务产物，不替代后续
   多 worker 队列和数据库事务设计。
+- Web 后台执行器默认 `YOUDUB_WEB_MAX_WORKERS=3`，不同任务可并发执行；任务锁只在
+  后台 job 真正开始时获取，排队任务不会提前占用目录锁。`tasks.json` 的读取-修改-写入
+  仍在进程内串行化，当前设计继续限定为单 Web 实例。
 - Web UI 已改为任务级参数模型：新任务会保存默认配置快照，任务详情页可独立覆盖
   下载、WhisperX、翻译、TTS、合成、发布包和 Bilibili 参数。URL 创建支持两种
   Web 入口：直接“下载并创建”会在下载成功后创建或复用稳定任务；“先创建任务”会
   创建 `YOUDUB_ROOT/_pending/<task-id>_URL draft` 占位任务，允许先保存任务级步骤参数，
-  后续点击下载步骤卡片时按该任务的下载配置执行 `yt-dlp`。下载完成后保留原 task id
-  和配置，并回填真实标题、作者、source key、稳定任务目录和下载产物。URL 表单支持
+  后续点击下载步骤卡片时按该任务的下载配置执行 `yt-dlp`。Web UI 新任务的 TTS
+  `inference_timesteps` 默认快照为 15，可在任务参数中覆盖。同一规范化 URL 会复用
+  已有草稿或稳定任务；下载完成后回填真实标题、作者、source key、稳定任务目录和下载
+  产物，并删除旧 `_pending` 目录。若 source key 已存在，则合并到稳定任务并删除草稿记录。
+  URL 表单支持
   一次性粘贴 Netscape cookies 内容写入 `YOUDUB_COOKIES_PATH` 后用于下载；cookies
-  内容不写入任务配置，不在 API 响应中回显。任务配置中的“下载完成自动运行全流程”
-  会在 URL 下载成功后继续在同一任务上执行后台 `run-all` 作业。空密钥字段运行时
+  内容不写入任务配置，不在 API 响应中回显。下载完成后需要手动启动 `run-all` 或单步。
+  空密钥字段运行时
   回退到环境变量或 `/data/config/youdub.json`，任务级密钥在 API 响应中以 `********`
   脱敏。
+- Web `run-all` 会跳过已完成步骤，但完成判定必须同时满足步骤状态为 `success` 且
+  该步骤关键产物存在；不能只依赖任务 JSON 中的成功状态。Web 单步运行和下载重跑会在
+  已完成时要求确认，确认后清理该步骤及所有下游派生产物，并把受影响步骤状态退回
+  `pending` 后再运行。
 - FFmpeg 音频提取：生成 `audio.wav`
 - Demucs 步骤入口：`run-task --step separate-audio` 已接入；当前基础开发环境若没有 `demucs` 可执行文件，会明确失败并把任务步骤标记为 `failed`
 - 翻译步骤入口：`run-task --step translate` 已接入；模型调用可通过
@@ -262,7 +277,10 @@ BILI_BILI_JCT=
   硬编码替换表
 - TTS 步骤入口：`run-task --step tts` 已接入；默认使用 Hugging Face 上的
   `openbmb/VoxCPM2`，运行时下载到 `HF_HOME` 缓存，并根据 `translation.json`
-  与 `audio_vocals.wav` 生成分段配音和 `audio_tts.wav`。混音阶段默认对 TTS
+  与 `audio_vocals.wav` 生成分段配音和 `audio_tts.wav`。VoxCPM2 推理步数默认
+  `YOUDUB_TTS_INFERENCE_TIMESTEPS=20`；参考音频默认前后补
+  `YOUDUB_TTS_START_PAD_MS=150`、`YOUDUB_TTS_END_PAD_MS=300`，短于
+  `YOUDUB_TTS_MIN_REFERENCE_MS=1500` 的片段会回退到较长参考。混音阶段默认对 TTS
   片段做轻量 time-stretch 以控制累计漂移，并在 `audio_tts.timings.json` 中记录
   原始时长、调整后时长、实际起止时间、漂移量、拉伸比例和对齐状态。
 - TTS 后识别入口：`run-task --step transcribe-tts` 已接入；对 `audio_tts.wav`
@@ -294,7 +312,9 @@ BILI_BILI_JCT=
   `bilibili-api-python==17.4.1` 提交单 P `video.mp4`、封面、标题、简介和标签。
   上传依赖显式锁定 `aiohttp==3.13.2`，并在项目入口禁用 `br` 响应压缩，避免新版
   `aiohttp` 与 `Brotli` 解压接口不兼容。成功后写入 `bilibili.json`。Web UI
-  默认仍安全 dry-run；任务级 Bilibili 参数中关闭 `dry_run` 并开启 `confirm` 后会走同一真实上传逻辑。
+  默认仍安全 dry-run；任务级 Bilibili 参数中关闭 `dry_run` 并开启 `confirm` 后会走
+  同一真实上传逻辑。Web `run-all` 默认只到发布包，只有任务配置
+  `workflow.include_bilibili_upload=true` 时才追加 Bilibili；未确认真实上传时自动 dry-run。
 
 ## Docker 验证命令
 

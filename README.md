@@ -106,6 +106,7 @@ export YOUDUB_CONFIG_PATH="$PWD/data/config/youdub.json"
 export YOUDUB_COOKIES_PATH="$PWD/data/cookies/cookies.txt"
 export YOUDUB_WEB_USERNAME=
 export YOUDUB_WEB_PASSWORD=
+export YOUDUB_WEB_MAX_WORKERS=3
 python3 -m youdub.web
 ```
 
@@ -120,12 +121,18 @@ Web UI 不会回显 cookies、OpenAI key 或 Bilibili 凭证。`publish-bilibili
 关闭 `dry_run` 并开启 `confirm`。CLI 真实上传仍使用 `--publish-confirm` 显式确认入口。
 Web 中的“运行完整链路”会按当前运行环境依次执行音频提取、人声分离、识别、翻译、
 TTS、字幕、合成和发布包步骤，因此 GPU/TTS/OpenAI/Hugging Face 等依赖仍需要按
-对应阶段配置好。
+对应阶段配置好。完整链路默认不包含 Bilibili；只有在任务参数的“流程”里开启
+`include_bilibili_upload` 后才会追加 `publish-bilibili`。若任务未同时确认真实上传，
+该步骤仍会自动降级为 dry-run。完整链路会跳过已经完成的步骤，但完成判定同时要求
+步骤状态为 `success` 且对应产物存在；如果状态成功但产物缺失，会重新执行该步骤。
+单步运行和下载按钮在步骤已完成时会先确认是否重新运行，确认后会清理该步骤及后续
+步骤的派生产物再启动，避免旧结果混入新链路。
 
 Web UI 的参数配置是任务级的。任务列表里的“新建”会先生成一个 URL 占位任务，不会
 立即下载。选中任务后，可以在任务详情里保存下载、WhisperX、翻译、TTS、合成、发布
 包和 Bilibili 参数，然后在下载步骤卡片点击“下载”。下载完成后，后端会保留原任务
 ID 和已保存参数，并把标题、作者、来源 key、稳定任务目录和下载产物回填到该任务。
+Web UI 新任务的配音推理步数默认保存为 `15`，可在任务参数的“配音”页覆盖。
 下载参数抽屉里可填写 cookies 文件路径，也可一次性粘贴 Netscape 格式 cookies 内容；
 cookies 内容只会写入任务下载配置指向的本地文件，不会保存到任务 JSON 或在接口响应中
 回显。下载完成后不会自动运行完整链路，需要手动点击“运行完整链路”或运行单个步骤。
@@ -149,7 +156,9 @@ GPU Docker 镜像安装运行依赖。
 
 同一任务目录内的 URL 下载和 `run-task` 步骤使用 `.task.lock` 做非阻塞互斥。
 如果同一任务已经在下载、运行单步或运行完整链路，再次启动同一任务会失败；Web API
-返回 `409 Task is already running`。该锁只限制同一任务目录，不阻止不同任务排队或执行。
+返回 `409 Task is already running`。该锁只限制同一任务目录，不阻止不同任务执行。
+Web 后台执行器默认允许 3 个不同任务并发，可用 `YOUDUB_WEB_MAX_WORKERS` 调整；`tasks.json`
+仍保持进程内单写入，适合当前单实例部署。
 
 `create-url-task` 会用 `yt-dlp` 下载单个视频 URL，并在任务目录写出：
 
@@ -280,8 +289,10 @@ JavaScript runtime；`doctor` 和 WebUI `/api/doctor` 会显示 `ytdlp_js_runtim
 python3 -m youdub.cli run-task <task-id> --step tts \
   --tts-model openbmb/VoxCPM2 \
   --tts-cfg-value 2.0 \
-  --tts-inference-timesteps 10 \
-  --tts-min-reference-ms 1200 \
+  --tts-inference-timesteps 20 \
+  --tts-min-reference-ms 1500 \
+  --tts-start-pad-ms 150 \
+  --tts-end-pad-ms 300 \
   --tts-stretch-base-min 0.8 \
   --tts-stretch-base-max 1.2 \
   --tts-stretch-local-min 0.9 \
@@ -293,8 +304,10 @@ export YOUDUB_TTS_MODEL=openbmb/VoxCPM2
 export YOUDUB_TTS_MODEL_DIR=
 export YOUDUB_TTS_LOAD_DENOISER=0
 export YOUDUB_TTS_CFG_VALUE=2.0
-export YOUDUB_TTS_INFERENCE_TIMESTEPS=10
-export YOUDUB_TTS_MIN_REFERENCE_MS=1200
+export YOUDUB_TTS_INFERENCE_TIMESTEPS=20
+export YOUDUB_TTS_MIN_REFERENCE_MS=1500
+export YOUDUB_TTS_START_PAD_MS=150
+export YOUDUB_TTS_END_PAD_MS=300
 export YOUDUB_TTS_ALIGN_AUDIO=1
 export YOUDUB_TTS_STRETCH_BASE_MIN=0.8
 export YOUDUB_TTS_STRETCH_BASE_MAX=1.2
@@ -799,6 +812,7 @@ export PYTHONPATH="$PWD/src"
 - `YOUDUB_DOWNLOAD_MAX_HEIGHT=0`
 - `YOUDUB_WEB_USERNAME=`
 - `YOUDUB_WEB_PASSWORD=`
+- `YOUDUB_WEB_MAX_WORKERS=3`
 - `HF_HOME=/cache/huggingface`
 - `NLTK_DATA=/cache/nltk`
 - `TORCH_HOME=/cache/torch`

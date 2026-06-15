@@ -13,7 +13,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
@@ -51,9 +51,18 @@ ARTIFACTS: dict[str, tuple[str, str]] = {
     "bilibili-dry-run": ("bilibili.dry-run.json", "application/json"),
 }
 
-_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="youdub-web")
+
+def _web_max_workers() -> int:
+    value = os.getenv("YOUDUB_WEB_MAX_WORKERS", "3").strip()
+    if not value:
+        return 3
+    return max(1, int(value))
+
+
+_EXECUTOR = ThreadPoolExecutor(max_workers=_web_max_workers(), thread_name_prefix="youdub-web")
 _LOCK = threading.Lock()
 _RUNNING: dict[str, Future[Any]] = {}
+_TASK_ALIASES: dict[str, str] = {}
 
 
 class UrlTaskRequest(BaseModel):
@@ -73,6 +82,11 @@ class LocalTaskRequest(BaseModel):
 
 class RunStepRequest(BaseModel):
     step: PipelineStep
+    force: bool = False
+
+
+class RunRequest(BaseModel):
+    force: bool = False
 
 
 class TaskConfigUpdate(BaseModel):
@@ -165,6 +179,9 @@ def create_app() -> FastAPI:
         config.ensure_dirs()
         url = _validated_url(payload.url)
         _save_url_cookies_content(config, payload)
+        existing = _find_task_by_source_url(url)
+        if existing is not None:
+            return _task_payload(existing)
         task = create_pending_url_task(url, config.root)
         task.config = _task_config_for_url_payload(config, payload)
         _store().add(task)
@@ -204,12 +221,16 @@ def create_app() -> FastAPI:
     @app.post("/api/tasks/{task_id}/run")
     def run_step(task_id: str, payload: RunStepRequest) -> dict[str, Any]:
         task = _get_task(task_id)
+        if _step_completed(task, payload.step) and not payload.force:
+            raise HTTPException(status_code=409, detail="Step is already completed")
         with _LOCK:
             future = _RUNNING.get(task_id)
             if future is not None and not future.done():
                 raise HTTPException(status_code=409, detail="Task is already running")
-            task_lock = _acquire_task_lock_for_web(task, f"web-run-step:{payload.step.value}")
-            _RUNNING[task_id] = _EXECUTOR.submit(_run_step_job, task.id, payload.step, task_lock)
+            if task_is_locked(task.folder):
+                raise HTTPException(status_code=409, detail="Task is already running")
+            _mark_task_scheduled(task, payload.step)
+            _RUNNING[task_id] = _EXECUTOR.submit(_run_step_job, task.id, payload.step, f"web-run-step:{payload.step.value}")
         return _task_payload(task)
 
     @app.post("/api/tasks/{task_id}/run-all")
@@ -219,10 +240,13 @@ def create_app() -> FastAPI:
         return _task_payload(task)
 
     @app.post("/api/tasks/{task_id}/download")
-    def download_existing_url_task(task_id: str) -> dict[str, Any]:
+    def download_existing_url_task(task_id: str, payload: RunRequest | None = None) -> dict[str, Any]:
         task = _get_task(task_id)
         _validated_url(task.source)
-        _schedule_download_for_task(task, "web-download-url")
+        force = bool(payload.force) if payload is not None else False
+        if _step_completed(task, PipelineStep.INGEST) and not force:
+            raise HTTPException(status_code=409, detail="Step is already completed")
+        _schedule_download_for_task(task, "web-download-url", force=force)
         return _task_payload(task)
 
     @app.delete("/api/tasks/{task_id}", status_code=204)
@@ -231,8 +255,7 @@ def create_app() -> FastAPI:
         future = _RUNNING.get(task_id)
         if (future is not None and not future.done()) or task_is_locked(task.folder):
             raise HTTPException(status_code=409, detail="Cannot delete a running task")
-        tasks = [item for item in _store().load_all() if item.id != task.id]
-        _store().save_all(tasks)
+        _store().delete(task.id)
         return None
 
     @app.get("/api/task-config/defaults")
@@ -470,6 +493,30 @@ def _task_config_for_url_payload(config: AppConfig, payload: UrlTaskRequest) -> 
     return task_config
 
 
+def _find_task_by_source_url(url: str) -> Task | None:
+    normalized_url = _normalize_source_url(url)
+    for task in _store().load_all():
+        if _normalize_source_url(task.source) == normalized_url:
+            return task
+    return None
+
+
+def _normalize_source_url(url: str) -> str:
+    parsed = urlparse(url.strip())
+    query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)), doseq=True)
+    path = parsed.path or "/"
+    return urlunparse(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            path,
+            "",
+            query,
+            "",
+        )
+    )
+
+
 def _save_url_cookies_content(config: AppConfig, payload: UrlTaskRequest) -> None:
     content = _clean_text(payload.cookies_content)
     if not content:
@@ -485,6 +532,7 @@ def _write_cookies_file(path: Path, content: str) -> None:
 
 
 def _get_task(task_id: str) -> Task:
+    task_id = _TASK_ALIASES.get(task_id, task_id)
     try:
         return _store().get(task_id)
     except KeyError as exc:
@@ -496,6 +544,7 @@ def _task_payload(task: Task) -> dict[str, Any]:
     data["running"] = _task_running(task.id)
     data["artifacts"] = _artifact_summary(task)
     data["config"] = public_task_config(_config(), task.config)
+    data["step_completion"] = _step_completion_summary(task)
     return data
 
 
@@ -512,6 +561,12 @@ def _task_running(task_id: str) -> bool:
     future = _RUNNING.get(task_id)
     if future is not None and not future.done():
         return True
+    for source_id, target_id in _TASK_ALIASES.items():
+        if target_id != task_id:
+            continue
+        future = _RUNNING.get(source_id)
+        if future is not None and not future.done():
+            return True
     try:
         task = _store().get(task_id)
     except KeyError:
@@ -531,23 +586,56 @@ def _schedule_run_all_for_task(task: Task, label: str) -> None:
         future = _RUNNING.get(task.id)
         if future is not None and not future.done():
             raise HTTPException(status_code=409, detail="Task is already running")
-        task_lock = _acquire_task_lock_for_web(task, label)
-        _RUNNING[task.id] = _EXECUTOR.submit(_run_all_job, task.id, task_lock)
+        if task_is_locked(task.folder):
+            raise HTTPException(status_code=409, detail="Task is already running")
+        _mark_task_scheduled(task, _first_run_all_step(task))
+        _RUNNING[task.id] = _EXECUTOR.submit(_run_all_job, task.id, label)
 
 
-def _schedule_download_for_task(task: Task, label: str) -> None:
+def _schedule_download_for_task(task: Task, label: str, *, force: bool = False) -> None:
     with _LOCK:
         future = _RUNNING.get(task.id)
         if future is not None and not future.done():
             raise HTTPException(status_code=409, detail="Task is already running")
-        task_lock = _acquire_task_lock_for_web(task, label)
-        _RUNNING[task.id] = _EXECUTOR.submit(_download_url_job, task.id, task_lock)
+        if task_is_locked(task.folder):
+            raise HTTPException(status_code=409, detail="Task is already running")
+        _mark_task_scheduled(task, PipelineStep.INGEST)
+        _RUNNING[task.id] = _EXECUTOR.submit(_download_url_job, task.id, label, force=force)
 
 
-def _download_url_job(task_id: str, task_lock: TaskLock | None = None) -> None:
+def _mark_task_scheduled(task: Task, step: PipelineStep | None = None) -> None:
+    task.status = TaskStatus.RUNNING
+    task.error = None
+    if step is not None:
+        task.mark_step(step, StepStatus.RUNNING)
+    _store().update(task)
+
+
+def _first_run_all_step(task: Task) -> PipelineStep | None:
+    if not _step_completed(task, PipelineStep.INGEST):
+        return PipelineStep.INGEST
+    for step in _run_all_steps_for_task(task):
+        if not _step_completed(task, step):
+            return step
+    return None
+
+
+def _download_url_job(
+    task_id: str,
+    label: str = "web-download-url",
+    task_lock: TaskLock | None = None,
+    *,
+    force: bool = False,
+) -> str:
     store = _store()
     task = store.get(task_id)
+    acquired_here = False
     try:
+        if task_lock is None:
+            task_lock = TaskLock(task.folder, label).acquire(blocking=False)
+            acquired_here = True
+        if force:
+            _clear_step_outputs(task, PipelineStep.INGEST)
         task.status = TaskStatus.RUNNING
         task.error = None
         task.mark_step(PipelineStep.INGEST, StepStatus.RUNNING)
@@ -565,20 +653,39 @@ def _download_url_job(task_id: str, task_lock: TaskLock | None = None) -> None:
             root=config.root,
             cover_path=result.cover_path,
         )
-        task = _downloaded_task_payload(task, incoming)
+        task = _merge_downloaded_task(store, task, incoming)
         store.update(task)
+        _cleanup_pending_task_dir(config.root, task_lock.task_dir, task.folder)
+        return task.id
     except Exception as exc:
-        task.status = TaskStatus.FAILED
-        task.error = str(exc)
-        task.mark_step(PipelineStep.INGEST, StepStatus.FAILED)
-        store.update(task)
+        try:
+            task = store.get(_TASK_ALIASES.get(task_id, task_id))
+            task.status = TaskStatus.FAILED
+            task.error = str(exc)
+            task.mark_step(PipelineStep.INGEST, StepStatus.FAILED)
+            store.update(task)
+        except KeyError:
+            pass
         raise
     finally:
-        if task_lock is not None:
+        if acquired_here and task_lock is not None:
             task_lock.release()
 
 
-def _downloaded_task_payload(existing: Task, incoming: Task) -> Task:
+def _merge_downloaded_task(store: TaskStore, existing: Task, incoming: Task) -> Task:
+    stable = store.find_by_source_key(incoming.source_key) if incoming.source_key else None
+    if stable is not None and stable.id != existing.id:
+        merged = _downloaded_task_payload(stable, incoming, config=existing.config)
+        store.update(merged)
+        store.delete(existing.id)
+        _TASK_ALIASES[existing.id] = stable.id
+        return merged
+    return _downloaded_task_payload(existing, incoming)
+
+
+def _downloaded_task_payload(existing: Task, incoming: Task, config: dict[str, Any] | None = None) -> Task:
+    steps = dict(existing.steps)
+    steps.update(incoming.steps)
     merged = Task(
         id=existing.id,
         title=incoming.title,
@@ -587,25 +694,41 @@ def _downloaded_task_payload(existing: Task, incoming: Task) -> Task:
         source_key=incoming.source_key,
         author=incoming.author,
         status=TaskStatus.PENDING,
-        steps=dict(existing.steps),
+        steps=steps,
         created_at=existing.created_at,
         error=None,
-        config=dict(existing.config),
+        config=dict(config if config is not None else existing.config),
     )
     merged.mark_step(PipelineStep.INGEST, StepStatus.SUCCESS)
     return merged
 
 
+def _cleanup_pending_task_dir(root: Path, old_folder: Path, new_folder: Path) -> None:
+    pending_root = (root / "_pending").resolve()
+    old_resolved = old_folder.resolve()
+    if old_resolved == new_folder.resolve():
+        return
+    if pending_root not in old_resolved.parents:
+        return
+    shutil.rmtree(old_resolved, ignore_errors=True)
+
+
 def _run_step_job(
     task_id: str,
     step: PipelineStep,
-    task_lock: TaskLock | None = None,
+    task_lock: TaskLock | str | None = None,
     *,
     release_lock: bool = True,
 ) -> None:
     store = _store()
     task = store.get(task_id)
+    acquired_here = False
     try:
+        if isinstance(task_lock, str):
+            task_lock = TaskLock(task.folder, task_lock).acquire(blocking=False)
+            acquired_here = True
+        _clear_step_outputs(task, step)
+        store.update(task)
         options = runtime_options_from_task_config(_config(), task.config)
         if step == PipelineStep.PUBLISH_BILIBILI and not options.bilibili.dry_run and not options.bilibili.confirm:
             options = dry_run_bilibili_options(options)
@@ -617,42 +740,198 @@ def _run_step_job(
             publish_config=options.publish,
             bilibili_publish_config=options.bilibili,
         ).run_step(task, step, task_lock=task_lock)
+    except Exception as exc:
+        task.status = TaskStatus.FAILED
+        task.error = str(exc)
+        task.mark_step(step, StepStatus.FAILED)
+        raise
     finally:
         try:
             store.update(task)
         finally:
-            if release_lock and task_lock is not None:
+            if release_lock and isinstance(task_lock, TaskLock):
                 task_lock.release()
 
 
 def _run_all_job(task_id: str, task_lock: TaskLock | None = None) -> None:
+    if isinstance(task_lock, str):
+        label = task_lock
+        task_lock = None
+    else:
+        label = "web-run-all"
     try:
-        task_lock = _download_for_run_all_if_needed(task_id, task_lock)
-        for step in (
-            PipelineStep.EXTRACT_AUDIO,
-            PipelineStep.SEPARATE_AUDIO,
-            PipelineStep.TRANSCRIBE,
-            PipelineStep.TRANSLATE,
-            PipelineStep.TTS,
-            PipelineStep.TRANSCRIBE_TTS,
-            PipelineStep.SUBTITLE,
-            PipelineStep.SYNTHESIZE,
-            PipelineStep.PREPARE_PUBLISH,
-        ):
+        task_id, task_lock = _download_for_run_all_if_needed(task_id, task_lock, label)
+        for step in _run_all_steps(task_id):
+            task = _store().get(task_id)
+            if _step_completed(task, step):
+                continue
             _run_step_job(task_id, step, task_lock=task_lock, release_lock=False)
+        task = _store().get(task_id)
+        task.status = TaskStatus.SUCCESS
+        task.error = None
+        _store().update(task)
     finally:
         if task_lock is not None:
             task_lock.release()
 
 
-def _download_for_run_all_if_needed(task_id: str, task_lock: TaskLock | None) -> TaskLock | None:
+def _download_for_run_all_if_needed(
+    task_id: str,
+    task_lock: TaskLock | None,
+    label: str,
+) -> tuple[str, TaskLock | None]:
     task = _store().get(task_id)
-    if (task.folder / "download.mp4").exists():
-        return task_lock
+    if _step_completed(task, PipelineStep.INGEST):
+        if task_lock is None:
+            task_lock = TaskLock(task.folder, label).acquire(blocking=False)
+        return task.id, task_lock
     _validated_url(task.source)
-    _download_url_job(task_id, task_lock=task_lock)
-    task = _store().get(task_id)
-    return TaskLock(task.folder, "web-run-all").acquire(blocking=False)
+    new_task_id = _download_url_job(task_id, label=label, task_lock=task_lock)
+    if task_lock is not None:
+        task_lock.release()
+    task = _store().get(new_task_id)
+    return task.id, TaskLock(task.folder, label).acquire(blocking=False)
+
+
+def _run_all_steps(task_id: str) -> tuple[PipelineStep, ...]:
+    return _run_all_steps_for_task(_store().get(task_id))
+
+
+def _run_all_steps_for_task(task: Task) -> tuple[PipelineStep, ...]:
+    steps = [
+        PipelineStep.EXTRACT_AUDIO,
+        PipelineStep.SEPARATE_AUDIO,
+        PipelineStep.TRANSCRIBE,
+        PipelineStep.TRANSLATE,
+        PipelineStep.TTS,
+        PipelineStep.TRANSCRIBE_TTS,
+        PipelineStep.SUBTITLE,
+        PipelineStep.SYNTHESIZE,
+        PipelineStep.PREPARE_PUBLISH,
+    ]
+    workflow = task.config.get("workflow") if isinstance(task.config, dict) else None
+    include_bilibili_upload = isinstance(workflow, dict) and bool(workflow.get("include_bilibili_upload"))
+    if include_bilibili_upload:
+        steps.append(PipelineStep.PUBLISH_BILIBILI)
+    return tuple(steps)
+
+
+STEP_OUTPUTS: dict[PipelineStep, tuple[str, ...]] = {
+    PipelineStep.INGEST: ("download.mp4",),
+    PipelineStep.EXTRACT_AUDIO: ("audio.wav",),
+    PipelineStep.SEPARATE_AUDIO: ("audio_vocals.wav", "audio_instruments.wav"),
+    PipelineStep.TRANSCRIBE_WHISPER: ("transcript.whisper.json",),
+    PipelineStep.TRANSCRIBE_ALIGN: ("transcript.aligned.json",),
+    PipelineStep.TRANSCRIBE_DIARIZE: ("transcript.diarized.json", "transcript.json"),
+    PipelineStep.TRANSCRIBE: (
+        "transcript.whisper.json",
+        "transcript.aligned.json",
+        "transcript.diarized.json",
+        "transcript.json",
+    ),
+    PipelineStep.TRANSLATE: (
+        "summary.json",
+        "translation.context.json",
+        "translation.segments.json",
+        "translation.json",
+    ),
+    PipelineStep.TTS: ("audio_tts.wav", "audio_tts.timings.json", "segments/vocals", "segments/tts"),
+    PipelineStep.TRANSCRIBE_TTS: (
+        "audio_tts.transcript.whisper.json",
+        "audio_tts.transcript.aligned.json",
+        "audio_tts.transcript.json",
+    ),
+    PipelineStep.SUBTITLE: ("subtitles.segments.json", "subtitles.srt"),
+    PipelineStep.SYNTHESIZE: ("video.mp4",),
+    PipelineStep.PREPARE_PUBLISH: ("publish.json", "publish.md", "cover.jpg"),
+    PipelineStep.PUBLISH_BILIBILI: ("bilibili.dry-run.json", "bilibili.json"),
+}
+
+STEP_CLEANUP_GROUPS: tuple[tuple[tuple[PipelineStep, ...], tuple[str, ...]], ...] = (
+    ((PipelineStep.INGEST,), ("download.mp4", "download.info.json", "download.webp", "download.jpg", "download.jpeg", "download.png")),
+    ((PipelineStep.EXTRACT_AUDIO,), ("audio.wav",)),
+    ((PipelineStep.SEPARATE_AUDIO,), ("audio_vocals.wav", "audio_instruments.wav", "demucs")),
+    ((PipelineStep.TRANSCRIBE, PipelineStep.TRANSCRIBE_WHISPER), ("transcript.whisper.json",)),
+    ((PipelineStep.TRANSCRIBE, PipelineStep.TRANSCRIBE_ALIGN), ("transcript.aligned.json",)),
+    ((PipelineStep.TRANSCRIBE, PipelineStep.TRANSCRIBE_DIARIZE), ("transcript.diarized.json", "transcript.json", "SPEAKER")),
+    ((PipelineStep.TRANSLATE,), ("summary.json", "translation.context.json", "translation.segments.json", "translation.json")),
+    ((PipelineStep.TTS,), ("audio_tts.wav", "audio_tts.timings.json", "segments/vocals", "segments/tts", "segments/stretched")),
+    (
+        (PipelineStep.TRANSCRIBE_TTS,),
+        ("audio_tts.transcript.whisper.json", "audio_tts.transcript.aligned.json", "audio_tts.transcript.json"),
+    ),
+    ((PipelineStep.SUBTITLE,), ("subtitles.segments.json", "subtitles.srt")),
+    ((PipelineStep.SYNTHESIZE,), ("audio_mixed.m4a", "video.mp4")),
+    ((PipelineStep.PREPARE_PUBLISH,), ("publish.json", "publish.md", "cover.jpg")),
+    ((PipelineStep.PUBLISH_BILIBILI,), ("bilibili.dry-run.json", "bilibili.json")),
+)
+
+
+def _step_completion_summary(task: Task) -> dict[str, dict[str, Any]]:
+    return {
+        step.value: {
+            "complete": _step_completed(task, step),
+            "missing": _missing_step_resources(task, step),
+        }
+        for step in STEP_OUTPUTS
+    }
+
+
+def _step_completed(task: Task, step: PipelineStep) -> bool:
+    return task.steps.get(step.value) == StepStatus.SUCCESS and not _missing_step_resources(task, step)
+
+
+def _missing_step_resources(task: Task, step: PipelineStep) -> list[str]:
+    outputs = _step_outputs_for_task(task, step)
+    return [name for name in outputs if not _has_step_resource(task.folder / name)]
+
+
+def _step_outputs_for_task(task: Task, step: PipelineStep) -> tuple[str, ...]:
+    if step == PipelineStep.PUBLISH_BILIBILI:
+        bilibili = task.config.get("bilibili") if isinstance(task.config, dict) else None
+        dry_run = not isinstance(bilibili, dict) or bool(bilibili.get("dry_run", True)) or not bool(bilibili.get("confirm"))
+        return ("bilibili.dry-run.json",) if dry_run else ("bilibili.json",)
+    return STEP_OUTPUTS.get(step, ())
+
+
+def _has_step_resource(path: Path) -> bool:
+    if path.is_file():
+        return path.stat().st_size > 0
+    if path.is_dir():
+        return any(path.iterdir())
+    return False
+
+
+def _clear_step_outputs(task: Task, step: PipelineStep) -> None:
+    start = _cleanup_start_index(step)
+    if start is None:
+        return
+    affected_steps: set[PipelineStep] = set()
+    for group_steps, resources in STEP_CLEANUP_GROUPS[start:]:
+        affected_steps.update(group_steps)
+        for resource in resources:
+            _remove_task_resource(task.folder, resource)
+
+    for affected in affected_steps:
+        if affected.value in task.steps:
+            task.mark_step(affected, StepStatus.PENDING)
+    task.status = TaskStatus.PENDING
+    task.error = None
+
+
+def _cleanup_start_index(step: PipelineStep) -> int | None:
+    for index, (steps, _resources) in enumerate(STEP_CLEANUP_GROUPS):
+        if step in steps:
+            return index
+    return None
+
+
+def _remove_task_resource(task_dir: Path, resource: str) -> None:
+    path = task_dir / resource
+    if path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+    elif path.exists():
+        path.unlink()
 
 
 def _nonempty_file(path: Path | None) -> bool:
