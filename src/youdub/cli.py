@@ -16,7 +16,21 @@ from .pipeline import PipelineRunner
 from .publishing import BilibiliPublishConfig, PublishPackageConfig
 from .synthesis import SynthesisConfig, ffmpeg_has_filter
 from .storage import TaskStore
-from .tts import TTSConfig
+from .tts import (
+    DEFAULT_TTS_ALIGN_AUDIO,
+    DEFAULT_TTS_CFG_VALUE,
+    DEFAULT_TTS_END_PAD_MS,
+    DEFAULT_TTS_INFERENCE_TIMESTEPS,
+    DEFAULT_TTS_LOAD_DENOISER,
+    DEFAULT_TTS_MIN_REFERENCE_MS,
+    DEFAULT_TTS_MODEL,
+    DEFAULT_TTS_START_PAD_MS,
+    DEFAULT_TTS_STRETCH_BASE_MAX,
+    DEFAULT_TTS_STRETCH_BASE_MIN,
+    DEFAULT_TTS_STRETCH_LOCAL_MAX,
+    DEFAULT_TTS_STRETCH_LOCAL_MIN,
+    TTSConfig,
+)
 from .translation import (
     DEFAULT_CONTEXT_EXTRA_PROMPT,
     DEFAULT_CORRECTION_PROMPT,
@@ -181,7 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_task.add_argument(
         "--tts-model",
-        default=os.getenv("YOUDUB_TTS_MODEL", os.getenv("VOXCPM_MODEL", "openbmb/VoxCPM2")),
+        default=os.getenv("YOUDUB_TTS_MODEL", os.getenv("VOXCPM_MODEL", DEFAULT_TTS_MODEL)),
         help="VoxCPM2 Hugging Face model id for TTS",
     )
     run_task.add_argument(
@@ -193,68 +207,78 @@ def build_parser() -> argparse.ArgumentParser:
     run_task.add_argument(
         "--tts-load-denoiser",
         action="store_true",
-        default=_bool_env("YOUDUB_TTS_LOAD_DENOISER", _bool_env("VOXCPM_LOAD_DENOISER", False)),
+        default=_bool_env("YOUDUB_TTS_LOAD_DENOISER", _bool_env("VOXCPM_LOAD_DENOISER", DEFAULT_TTS_LOAD_DENOISER)),
         help="Load VoxCPM2 denoiser during TTS",
     )
     run_task.add_argument(
         "--tts-cfg-value",
         type=float,
-        default=float(os.getenv("YOUDUB_TTS_CFG_VALUE", os.getenv("VOXCPM_CFG_VALUE", "2.0"))),
+        default=float(os.getenv("YOUDUB_TTS_CFG_VALUE", os.getenv("VOXCPM_CFG_VALUE", str(DEFAULT_TTS_CFG_VALUE)))),
         help="VoxCPM2 classifier-free guidance value",
     )
     run_task.add_argument(
         "--tts-inference-timesteps",
         type=int,
-        default=int(os.getenv("YOUDUB_TTS_INFERENCE_TIMESTEPS", os.getenv("VOXCPM_INFERENCE_TIMESTEPS", "20"))),
+        default=int(
+            os.getenv(
+                "YOUDUB_TTS_INFERENCE_TIMESTEPS",
+                os.getenv("VOXCPM_INFERENCE_TIMESTEPS", str(DEFAULT_TTS_INFERENCE_TIMESTEPS)),
+            )
+        ),
         help="VoxCPM2 inference timesteps",
     )
     run_task.add_argument(
         "--tts-min-reference-ms",
         type=int,
-        default=int(os.getenv("YOUDUB_TTS_MIN_REFERENCE_MS", os.getenv("VOXCPM_MIN_REFERENCE_MS", "1500"))),
+        default=int(
+            os.getenv(
+                "YOUDUB_TTS_MIN_REFERENCE_MS",
+                os.getenv("VOXCPM_MIN_REFERENCE_MS", str(DEFAULT_TTS_MIN_REFERENCE_MS)),
+            )
+        ),
         help="Minimum vocal reference length before falling back to a longer reference",
     )
     run_task.add_argument(
         "--tts-start-pad-ms",
         type=int,
-        default=int(os.getenv("YOUDUB_TTS_START_PAD_MS", "150")),
+        default=int(os.getenv("YOUDUB_TTS_START_PAD_MS", str(DEFAULT_TTS_START_PAD_MS))),
         help="Milliseconds of source vocal audio to prepend to each TTS reference segment",
     )
     run_task.add_argument(
         "--tts-end-pad-ms",
         type=int,
-        default=int(os.getenv("YOUDUB_TTS_END_PAD_MS", "300")),
+        default=int(os.getenv("YOUDUB_TTS_END_PAD_MS", str(DEFAULT_TTS_END_PAD_MS))),
         help="Milliseconds of source vocal audio to append to each TTS reference segment",
     )
     run_task.add_argument(
         "--no-tts-align-audio",
         action="store_false",
         dest="tts_align_audio",
-        default=_bool_env("YOUDUB_TTS_ALIGN_AUDIO", True),
+        default=_bool_env("YOUDUB_TTS_ALIGN_AUDIO", DEFAULT_TTS_ALIGN_AUDIO),
         help="Disable time-stretch alignment when mixing TTS segments",
     )
     run_task.add_argument(
         "--tts-stretch-base-min",
         type=float,
-        default=float(os.getenv("YOUDUB_TTS_STRETCH_BASE_MIN", "0.8")),
+        default=float(os.getenv("YOUDUB_TTS_STRETCH_BASE_MIN", str(DEFAULT_TTS_STRETCH_BASE_MIN))),
         help="Minimum global TTS stretch ratio",
     )
     run_task.add_argument(
         "--tts-stretch-base-max",
         type=float,
-        default=float(os.getenv("YOUDUB_TTS_STRETCH_BASE_MAX", "1.2")),
+        default=float(os.getenv("YOUDUB_TTS_STRETCH_BASE_MAX", str(DEFAULT_TTS_STRETCH_BASE_MAX))),
         help="Maximum global TTS stretch ratio",
     )
     run_task.add_argument(
         "--tts-stretch-local-min",
         type=float,
-        default=float(os.getenv("YOUDUB_TTS_STRETCH_LOCAL_MIN", "0.9")),
+        default=float(os.getenv("YOUDUB_TTS_STRETCH_LOCAL_MIN", str(DEFAULT_TTS_STRETCH_LOCAL_MIN))),
         help="Minimum per-segment TTS stretch correction",
     )
     run_task.add_argument(
         "--tts-stretch-local-max",
         type=float,
-        default=float(os.getenv("YOUDUB_TTS_STRETCH_LOCAL_MAX", "1.1")),
+        default=float(os.getenv("YOUDUB_TTS_STRETCH_LOCAL_MAX", str(DEFAULT_TTS_STRETCH_LOCAL_MAX))),
         help="Maximum per-segment TTS stretch correction",
     )
     run_task.add_argument(

@@ -16,7 +16,21 @@ from .translation import (
     TranslationConfig,
 )
 from .transcription import WhisperXConfig
-from .tts import TTSConfig
+from .tts import (
+    DEFAULT_TTS_ALIGN_AUDIO,
+    DEFAULT_TTS_CFG_VALUE,
+    DEFAULT_TTS_END_PAD_MS,
+    DEFAULT_TTS_INFERENCE_TIMESTEPS,
+    DEFAULT_TTS_LOAD_DENOISER,
+    DEFAULT_TTS_MIN_REFERENCE_MS,
+    DEFAULT_TTS_MODEL,
+    DEFAULT_TTS_START_PAD_MS,
+    DEFAULT_TTS_STRETCH_BASE_MAX,
+    DEFAULT_TTS_STRETCH_BASE_MIN,
+    DEFAULT_TTS_STRETCH_LOCAL_MAX,
+    DEFAULT_TTS_STRETCH_LOCAL_MIN,
+    TTSConfig,
+)
 
 
 @dataclass(frozen=True)
@@ -64,20 +78,29 @@ def runtime_options_from_env(config: AppConfig) -> RuntimeOptions:
             correction_prompt=config.translation_prompts.correction_prompt or DEFAULT_CORRECTION_PROMPT,
         ),
         tts=TTSConfig(
-            model=os.getenv("YOUDUB_TTS_MODEL", os.getenv("VOXCPM_MODEL", "openbmb/VoxCPM2")),
+            model=os.getenv("YOUDUB_TTS_MODEL", os.getenv("VOXCPM_MODEL", DEFAULT_TTS_MODEL)),
             model_dir=_optional_path_env("YOUDUB_TTS_MODEL_DIR") or _optional_path_env("VOXCPM_MODEL_DIR"),
             hf_token=config.secrets.huggingface.token,
-            load_denoiser=_bool_env("YOUDUB_TTS_LOAD_DENOISER", _bool_env("VOXCPM_LOAD_DENOISER", False)),
-            cfg_value=_float_env("YOUDUB_TTS_CFG_VALUE", _float_env("VOXCPM_CFG_VALUE", 2.0)),
-            inference_timesteps=_int_env("YOUDUB_TTS_INFERENCE_TIMESTEPS", _int_env("VOXCPM_INFERENCE_TIMESTEPS", 20)),
-            min_reference_ms=_int_env("YOUDUB_TTS_MIN_REFERENCE_MS", _int_env("VOXCPM_MIN_REFERENCE_MS", 1500)),
-            start_pad_ms=_int_env("YOUDUB_TTS_START_PAD_MS", 150),
-            end_pad_ms=_int_env("YOUDUB_TTS_END_PAD_MS", 300),
-            align_audio=_bool_env("YOUDUB_TTS_ALIGN_AUDIO", True),
-            stretch_base_min=_float_env("YOUDUB_TTS_STRETCH_BASE_MIN", 0.8),
-            stretch_base_max=_float_env("YOUDUB_TTS_STRETCH_BASE_MAX", 1.2),
-            stretch_local_min=_float_env("YOUDUB_TTS_STRETCH_LOCAL_MIN", 0.9),
-            stretch_local_max=_float_env("YOUDUB_TTS_STRETCH_LOCAL_MAX", 1.1),
+            load_denoiser=_bool_env(
+                "YOUDUB_TTS_LOAD_DENOISER",
+                _bool_env("VOXCPM_LOAD_DENOISER", DEFAULT_TTS_LOAD_DENOISER),
+            ),
+            cfg_value=_float_env("YOUDUB_TTS_CFG_VALUE", _float_env("VOXCPM_CFG_VALUE", DEFAULT_TTS_CFG_VALUE)),
+            inference_timesteps=_int_env(
+                "YOUDUB_TTS_INFERENCE_TIMESTEPS",
+                _int_env("VOXCPM_INFERENCE_TIMESTEPS", DEFAULT_TTS_INFERENCE_TIMESTEPS),
+            ),
+            min_reference_ms=_int_env(
+                "YOUDUB_TTS_MIN_REFERENCE_MS",
+                _int_env("VOXCPM_MIN_REFERENCE_MS", DEFAULT_TTS_MIN_REFERENCE_MS),
+            ),
+            start_pad_ms=_int_env("YOUDUB_TTS_START_PAD_MS", DEFAULT_TTS_START_PAD_MS),
+            end_pad_ms=_int_env("YOUDUB_TTS_END_PAD_MS", DEFAULT_TTS_END_PAD_MS),
+            align_audio=_bool_env("YOUDUB_TTS_ALIGN_AUDIO", DEFAULT_TTS_ALIGN_AUDIO),
+            stretch_base_min=_float_env("YOUDUB_TTS_STRETCH_BASE_MIN", DEFAULT_TTS_STRETCH_BASE_MIN),
+            stretch_base_max=_float_env("YOUDUB_TTS_STRETCH_BASE_MAX", DEFAULT_TTS_STRETCH_BASE_MAX),
+            stretch_local_min=_float_env("YOUDUB_TTS_STRETCH_LOCAL_MIN", DEFAULT_TTS_STRETCH_LOCAL_MIN),
+            stretch_local_max=_float_env("YOUDUB_TTS_STRETCH_LOCAL_MAX", DEFAULT_TTS_STRETCH_LOCAL_MAX),
         ),
         synthesis=SynthesisConfig(
             burn_subtitles=_bool_env("YOUDUB_BURN_SUBTITLES", True),

@@ -449,6 +449,12 @@ textarea:focus {
   border-color: #b2ddff;
 }
 
+.status-queued {
+  color: var(--warning);
+  background: #fffaeb;
+  border-color: #fedf89;
+}
+
 .status-pending {
   color: var(--warning);
   background: #fffaeb;

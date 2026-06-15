@@ -16,9 +16,9 @@
 ### 当前实现
 
 - `src/youdub/web.py` 中 `_EXECUTOR = ThreadPoolExecutor(max_workers=1, ...)`，Web 所有下载、单步运行、完整链路运行共用一个后台 worker。
-- 同一任务启动时会进入 `_RUNNING[task.id]`，并通过 `_acquire_task_lock_for_web()` 获取该任务目录下的 `.task.lock`。
+- 同一任务启动时会进入 `_RUNNING[task.id]`，后台 job 真正开始时才获取该任务目录下的 `.task.lock`。
 - `TaskLock` 是目录级文件锁，锁文件位于任务目录 `.task.lock`，因此从锁粒度看它只约束同一任务目录。
-- `README.md` 已声明锁只限制同一任务目录，不阻止不同任务排队或执行，但当前 Web 执行器实际阻止了不同任务并发执行。
+- `README.md` 已声明 Web 后台执行器使用单线程 FIFO 队列，不同任务会排队执行，不并发执行。
 
 ### 问题判断
 
@@ -30,14 +30,14 @@
 
 ### 计划
 
-1. 将 Web 后台执行器从全局单 worker 改为可配置并发 worker，例如 `YOUDUB_WEB_MAX_WORKERS`，默认建议 2 或 3。
-2. 保留“同一任务不可并行”的现有设计：同一 task id 和同一任务目录仍通过 `_RUNNING[task.id]` 与 `.task.lock` 非阻塞互斥。
+1. 将 Web 后台执行器明确固定为单线程 FIFO 队列，所有下载、单步运行和完整链路按提交顺序执行。
+2. 保留“同一任务不可重复启动”的现有设计：同一 task id 和同一任务目录仍通过 `_RUNNING[task.id]` 与 `.task.lock` 非阻塞互斥。
 3. 调整调度时序，避免排队任务长期占用任务目录锁。建议：
    - 调度阶段只登记 Future，不长期持有 `.task.lock`；
    - job 真正开始执行时再获取任务锁；
-   - API `running` 增加更明确的状态，如 `queued` 与 `running`，或至少避免“排队中”伪装为“下载中”。
+   - API 增加 `queued` 状态，避免“排队中”伪装为“下载中”。
 4. 为多任务并发补测试：
-   - 两个不同 task id 可同时进入执行；
+   - 两个不同 task id 会按提交顺序串行执行；
    - 同一个 task id 第二次启动仍返回 409；
    - 一个任务运行完整链路时，另一个任务下载不会被全局 worker 阻塞。
 
@@ -122,21 +122,21 @@
 - 前端 `statusLabel()` 已包含 `running: "运行中"`。
 - CSS 已定义 `.status-running`。
 - API `_task_payload()` 会追加 `running` 字段，来源是 `_RUNNING` 中未完成 Future 或 `.task.lock`。
-- 前端任务列表文字使用 `statusLabel(task.running ? "running" : task.status)`，详情页也类似。
+- 前端任务列表和详情页使用有效状态，优先显示 `queued`，其次显示 `running`。
 
 ### 问题判断
 
 运行中状态已有部分实现，但仍有缺陷：
 
 1. 任务提交到后台后，API 返回的原始 `task.status` 可能仍是 `pending` 或上一次 `success`，因为调度函数没有立即持久化 `TaskStatus.RUNNING`。
-2. 前端任务列表 badge 的文字按 `task.running` 变成“运行中”，但 class 使用的是 `statusClass(task.status)`，没有使用合成后的状态。因此原始状态为 `pending` 时会显示“运行中”文字但使用等待样式。
+2. 前端任务列表 badge 的文字和 class 需要使用同一有效状态，避免排队或运行状态样式不一致。
 3. 单步卡片只看 `task.steps[step]`。后台 job 只有开始执行后才会写 `StepStatus.RUNNING`，如果任务还在单 worker 队列中，卡片无法可靠区分等待、排队和真正运行。
 4. `_RUNNING` 是进程内状态，进程重启后只能靠 `.task.lock` 推断运行中；如果锁文件存在但没有活锁，或任务曾写入 `running` 后异常退出，状态恢复策略需要更明确。
 
 ### 计划
 
 1. 修复前端列表 class：
-   - 先计算 `const effectiveStatus = task.running ? "running" : task.status`；
+   - 先计算 `effectiveTaskStatus(task)`；
    - 文字和 class 都使用 `effectiveStatus`。
 2. 后端调度时立即持久化任务状态：
    - 单步运行、下载、完整链路进入队列时标记为 `running` 或新增 `queued`；
@@ -153,14 +153,14 @@
 
 ## 建议实施顺序
 
-1. 先修 Web 调度器并发与锁持有时序。这是导致“显示运行中但无结果”的直接原因。
+1. 先修 Web 调度器队列与锁持有时序。这是导致“显示运行中但无结果”的直接原因。
 2. 再修 URL 草稿去重、稳定任务合并和 `_pending` 清理。该问题会污染任务列表和产物目录，且可能导致同目录多记录。
 3. 然后修任务状态展示和状态持久化。并发修复后，状态语义需要同步变清晰。
 4. 最后把 Bilibili 上传纳入完整链路，并保持显式确认。上传是外部副作用，必须放在默认安全规则之后实施。
 
 ## 验收清单
 
-- 同时启动两个不同任务，一个运行完整链路、一个下载，两个任务都能实际推进产物。
+- 同时启动两个不同任务，一个运行完整链路、一个下载，第二个任务进入排队状态，前一个任务结束后再实际推进产物。
 - 同一个任务重复点击运行或下载仍返回 409，不会并发写同一任务目录。
 - URL 草稿下载完成后，旧 `_pending/<draft>` 目录不存在。
 - 同一 URL 多次创建草稿不会产生多个空白任务。
@@ -173,8 +173,8 @@
 
 实施日期：2026-06-14
 
-- Web executor 改为 `YOUDUB_WEB_MAX_WORKERS` 可配置，默认 3；不同任务可并发执行。
-- 调度阶段只登记 Future 并持久化 `running`，目录锁在后台 job 真正开始时获取；同一任务
+- Web executor 改为单线程 FIFO 队列；不同任务按提交顺序串行执行。
+- 调度阶段只登记 Future 并持久化 `queued`，目录锁在后台 job 真正开始时获取；同一任务
   的重复启动仍返回 409。
 - `TaskStore` 的读取-修改-写入增加进程内可重入锁，避免多 Web worker 同时更新
   `tasks.json` 时丢失任务状态。当前仍限定单 Web 实例，不作为多进程数据库方案。
@@ -183,5 +183,5 @@
 - 新增任务配置 `workflow.include_bilibili_upload`。Web `run-all` 默认只运行到
   `prepare-publish`；开启该选项后追加 `publish-bilibili`，未满足真实上传确认时自动
   使用 dry-run。
-- 调度后立即持久化任务/首步骤 `running` 状态；任务列表 badge 的文字和 CSS class
-  统一使用有效状态。
+- 调度后立即持久化任务/首步骤 `queued` 状态；后台 job 开始后转为 `running`；
+  任务列表 badge 的文字和 CSS class 统一使用有效状态。

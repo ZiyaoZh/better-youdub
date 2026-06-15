@@ -77,10 +77,10 @@ def test_run_task_parser_uses_current_tts_defaults(monkeypatch) -> None:
         ]
     )
 
-    assert defaults.tts_inference_timesteps == 20
-    assert defaults.tts_min_reference_ms == 1500
-    assert defaults.tts_start_pad_ms == 150
-    assert defaults.tts_end_pad_ms == 300
+    assert defaults.tts_inference_timesteps == 10
+    assert defaults.tts_min_reference_ms == 1200
+    assert defaults.tts_start_pad_ms == 80
+    assert defaults.tts_end_pad_ms == 160
     assert overrides.tts_inference_timesteps == 24
     assert overrides.tts_min_reference_ms == 1800
     assert overrides.tts_start_pad_ms == 200

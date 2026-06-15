@@ -13,28 +13,43 @@ TTS_SEGMENTS_DIR = "segments/tts"
 TTS_OUTPUT = "audio_tts.wav"
 TTS_TIMINGS_OUTPUT = "audio_tts.timings.json"
 
+DEFAULT_TTS_MODEL = "openbmb/VoxCPM2"
+DEFAULT_TTS_LOAD_DENOISER = False
+DEFAULT_TTS_CFG_VALUE = 2.0
+DEFAULT_TTS_INFERENCE_TIMESTEPS = 10
+DEFAULT_TTS_MIN_REFERENCE_MS = 1200
+DEFAULT_TTS_START_PAD_MS = 80
+DEFAULT_TTS_END_PAD_MS = 160
+DEFAULT_TTS_ALIGN_AUDIO = True
+DEFAULT_TTS_STRETCH_BASE_MIN = 0.8
+DEFAULT_TTS_STRETCH_BASE_MAX = 1.2
+DEFAULT_TTS_STRETCH_BASE_SAFETY = 0.99
+DEFAULT_TTS_STRETCH_LOCAL_MIN = 0.9
+DEFAULT_TTS_STRETCH_LOCAL_MAX = 1.1
+DEFAULT_TTS_STRETCH_NOOP_EPSILON = 0.01
+
 _MODEL = None
 _MODEL_KEY: tuple[str, bool, str | None] | None = None
 
 
 @dataclass(frozen=True)
 class TTSConfig:
-    model: str = "openbmb/VoxCPM2"
+    model: str = DEFAULT_TTS_MODEL
     model_dir: Path | None = None
     hf_token: str | None = None
-    load_denoiser: bool = False
-    cfg_value: float = 2.0
-    inference_timesteps: int = 20
-    min_reference_ms: int = 1500
-    start_pad_ms: int = 150
-    end_pad_ms: int = 300
-    align_audio: bool = True
-    stretch_base_min: float = 0.8
-    stretch_base_max: float = 1.2
-    stretch_base_safety: float = 0.99
-    stretch_local_min: float = 0.9
-    stretch_local_max: float = 1.1
-    stretch_noop_epsilon: float = 0.01
+    load_denoiser: bool = DEFAULT_TTS_LOAD_DENOISER
+    cfg_value: float = DEFAULT_TTS_CFG_VALUE
+    inference_timesteps: int = DEFAULT_TTS_INFERENCE_TIMESTEPS
+    min_reference_ms: int = DEFAULT_TTS_MIN_REFERENCE_MS
+    start_pad_ms: int = DEFAULT_TTS_START_PAD_MS
+    end_pad_ms: int = DEFAULT_TTS_END_PAD_MS
+    align_audio: bool = DEFAULT_TTS_ALIGN_AUDIO
+    stretch_base_min: float = DEFAULT_TTS_STRETCH_BASE_MIN
+    stretch_base_max: float = DEFAULT_TTS_STRETCH_BASE_MAX
+    stretch_base_safety: float = DEFAULT_TTS_STRETCH_BASE_SAFETY
+    stretch_local_min: float = DEFAULT_TTS_STRETCH_LOCAL_MIN
+    stretch_local_max: float = DEFAULT_TTS_STRETCH_LOCAL_MAX
+    stretch_noop_epsilon: float = DEFAULT_TTS_STRETCH_NOOP_EPSILON
 
 
 def generate_tts(task_dir: Path, config: TTSConfig) -> Path:

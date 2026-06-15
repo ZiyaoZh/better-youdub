@@ -109,14 +109,20 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert "Bloons TD 6" in defaults.json()["config"]["translation"]["correction_prompt"]
     assert defaults.json()["config"]["translation"]["base_url"] == WEB_TRANSLATION_BASE_URL_DEFAULT
     assert defaults.json()["config"]["translation"]["model"] == WEB_TRANSLATION_MODEL_DEFAULT
-    assert defaults.json()["config"]["tts"]["inference_timesteps"] == 15
+    assert defaults.json()["config"]["tts"]["inference_timesteps"] == 10
+    assert defaults.json()["config"]["tts"]["min_reference_ms"] == 1200
+    assert defaults.json()["config"]["tts"]["start_pad_ms"] == 80
+    assert defaults.json()["config"]["tts"]["end_pad_ms"] == 160
 
     task = client.post("/api/tasks/local", json={"source": str(source), "title": "Config Smoke"}).json()
     assert task["config"]["whisperx"]["model_name"] == "large-v2"
     assert task["config"]["translation"]["api_key"] == ""
     assert task["config"]["translation"]["base_url"] == WEB_TRANSLATION_BASE_URL_DEFAULT
     assert task["config"]["translation"]["model"] == WEB_TRANSLATION_MODEL_DEFAULT
-    assert task["config"]["tts"]["inference_timesteps"] == 15
+    assert task["config"]["tts"]["inference_timesteps"] == 10
+    assert task["config"]["tts"]["min_reference_ms"] == 1200
+    assert task["config"]["tts"]["start_pad_ms"] == 80
+    assert task["config"]["tts"]["end_pad_ms"] == 160
 
     updated = client.put(
         f"/api/tasks/{task['id']}/config",
@@ -611,7 +617,7 @@ def test_web_force_rerun_cleans_step_and_downstream_outputs(monkeypatch, tmp_pat
     assert task.steps[PipelineStep.TRANSLATE.value] == StepStatus.PENDING
 
 
-def test_web_schedules_without_holding_task_lock(monkeypatch, tmp_path: Path) -> None:
+def test_web_schedules_queued_task_without_holding_task_lock(monkeypatch, tmp_path: Path) -> None:
     client = _client(monkeypatch, tmp_path)
     source = tmp_path / "sample.mp4"
     source.write_bytes(b"video")
@@ -629,15 +635,16 @@ def test_web_schedules_without_holding_task_lock(monkeypatch, tmp_path: Path) ->
 
     assert response.status_code == 200
     assert response.json()["running"] is True
-    assert response.json()["status"] == "running"
-    assert response.json()["steps"]["extract-audio"] == "running"
+    assert response.json()["queued"] is True
+    assert response.json()["status"] == "queued"
+    assert response.json()["steps"]["extract-audio"] == "queued"
     probe = TaskLock(Path(task["folder"]), "probe").acquire(blocking=False)
     probe.release()
     release.set()
     web_module._RUNNING[task["id"]].result(timeout=2)
 
 
-def test_web_runs_different_tasks_concurrently(monkeypatch, tmp_path: Path) -> None:
+def test_web_queues_different_tasks_on_single_worker(monkeypatch, tmp_path: Path) -> None:
     client = _client(monkeypatch, tmp_path)
     first_source = tmp_path / "first.mp4"
     second_source = tmp_path / "second.mp4"
@@ -645,16 +652,19 @@ def test_web_runs_different_tasks_concurrently(monkeypatch, tmp_path: Path) -> N
     second_source.write_bytes(b"second")
     first = client.post("/api/tasks/local", json={"source": str(first_source), "title": "First"}).json()
     second = client.post("/api/tasks/local", json={"source": str(second_source), "title": "Second"}).json()
-    started: set[str] = set()
+    started: list[str] = []
     started_lock = threading.Lock()
-    both_started = threading.Event()
+    first_started = threading.Event()
+    second_started = threading.Event()
     release = threading.Event()
 
     def delayed_job(task_id: str, *args: object, **kwargs: object) -> None:
         with started_lock:
-            started.add(task_id)
+            started.append(task_id)
+            if len(started) == 1:
+                first_started.set()
             if len(started) == 2:
-                both_started.set()
+                second_started.set()
         release.wait(timeout=2)
 
     monkeypatch.setattr(web_module, "_run_step_job", delayed_job)
@@ -665,12 +675,15 @@ def test_web_runs_different_tasks_concurrently(monkeypatch, tmp_path: Path) -> N
     try:
         assert first_response.status_code == 200
         assert second_response.status_code == 200
-        assert both_started.wait(timeout=1)
-        assert started == {first["id"], second["id"]}
+        assert first_started.wait(timeout=1)
+        assert second_response.json()["queued"] is True
+        assert not second_started.wait(timeout=0.2)
+        assert started == [first["id"]]
     finally:
         release.set()
         web_module._RUNNING[first["id"]].result(timeout=2)
         web_module._RUNNING[second["id"]].result(timeout=2)
+    assert started == [first["id"], second["id"]]
 
 
 def test_web_url_task_accepts_cookies_content_without_echoing_it(monkeypatch, tmp_path: Path) -> None:

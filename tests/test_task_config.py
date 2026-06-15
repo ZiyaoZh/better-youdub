@@ -133,14 +133,14 @@ def test_task_config_exposes_web_tts_defaults(monkeypatch, tmp_path: Path) -> No
     task_config = default_task_config(config)
     options = runtime_options_from_task_config(config, task_config)
 
-    assert task_config["tts"]["inference_timesteps"] == 15
-    assert task_config["tts"]["min_reference_ms"] == 1500
-    assert task_config["tts"]["start_pad_ms"] == 150
-    assert task_config["tts"]["end_pad_ms"] == 300
-    assert options.tts.inference_timesteps == 15
-    assert options.tts.min_reference_ms == 1500
-    assert options.tts.start_pad_ms == 150
-    assert options.tts.end_pad_ms == 300
+    assert task_config["tts"]["inference_timesteps"] == 10
+    assert task_config["tts"]["min_reference_ms"] == 1200
+    assert task_config["tts"]["start_pad_ms"] == 80
+    assert task_config["tts"]["end_pad_ms"] == 160
+    assert options.tts.inference_timesteps == 10
+    assert options.tts.min_reference_ms == 1200
+    assert options.tts.start_pad_ms == 80
+    assert options.tts.end_pad_ms == 160
 
 
 def test_task_config_partial_update_preserves_sections_and_masked_secrets(monkeypatch, tmp_path: Path) -> None:

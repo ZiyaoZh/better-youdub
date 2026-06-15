@@ -160,17 +160,16 @@ YOUDUB_LOG_DIR=/data/logs
 NLTK_DATA=/cache/nltk
 YOUDUB_WEB_USERNAME=
 YOUDUB_WEB_PASSWORD=
-YOUDUB_WEB_MAX_WORKERS=3
 OPENAI_API_KEY=
 OPENAI_API_BASE=
 MODEL_NAME=
 HF_READ_TOKEN=
 YOUDUB_TTS_MODEL=openbmb/VoxCPM2
 YOUDUB_TTS_MODEL_DIR=
-YOUDUB_TTS_INFERENCE_TIMESTEPS=20
-YOUDUB_TTS_MIN_REFERENCE_MS=1500
-YOUDUB_TTS_START_PAD_MS=150
-YOUDUB_TTS_END_PAD_MS=300
+YOUDUB_TTS_INFERENCE_TIMESTEPS=10
+YOUDUB_TTS_MIN_REFERENCE_MS=1200
+YOUDUB_TTS_START_PAD_MS=80
+YOUDUB_TTS_END_PAD_MS=160
 BILI_SESSDATA=
 BILI_BILI_JCT=
 ```
@@ -246,7 +245,7 @@ BILI_BILI_JCT=
   重复启动同一任务的下载、单步或完整链路会被拒绝；Web API 返回 `409 Task is
   already running`。该锁用于当前单实例/共享卷部署下保护任务产物，不替代后续
   多 worker 队列和数据库事务设计。
-- Web 后台执行器默认 `YOUDUB_WEB_MAX_WORKERS=3`，不同任务可并发执行；任务锁只在
+- Web 后台执行器使用单线程 FIFO 队列，不同任务按提交顺序排队执行；任务锁只在
   后台 job 真正开始时获取，排队任务不会提前占用目录锁。`tasks.json` 的读取-修改-写入
   仍在进程内串行化，当前设计继续限定为单 Web 实例。
 - Web UI 已改为任务级参数模型：新任务会保存默认配置快照，任务详情页可独立覆盖
@@ -254,7 +253,7 @@ BILI_BILI_JCT=
   Web 入口：直接“下载并创建”会在下载成功后创建或复用稳定任务；“先创建任务”会
   创建 `YOUDUB_ROOT/_pending/<task-id>_URL draft` 占位任务，允许先保存任务级步骤参数，
   后续点击下载步骤卡片时按该任务的下载配置执行 `yt-dlp`。Web UI 新任务的 TTS
-  `inference_timesteps` 默认快照为 15，可在任务参数中覆盖。同一规范化 URL 会复用
+  参数来自同一套内部默认配置，可在任务参数中覆盖。同一规范化 URL 会复用
   已有草稿或稳定任务；下载完成后回填真实标题、作者、source key、稳定任务目录和下载
   产物，并删除旧 `_pending` 目录。若 source key 已存在，则合并到稳定任务并删除草稿记录。
   URL 表单支持
@@ -278,9 +277,9 @@ BILI_BILI_JCT=
 - TTS 步骤入口：`run-task --step tts` 已接入；默认使用 Hugging Face 上的
   `openbmb/VoxCPM2`，运行时下载到 `HF_HOME` 缓存，并根据 `translation.json`
   与 `audio_vocals.wav` 生成分段配音和 `audio_tts.wav`。VoxCPM2 推理步数默认
-  `YOUDUB_TTS_INFERENCE_TIMESTEPS=20`；参考音频默认前后补
-  `YOUDUB_TTS_START_PAD_MS=150`、`YOUDUB_TTS_END_PAD_MS=300`，短于
-  `YOUDUB_TTS_MIN_REFERENCE_MS=1500` 的片段会回退到较长参考。混音阶段默认对 TTS
+  `YOUDUB_TTS_INFERENCE_TIMESTEPS=10`；参考音频默认前后补
+  `YOUDUB_TTS_START_PAD_MS=80`、`YOUDUB_TTS_END_PAD_MS=160`，短于
+  `YOUDUB_TTS_MIN_REFERENCE_MS=1200` 的片段会回退到较长参考。混音阶段默认对 TTS
   片段做轻量 time-stretch 以控制累计漂移，并在 `audio_tts.timings.json` 中记录
   原始时长、调整后时长、实际起止时间、漂移量、拉伸比例和对齐状态。
 - TTS 后识别入口：`run-task --step transcribe-tts` 已接入；对 `audio_tts.wav`

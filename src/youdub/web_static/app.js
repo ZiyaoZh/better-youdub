@@ -200,6 +200,7 @@ function fmtSize(bytes) {
 function statusLabel(status) {
   return {
     pending: "等待",
+    queued: "排队",
     running: "运行中",
     success: "成功",
     failed: "失败",
@@ -210,8 +211,19 @@ function statusLabel(status) {
 function statusClass(status) {
   if (status === "success") return "status-success"
   if (status === "failed") return "status-failed"
+  if (status === "queued") return "status-queued"
   if (status === "running") return "status-running"
   return "status-pending"
+}
+
+function taskActive(task) {
+  return Boolean(task?.queued || task?.running)
+}
+
+function effectiveTaskStatus(task) {
+  if (task?.queued) return "queued"
+  if (task?.running) return "running"
+  return task?.status
 }
 
 function setMessage(id, text, isError = false) {
@@ -265,7 +277,7 @@ function renderTasks() {
     return
   }
   for (const task of state.tasks) {
-    const effectiveStatus = task.running ? "running" : task.status
+    const effectiveStatus = effectiveTaskStatus(task)
     const item = document.createElement("button")
     item.type = "button"
     item.className = `task-item ${task.id === state.selectedId ? "active" : ""}`
@@ -297,8 +309,9 @@ function renderDetail(task, options = {}) {
   $("taskDetail").classList.remove("hidden")
   $("detailTitle").textContent = task.title || task.id
   $("detailSource").textContent = task.source || ""
-  $("detailStatus").className = `status-badge ${statusClass(task.running ? "running" : task.status)}`
-  $("detailStatus").textContent = statusLabel(task.running ? "running" : task.status)
+  const effectiveStatus = effectiveTaskStatus(task)
+  $("detailStatus").className = `status-badge ${statusClass(effectiveStatus)}`
+  $("detailStatus").textContent = statusLabel(effectiveStatus)
   $("detailId").textContent = task.id
   $("detailAuthor").textContent = task.author || "-"
   $("detailFolder").textContent = task.folder
@@ -306,9 +319,9 @@ function renderDetail(task, options = {}) {
   $("detailError").classList.toggle("hidden", !task.error)
   $("detailError").textContent = task.error || ""
   const hasDownload = taskHasArtifact(task, "download-video")
-  $("runAllButton").disabled = task.running || (!hasDownload && !isUrlSource(task.source))
-  $("deleteButton").disabled = task.running
-  $("saveTaskConfigButton").disabled = task.running
+  $("runAllButton").disabled = taskActive(task) || (!hasDownload && !isUrlSource(task.source))
+  $("deleteButton").disabled = taskActive(task)
+  $("saveTaskConfigButton").disabled = taskActive(task)
   renderSteps(task)
   renderArtifacts(task)
   const editingConfig = $("taskConfigForm").contains(document.activeElement)
@@ -339,7 +352,7 @@ function renderSteps(task) {
         ${configKey ? `<button class="icon-button step-config-button" type="button" title="${label}参数" aria-label="${label}参数">⚙</button>` : ""}
       </div>
       <div class="step-card-actions">
-        <button class="button secondary" type="button" ${task.running || !hasDownload ? "disabled" : ""}>${buttonLabel}</button>
+        <button class="button secondary" type="button" ${taskActive(task) || !hasDownload ? "disabled" : ""}>${buttonLabel}</button>
       </div>
     `
     const configButton = card.querySelector(".step-config-button")
@@ -361,7 +374,7 @@ function renderSteps(task) {
 function renderDownloadConfigCard(task) {
   const hasDownload = taskHasArtifact(task, "download-video")
   const canDownload = isUrlSource(task.source)
-  const status = task.running && !hasDownload ? "running" : hasDownload ? "success" : "pending"
+  const status = task.queued && !hasDownload ? "queued" : task.running && !hasDownload ? "running" : hasDownload ? "success" : "pending"
   const buttonLabel = hasDownload ? "重新下载" : "下载"
   const card = document.createElement("div")
   card.className = "step-card step-card-config-only has-config"
@@ -375,7 +388,7 @@ function renderDownloadConfigCard(task) {
     </div>
     ${canDownload ? `
       <div class="step-card-actions">
-        <button class="button secondary download-task-button" type="button" ${task.running ? "disabled" : ""}>${buttonLabel}</button>
+        <button class="button secondary download-task-button" type="button" ${taskActive(task) ? "disabled" : ""}>${buttonLabel}</button>
       </div>
     ` : ""}
   `
@@ -511,7 +524,7 @@ function renderTaskConfig(task, options = {}) {
   }
   const activeSection = CONFIG_SECTIONS.find((item) => item.key === state.configTab) || CONFIG_SECTIONS[0]
   $("configDrawerTitle").textContent = `${activeSection.label}参数`
-  $("saveTaskConfigButton").disabled = task.running
+  $("saveTaskConfigButton").disabled = taskActive(task)
 
   tabs.innerHTML = ""
   for (const section of CONFIG_SECTIONS) {

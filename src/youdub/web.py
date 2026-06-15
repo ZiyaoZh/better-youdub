@@ -52,17 +52,21 @@ ARTIFACTS: dict[str, tuple[str, str]] = {
 }
 
 
-def _web_max_workers() -> int:
-    value = os.getenv("YOUDUB_WEB_MAX_WORKERS", "3").strip()
-    if not value:
-        return 3
-    return max(1, int(value))
-
-
-_EXECUTOR = ThreadPoolExecutor(max_workers=_web_max_workers(), thread_name_prefix="youdub-web")
+_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="youdub-web")
+_GPU_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="youdub-gpu")
 _LOCK = threading.Lock()
 _RUNNING: dict[str, Future[Any]] = {}
 _TASK_ALIASES: dict[str, str] = {}
+
+GPU_STEPS = {
+    PipelineStep.SEPARATE_AUDIO,
+    PipelineStep.TRANSCRIBE,
+    PipelineStep.TRANSCRIBE_WHISPER,
+    PipelineStep.TRANSCRIBE_ALIGN,
+    PipelineStep.TRANSCRIBE_DIARIZE,
+    PipelineStep.TTS,
+    PipelineStep.TRANSCRIBE_TTS,
+}
 
 
 class UrlTaskRequest(BaseModel):
@@ -541,6 +545,7 @@ def _get_task(task_id: str) -> Task:
 
 def _task_payload(task: Task) -> dict[str, Any]:
     data = task.to_dict()
+    data["queued"] = _task_queued(task.id)
     data["running"] = _task_running(task.id)
     data["artifacts"] = _artifact_summary(task)
     data["config"] = public_task_config(_config(), task.config)
@@ -558,20 +563,37 @@ def _artifact_summary(task: Task) -> list[dict[str, Any]]:
 
 
 def _task_running(task_id: str) -> bool:
-    future = _RUNNING.get(task_id)
-    if future is not None and not future.done():
+    if _unfinished_future_for_task(task_id) is not None:
         return True
-    for source_id, target_id in _TASK_ALIASES.items():
-        if target_id != task_id:
-            continue
-        future = _RUNNING.get(source_id)
-        if future is not None and not future.done():
-            return True
     try:
         task = _store().get(task_id)
     except KeyError:
         return False
     return task_is_locked(task.folder)
+
+
+def _task_queued(task_id: str) -> bool:
+    future = _unfinished_future_for_task(task_id)
+    if future is None:
+        return False
+    try:
+        task = _store().get(task_id)
+    except KeyError:
+        return False
+    return not task_is_locked(task.folder)
+
+
+def _unfinished_future_for_task(task_id: str) -> Future[Any] | None:
+    future = _RUNNING.get(task_id)
+    if future is not None and not future.done():
+        return future
+    for source_id, target_id in _TASK_ALIASES.items():
+        if target_id != task_id:
+            continue
+        future = _RUNNING.get(source_id)
+        if future is not None and not future.done():
+            return future
+    return None
 
 
 def _acquire_task_lock_for_web(task: Task, label: str) -> TaskLock:
@@ -604,10 +626,10 @@ def _schedule_download_for_task(task: Task, label: str, *, force: bool = False) 
 
 
 def _mark_task_scheduled(task: Task, step: PipelineStep | None = None) -> None:
-    task.status = TaskStatus.RUNNING
+    task.status = TaskStatus.QUEUED
     task.error = None
     if step is not None:
-        task.mark_step(step, StepStatus.RUNNING)
+        task.mark_step(step, StepStatus.QUEUED)
     _store().update(task)
 
 
@@ -728,6 +750,9 @@ def _run_step_job(
             task_lock = TaskLock(task.folder, task_lock).acquire(blocking=False)
             acquired_here = True
         _clear_step_outputs(task, step)
+        task.status = TaskStatus.RUNNING
+        task.error = None
+        task.mark_step(step, StepStatus.RUNNING)
         store.update(task)
         options = runtime_options_from_task_config(_config(), task.config)
         if step == PipelineStep.PUBLISH_BILIBILI and not options.bilibili.dry_run and not options.bilibili.confirm:

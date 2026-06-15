@@ -23,7 +23,6 @@ SECRET_FIELDS: dict[str, set[str]] = {
     "bilibili": {"sessdata", "bili_jct"},
 }
 
-WEB_TTS_INFERENCE_TIMESTEPS_DEFAULT = 15
 WEB_TRANSLATION_BASE_URL_DEFAULT = "https://sg.uiuiapi.com/v1"
 WEB_TRANSLATION_MODEL_DEFAULT = "gemini-3.1-flash-lite-preview"
 
@@ -33,7 +32,6 @@ def default_task_config(config: AppConfig, *, include_secrets: bool = False) -> 
     whisperx = _config_dict(options.whisperx)
     whisperx.pop("models_dir", None)
     tts = _config_dict(options.tts)
-    tts["inference_timesteps"] = WEB_TTS_INFERENCE_TIMESTEPS_DEFAULT
     translation = _config_dict(options.translation)
     translation["base_url"] = translation["base_url"] or WEB_TRANSLATION_BASE_URL_DEFAULT
     translation["model"] = translation["model"] or WEB_TRANSLATION_MODEL_DEFAULT
