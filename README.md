@@ -311,6 +311,7 @@ export YOUDUB_TTS_MIN_REFERENCE_MS=1200
 export YOUDUB_TTS_START_PAD_MS=80
 export YOUDUB_TTS_END_PAD_MS=160
 export YOUDUB_TTS_ALIGN_AUDIO=1
+export YOUDUB_TTS_CACHE_MODEL=0
 export YOUDUB_TTS_STRETCH_BASE_MIN=0.8
 export YOUDUB_TTS_STRETCH_BASE_MAX=1.2
 export YOUDUB_TTS_STRETCH_LOCAL_MIN=0.9
@@ -319,6 +320,10 @@ export YOUDUB_TTS_STRETCH_LOCAL_MAX=1.1
 
 使用 `--no-tts-align-audio` 或 `YOUDUB_TTS_ALIGN_AUDIO=0` 可以关闭分段时长对齐，
 回退到直接按时间线拼接 TTS 片段。
+
+默认 `YOUDUB_TTS_CACHE_MODEL=0`，TTS 步骤结束后会卸载 VoxCPM2 并清理 CUDA
+缓存，避免 Web 服务空闲时继续占用显存。连续批量处理且希望减少模型加载时间时，
+可以设置 `YOUDUB_TTS_CACHE_MODEL=1` 保留模型。
 
 如需完全离线运行，可以先把模型放到本地目录，再设置 `YOUDUB_TTS_MODEL_DIR`。
 

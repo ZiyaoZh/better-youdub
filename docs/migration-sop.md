@@ -170,6 +170,7 @@ YOUDUB_TTS_INFERENCE_TIMESTEPS=10
 YOUDUB_TTS_MIN_REFERENCE_MS=1200
 YOUDUB_TTS_START_PAD_MS=80
 YOUDUB_TTS_END_PAD_MS=160
+YOUDUB_TTS_CACHE_MODEL=0
 BILI_SESSDATA=
 BILI_BILI_JCT=
 ```
@@ -284,6 +285,8 @@ BILI_BILI_JCT=
   `YOUDUB_TTS_MIN_REFERENCE_MS=1200` 的片段会回退到较长参考。混音阶段默认对 TTS
   片段做轻量 time-stretch 以控制累计漂移，并在 `audio_tts.timings.json` 中记录
   原始时长、调整后时长、实际起止时间、漂移量、拉伸比例和对齐状态。
+  默认 `YOUDUB_TTS_CACHE_MODEL=0`，步骤结束后卸载 VoxCPM2 并清理 CUDA 缓存；
+  连续任务需要降低模型加载开销时，可显式设为 `1`。
 - TTS 后识别入口：`run-task --step transcribe-tts` 已接入；对 `audio_tts.wav`
   运行 whisper + align，默认 `YOUDUB_TTS_ASR_LANGUAGE=zh` 和
   `YOUDUB_TTS_ASR_INITIAL_PROMPT=以下是普通话的句子。`，用于让 Whisper 输出简体中文。

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .gpu import cleanup_gpu_memory
+
 
 WHISPER_OUTPUT = "transcript.whisper.json"
 ALIGN_OUTPUT = "transcript.aligned.json"
@@ -309,20 +311,26 @@ def run_whisper(
     download_root = config.models_dir / "ASR" / "whisper"
     download_root.mkdir(parents=True, exist_ok=True)
 
-    model = whisperx.load_model(
-        model_name,
-        **_whisperx_load_model_kwargs(
-            whisperx.load_model,
-            download_root=str(download_root),
-            device=device,
-            config=config,
-        ),
-    )
-    result = _transcribe_with_options(model, audio_path, config)
-    if result.get("language") == "nn":
-        raise RuntimeError(f"No language detected in {audio_path}")
+    model = None
+    result = None
+    try:
+        model = whisperx.load_model(
+            model_name,
+            **_whisperx_load_model_kwargs(
+                whisperx.load_model,
+                download_root=str(download_root),
+                device=device,
+                config=config,
+            ),
+        )
+        result = _transcribe_with_options(model, audio_path, config)
+        if result.get("language") == "nn":
+            raise RuntimeError(f"No language detected in {audio_path}")
 
-    return _write_json(task_dir / output_name, result)
+        return _write_json(task_dir / output_name, result)
+    finally:
+        del model, result
+        cleanup_gpu_memory("whisperx-whisper")
 
 
 def run_align(
@@ -346,20 +354,27 @@ def run_align(
     import whisperx
 
     device = _resolve_device(config.device)
-    align_model, metadata = whisperx.load_align_model(
-        language_code=language,
-        device=device,
-    )
-    aligned = whisperx.align(
-        result["segments"],
-        align_model,
-        metadata,
-        str(audio_path),
-        device,
-        return_char_alignments=False,
-    )
-    aligned["language"] = language
-    return _write_json(task_dir / output_name, aligned)
+    align_model = None
+    metadata = None
+    aligned = None
+    try:
+        align_model, metadata = whisperx.load_align_model(
+            language_code=language,
+            device=device,
+        )
+        aligned = whisperx.align(
+            result["segments"],
+            align_model,
+            metadata,
+            str(audio_path),
+            device,
+            return_char_alignments=False,
+        )
+        aligned["language"] = language
+        return _write_json(task_dir / output_name, aligned)
+    finally:
+        del align_model, metadata, aligned
+        cleanup_gpu_memory("whisperx-align")
 
 
 def run_diarize(task_dir: Path, config: WhisperXConfig) -> Path:
@@ -367,30 +382,36 @@ def run_diarize(task_dir: Path, config: WhisperXConfig) -> Path:
     result = _read_json(aligned_path)
 
     prepare_whisperx_runtime(config)
-    if config.diarization:
-        audio_path = task_dir / "audio_vocals.wav"
-        if not audio_path.exists():
-            raise FileNotFoundError(audio_path)
+    pipeline = None
+    diarize_segments = None
+    try:
+        if config.diarization:
+            audio_path = task_dir / "audio_vocals.wav"
+            if not audio_path.exists():
+                raise FileNotFoundError(audio_path)
 
-        import whisperx
-        from whisperx.diarize import DiarizationPipeline
+            import whisperx
+            from whisperx.diarize import DiarizationPipeline
 
-        device = _resolve_device(config.device)
-        token = config.hf_token
-        if not token:
-            raise RuntimeError(
-                "Hugging Face token is required for WhisperX diarization"
+            device = _resolve_device(config.device)
+            token = config.hf_token
+            if not token:
+                raise RuntimeError(
+                    "Hugging Face token is required for WhisperX diarization"
+                )
+
+            pipeline = DiarizationPipeline(use_auth_token=token, device=device)
+            diarize_segments = pipeline(
+                str(audio_path),
+                min_speakers=config.min_speakers,
+                max_speakers=config.max_speakers,
             )
+            result = whisperx.assign_word_speakers(diarize_segments, result)
 
-        pipeline = DiarizationPipeline(use_auth_token=token, device=device)
-        diarize_segments = pipeline(
-            str(audio_path),
-            min_speakers=config.min_speakers,
-            max_speakers=config.max_speakers,
-        )
-        result = whisperx.assign_word_speakers(diarize_segments, result)
-
-    return _write_json(task_dir / DIARIZE_OUTPUT, result)
+        return _write_json(task_dir / DIARIZE_OUTPUT, result)
+    finally:
+        del pipeline, diarize_segments, result
+        cleanup_gpu_memory("whisperx-diarize")
 
 
 def finalize_transcript(task_dir: Path, source_name: str = DIARIZE_OUTPUT) -> Path:

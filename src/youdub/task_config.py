@@ -182,6 +182,7 @@ def runtime_options_from_task_config(config: AppConfig, overrides: Mapping[str, 
             stretch_local_min=float(values["tts"]["stretch_local_min"]),
             stretch_local_max=float(values["tts"]["stretch_local_max"]),
             stretch_noop_epsilon=float(values["tts"]["stretch_noop_epsilon"]),
+            cache_model=bool(values["tts"]["cache_model"]),
         ),
         synthesis=SynthesisConfig(
             burn_subtitles=bool(values["synthesis"]["burn_subtitles"]),

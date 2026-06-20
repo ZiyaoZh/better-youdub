@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from .config import AppConfig
 from .downloader import download_url_to_artifacts, supported_js_runtimes
+from .gpu import cleanup_gpu_memory
 from .ingest import create_pending_url_task, create_task_from_download_artifacts, create_task_from_local_media
 from .locking import TaskLock, TaskLockBusy, task_is_locked
 from .models import PipelineStep, StepStatus, Task, TaskStatus
@@ -54,7 +55,7 @@ ARTIFACTS: dict[str, tuple[str, str]] = {
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="youdub-web")
 _GPU_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="youdub-gpu")
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
 _RUNNING: dict[str, Future[Any]] = {}
 _TASK_ALIASES: dict[str, str] = {}
 
@@ -234,7 +235,10 @@ def create_app() -> FastAPI:
             if task_is_locked(task.folder):
                 raise HTTPException(status_code=409, detail="Task is already running")
             _mark_task_scheduled(task, payload.step)
-            _RUNNING[task_id] = _submit_step_job(task.id, payload.step, f"web-run-step:{payload.step.value}")
+            _track_running(
+                task_id,
+                _submit_step_job(task.id, payload.step, f"web-run-step:{payload.step.value}"),
+            )
         return _task_payload(task)
 
     @app.post("/api/tasks/{task_id}/run-all")
@@ -611,7 +615,7 @@ def _schedule_run_all_for_task(task: Task, label: str) -> None:
         if task_is_locked(task.folder):
             raise HTTPException(status_code=409, detail="Task is already running")
         _mark_task_scheduled(task, _first_run_all_step(task))
-        _RUNNING[task.id] = _EXECUTOR.submit(_run_all_job, task.id, label)
+        _track_running(task.id, _EXECUTOR.submit(_run_all_job, task.id, label))
 
 
 def _schedule_download_for_task(task: Task, label: str, *, force: bool = False) -> None:
@@ -622,11 +626,28 @@ def _schedule_download_for_task(task: Task, label: str, *, force: bool = False) 
         if task_is_locked(task.folder):
             raise HTTPException(status_code=409, detail="Task is already running")
         _mark_task_scheduled(task, PipelineStep.INGEST)
-        _RUNNING[task.id] = _EXECUTOR.submit(_download_url_job, task.id, label, force=force)
+        _track_running(
+            task.id,
+            _EXECUTOR.submit(_download_url_job, task.id, label, force=force),
+        )
 
 
 def _submit_step_job(task_id: str, step: PipelineStep, label: str) -> Future[Any]:
     return _executor_for_step(step).submit(_run_step_job, task_id, step, label)
+
+
+def _track_running(task_id: str, future: Future[Any]) -> Future[Any]:
+    _RUNNING[task_id] = future
+    future.add_done_callback(lambda completed: _clear_running_future(task_id, completed))
+    if future.done():
+        _clear_running_future(task_id, future)
+    return future
+
+
+def _clear_running_future(task_id: str, future: Future[Any]) -> None:
+    with _LOCK:
+        if _RUNNING.get(task_id) is future:
+            _RUNNING.pop(task_id, None)
 
 
 def _executor_for_step(step: PipelineStep) -> ThreadPoolExecutor:
@@ -786,6 +807,8 @@ def _run_step_job(
         try:
             store.update(task)
         finally:
+            if _step_uses_gpu(step):
+                cleanup_gpu_memory(f"web-step:{step.value}")
             if release_lock and isinstance(task_lock, TaskLock):
                 task_lock.release()
 

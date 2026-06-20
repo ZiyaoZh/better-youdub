@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from youdub import tts
 from youdub.tts import (
     TTSConfig,
     choose_fallback_reference,
@@ -93,7 +94,9 @@ def test_generate_tts_writes_segments_mix_and_timings(tmp_path: Path, monkeypatc
         encoding="utf-8",
     )
     sf.write(tmp_path / "audio_vocals.wav", np.ones(32000, dtype=np.float32) * 0.05, 16000)
+    unloaded = []
     monkeypatch.setattr("youdub.tts.load_voxcpm_model", lambda _config: _FakeModel())
+    monkeypatch.setattr("youdub.tts.unload_voxcpm_model", lambda: unloaded.append(True))
 
     output = generate_tts(tmp_path, TTSConfig(min_reference_ms=100, align_audio=False))
 
@@ -103,6 +106,36 @@ def test_generate_tts_writes_segments_mix_and_timings(tmp_path: Path, monkeypatc
     assert (tmp_path / "segments" / "tts" / "0002.wav").exists()
     timings = json.loads((tmp_path / "audio_tts.timings.json").read_text(encoding="utf-8"))
     assert [item["translation"] for item in timings] == ["第一句。", "第二句。"]
+    assert unloaded == [True]
+
+
+def test_generate_tts_can_keep_model_cached(tmp_path: Path, monkeypatch) -> None:
+    np, sf = _audio_modules()
+    (tmp_path / "translation.json").write_text(
+        json.dumps([{"start": 0.0, "end": 0.5, "translation": "第一句。"}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    sf.write(tmp_path / "audio_vocals.wav", np.ones(16000, dtype=np.float32) * 0.05, 16000)
+    unloaded = []
+    monkeypatch.setattr("youdub.tts.load_voxcpm_model", lambda _config: _FakeModel())
+    monkeypatch.setattr("youdub.tts.unload_voxcpm_model", lambda: unloaded.append(True))
+
+    generate_tts(tmp_path, TTSConfig(min_reference_ms=100, align_audio=False, cache_model=True))
+
+    assert unloaded == []
+
+
+def test_unload_voxcpm_model_clears_cached_model(monkeypatch) -> None:
+    cleanup_calls = []
+    monkeypatch.setattr(tts, "cleanup_gpu_memory", lambda label: cleanup_calls.append(label))
+    monkeypatch.setattr(tts, "_MODEL", object())
+    monkeypatch.setattr(tts, "_MODEL_KEY", ("model", False, None))
+
+    assert tts.unload_voxcpm_model("test-unload") is True
+
+    assert tts._MODEL is None
+    assert tts._MODEL_KEY is None
+    assert cleanup_calls == ["test-unload"]
 
 
 def test_write_tts_mix_aligns_long_segments_without_accumulating_drift(tmp_path: Path, monkeypatch) -> None:

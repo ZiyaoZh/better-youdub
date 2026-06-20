@@ -198,9 +198,11 @@ def test_run_whisper_passes_language_and_initial_prompt(tmp_path: Path, monkeypa
         return FakeModel()
 
     fake_whisperx = types.SimpleNamespace(load_model=fake_load_model)
+    cleanup_calls = []
     monkeypatch.setitem(sys.modules, "whisperx", fake_whisperx)
     monkeypatch.setattr(transcription, "prepare_whisperx_runtime", lambda _config: None)
     monkeypatch.setattr(transcription, "_resolve_device", lambda _device: "cpu")
+    monkeypatch.setattr(transcription, "cleanup_gpu_memory", lambda label: cleanup_calls.append(label))
 
     transcription.run_whisper(
         tmp_path,
@@ -224,6 +226,53 @@ def test_run_whisper_passes_language_and_initial_prompt(tmp_path: Path, monkeypa
         "language": "zh",
         "initial_prompt": "以下是普通话的句子。",
     }
+    assert cleanup_calls == ["whisperx-whisper"]
+
+
+def test_run_align_cleans_gpu_memory(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "audio_vocals.wav").write_bytes(b"audio")
+    (tmp_path / transcription.WHISPER_OUTPUT).write_text(
+        json.dumps({"language": "en", "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}]}),
+        encoding="utf-8",
+    )
+    cleanup_calls = []
+
+    def fake_load_align_model(language_code: str, device: str):
+        assert language_code == "en"
+        assert device == "cpu"
+        return object(), {"language": language_code}
+
+    def fake_align(segments, align_model, metadata, audio_path, device, return_char_alignments=False):
+        return {"segments": segments}
+
+    fake_whisperx = types.SimpleNamespace(load_align_model=fake_load_align_model, align=fake_align)
+    monkeypatch.setitem(sys.modules, "whisperx", fake_whisperx)
+    monkeypatch.setattr(transcription, "prepare_whisperx_runtime", lambda _config: None)
+    monkeypatch.setattr(transcription, "_resolve_device", lambda _device: "cpu")
+    monkeypatch.setattr(transcription, "cleanup_gpu_memory", lambda label: cleanup_calls.append(label))
+
+    output = transcription.run_align(tmp_path, WhisperXConfig(models_dir=tmp_path / "models"))
+
+    assert output == tmp_path / transcription.ALIGN_OUTPUT
+    assert cleanup_calls == ["whisperx-align"]
+
+
+def test_run_diarize_cleans_gpu_memory_without_diarization(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / transcription.ALIGN_OUTPUT).write_text(
+        json.dumps({"language": "en", "segments": []}),
+        encoding="utf-8",
+    )
+    cleanup_calls = []
+    monkeypatch.setattr(transcription, "prepare_whisperx_runtime", lambda _config: None)
+    monkeypatch.setattr(transcription, "cleanup_gpu_memory", lambda label: cleanup_calls.append(label))
+
+    output = transcription.run_diarize(
+        tmp_path,
+        WhisperXConfig(models_dir=tmp_path / "models", diarization=False),
+    )
+
+    assert output == tmp_path / transcription.DIARIZE_OUTPUT
+    assert cleanup_calls == ["whisperx-diarize"]
 
 
 def test_transcribe_tts_audio_defaults_to_simplified_chinese_prompt(

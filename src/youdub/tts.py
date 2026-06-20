@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .gpu import cleanup_gpu_memory
+
 TRANSLATION_INPUT = "translation.json"
 VOCALS_INPUT = "audio_vocals.wav"
 VOCAL_SEGMENTS_DIR = "segments/vocals"
@@ -27,6 +29,7 @@ DEFAULT_TTS_STRETCH_BASE_SAFETY = 0.99
 DEFAULT_TTS_STRETCH_LOCAL_MIN = 0.9
 DEFAULT_TTS_STRETCH_LOCAL_MAX = 1.1
 DEFAULT_TTS_STRETCH_NOOP_EPSILON = 0.01
+DEFAULT_TTS_CACHE_MODEL = False
 
 _MODEL = None
 _MODEL_KEY: tuple[str, bool, str | None] | None = None
@@ -50,6 +53,7 @@ class TTSConfig:
     stretch_local_min: float = DEFAULT_TTS_STRETCH_LOCAL_MIN
     stretch_local_max: float = DEFAULT_TTS_STRETCH_LOCAL_MAX
     stretch_noop_epsilon: float = DEFAULT_TTS_STRETCH_NOOP_EPSILON
+    cache_model: bool = DEFAULT_TTS_CACHE_MODEL
 
 
 def generate_tts(task_dir: Path, config: TTSConfig) -> Path:
@@ -68,25 +72,31 @@ def generate_tts(task_dir: Path, config: TTSConfig) -> Path:
         write_tts_mix(entries, tts_dir, task_dir, config)
         return task_dir / TTS_OUTPUT
 
-    model = load_voxcpm_model(config)
-    fallback = choose_fallback_reference(vocals_dir, config.min_reference_ms)
+    model = None
+    try:
+        model = load_voxcpm_model(config)
+        fallback = choose_fallback_reference(vocals_dir, config.min_reference_ms)
 
-    for index, entry in enumerate(entries, start=1):
-        output_path = tts_dir / f"{index:04d}.wav"
-        if output_path.exists():
-            continue
-        reference_path = vocals_dir / f"{index:04d}.wav"
-        if not reference_path.exists() or audio_duration_ms(reference_path) < config.min_reference_ms:
-            reference_path = fallback
-        wav = model.generate(
-            text=entry["translation"],
-            reference_wav_path=str(reference_path),
-            cfg_value=config.cfg_value,
-            inference_timesteps=config.inference_timesteps,
-        )
-        _soundfile().write(str(output_path), wav, int(model.tts_model.sample_rate))
+        for index, entry in enumerate(entries, start=1):
+            output_path = tts_dir / f"{index:04d}.wav"
+            if output_path.exists():
+                continue
+            reference_path = vocals_dir / f"{index:04d}.wav"
+            if not reference_path.exists() or audio_duration_ms(reference_path) < config.min_reference_ms:
+                reference_path = fallback
+            wav = model.generate(
+                text=entry["translation"],
+                reference_wav_path=str(reference_path),
+                cfg_value=config.cfg_value,
+                inference_timesteps=config.inference_timesteps,
+            )
+            _soundfile().write(str(output_path), wav, int(model.tts_model.sample_rate))
 
-    return write_tts_mix(entries, tts_dir, task_dir, config)
+        return write_tts_mix(entries, tts_dir, task_dir, config)
+    finally:
+        del model
+        if not config.cache_model:
+            unload_voxcpm_model()
 
 
 def load_translation_entries(path: Path) -> list[dict[str, Any]]:
@@ -330,6 +340,8 @@ def load_voxcpm_model(config: TTSConfig):
     model_key = (model_source, config.load_denoiser, config.hf_token)
     if _MODEL is not None and _MODEL_KEY == model_key:
         return _MODEL
+    if _MODEL is not None:
+        unload_voxcpm_model("voxcpm-model-switch")
 
     if config.hf_token:
         os.environ.setdefault("HF_TOKEN", config.hf_token)
@@ -343,6 +355,20 @@ def load_voxcpm_model(config: TTSConfig):
     _MODEL = VoxCPM.from_pretrained(model_source, load_denoiser=config.load_denoiser)
     _MODEL_KEY = model_key
     return _MODEL
+
+
+def unload_voxcpm_model(label: str = "voxcpm-unload") -> bool:
+    global _MODEL, _MODEL_KEY
+    if _MODEL is None:
+        cleanup_gpu_memory(label)
+        return False
+
+    model = _MODEL
+    _MODEL = None
+    _MODEL_KEY = None
+    del model
+    cleanup_gpu_memory(label)
+    return True
 
 
 def audio_duration_ms(path: Path) -> float:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import threading
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -28,6 +29,19 @@ def _client(monkeypatch, tmp_path: Path) -> TestClient:
     monkeypatch.setenv("YOUDUB_CONFIG_PATH", str(tmp_path / "config" / "youdub.json"))
     monkeypatch.setenv("YOUDUB_COOKIES_PATH", str(tmp_path / "cookies" / "cookies.txt"))
     return TestClient(create_app())
+
+
+def _wait_for_task_idle(client: TestClient, task_id: str, timeout: float = 2.0) -> dict:
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/tasks/{task_id}")
+        response.raise_for_status()
+        last = response.json()
+        if not last["queued"] and not last["running"]:
+            return last
+        time.sleep(0.01)
+    raise AssertionError(f"Task did not become idle: {last}")
 
 
 def _basic_auth(username: str, password: str) -> dict[str, str]:
@@ -320,8 +334,7 @@ def test_web_downloads_url_draft_with_saved_config_and_hydrates_same_task(monkey
 
     assert response.status_code == 200
     assert response.json()["running"] is True
-    web_module._RUNNING[draft["id"]].result(timeout=2)
-    task = client.get(f"/api/tasks/{draft['id']}").json()
+    task = _wait_for_task_idle(client, draft["id"])
     assert task["id"] == draft["id"]
     assert task["title"] == "Hydrated"
     assert task["source"] == "https://example.test/watch?v=abc123"
@@ -367,7 +380,7 @@ def test_web_url_draft_download_merges_existing_stable_task(monkeypatch, tmp_pat
     response = client.post(f"/api/tasks/{draft['id']}/download")
 
     assert response.status_code == 200
-    web_module._RUNNING[draft["id"]].result(timeout=2)
+    _wait_for_task_idle(client, draft["id"])
     tasks = client.get("/api/tasks").json()["tasks"]
     assert [task["id"] for task in tasks] == [existing["id"]]
     merged = client.get(f"/api/tasks/{draft['id']}").json()
@@ -426,7 +439,7 @@ def test_web_run_all_downloads_url_draft_before_pipeline_steps(monkeypatch, tmp_
     response = client.post(f"/api/tasks/{draft['id']}/run-all")
 
     assert response.status_code == 200
-    web_module._RUNNING[draft["id"]].result(timeout=2)
+    _wait_for_task_idle(client, draft["id"])
     stable_folder = str(tmp_path / "videos" / "Web" / "20260614 RunAll")
     assert captured["download_url"] == "https://example.test/watch?v=abc123"
     assert captured["download_max_height"] == 720
@@ -554,7 +567,7 @@ def test_web_run_step_allows_success_status_without_required_outputs(monkeypatch
     response = client.post(f"/api/tasks/{task.id}/run", json={"step": "extract-audio"})
 
     assert response.status_code == 200
-    web_module._RUNNING[task.id].result(timeout=2)
+    _wait_for_task_idle(client, task.id)
     assert started.is_set()
 
 
@@ -641,7 +654,7 @@ def test_web_schedules_queued_task_without_holding_task_lock(monkeypatch, tmp_pa
     probe = TaskLock(Path(task["folder"]), "probe").acquire(blocking=False)
     probe.release()
     release.set()
-    web_module._RUNNING[task["id"]].result(timeout=2)
+    _wait_for_task_idle(client, task["id"])
 
 
 def test_web_runs_non_gpu_steps_on_worker_pool(monkeypatch, tmp_path: Path) -> None:
@@ -680,8 +693,8 @@ def test_web_runs_non_gpu_steps_on_worker_pool(monkeypatch, tmp_path: Path) -> N
         assert set(started) == {first["id"], second["id"]}
     finally:
         release.set()
-        web_module._RUNNING[first["id"]].result(timeout=2)
-        web_module._RUNNING[second["id"]].result(timeout=2)
+        _wait_for_task_idle(client, first["id"])
+        _wait_for_task_idle(client, second["id"])
 
 
 def test_web_queues_gpu_steps_on_single_gpu_worker(monkeypatch, tmp_path: Path) -> None:
@@ -721,8 +734,8 @@ def test_web_queues_gpu_steps_on_single_gpu_worker(monkeypatch, tmp_path: Path) 
         assert started == [first["id"]]
     finally:
         release.set()
-        web_module._RUNNING[first["id"]].result(timeout=2)
-        web_module._RUNNING[second["id"]].result(timeout=2)
+        _wait_for_task_idle(client, first["id"])
+        _wait_for_task_idle(client, second["id"])
     assert started == [first["id"], second["id"]]
 
 
@@ -871,6 +884,50 @@ def test_web_run_step_uses_saved_task_config(monkeypatch, tmp_path: Path) -> Non
     assert captured["whisperx"].hf_token == "hf-task"
     assert captured["tts"].hf_token == "hf-env"
     assert captured["tts"].cfg_value == 3.5
+
+
+def test_web_run_step_cleans_gpu_memory_for_gpu_steps(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task = client.post("/api/tasks/local", json={"source": str(source), "title": "GPU Cleanup"}).json()
+    cleanup_calls = []
+
+    class FakeRunner:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def run_step(self, task, step: PipelineStep, task_lock=None):
+            task.status = TaskStatus.SUCCESS
+            task.mark_step(step, StepStatus.SUCCESS)
+            return task
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+    monkeypatch.setattr(web_module, "cleanup_gpu_memory", lambda label: cleanup_calls.append(label))
+
+    web_module._run_step_job(task["id"], PipelineStep.TTS)
+
+    assert cleanup_calls == ["web-step:tts"]
+
+
+def test_web_completed_jobs_are_removed_from_running(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task = client.post("/api/tasks/local", json={"source": str(source), "title": "Future Cleanup"}).json()
+    started = threading.Event()
+
+    def fake_job(*args: object, **kwargs: object) -> None:
+        started.set()
+
+    monkeypatch.setattr(web_module, "_run_step_job", fake_job)
+
+    response = client.post(f"/api/tasks/{task['id']}/run", json={"step": "extract-audio"})
+    assert response.status_code == 200
+    assert started.wait(timeout=1)
+    _wait_for_task_idle(client, task["id"])
+
+    assert task["id"] not in web_module._RUNNING
 
 
 def test_web_bilibili_step_defaults_to_dry_run_until_confirmed(monkeypatch, tmp_path: Path) -> None:

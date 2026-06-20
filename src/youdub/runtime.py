@@ -18,6 +18,7 @@ from .translation import (
 from .transcription import WhisperXConfig
 from .tts import (
     DEFAULT_TTS_ALIGN_AUDIO,
+    DEFAULT_TTS_CACHE_MODEL,
     DEFAULT_TTS_CFG_VALUE,
     DEFAULT_TTS_END_PAD_MS,
     DEFAULT_TTS_INFERENCE_TIMESTEPS,
@@ -101,6 +102,7 @@ def runtime_options_from_env(config: AppConfig) -> RuntimeOptions:
             stretch_base_max=_float_env("YOUDUB_TTS_STRETCH_BASE_MAX", DEFAULT_TTS_STRETCH_BASE_MAX),
             stretch_local_min=_float_env("YOUDUB_TTS_STRETCH_LOCAL_MIN", DEFAULT_TTS_STRETCH_LOCAL_MIN),
             stretch_local_max=_float_env("YOUDUB_TTS_STRETCH_LOCAL_MAX", DEFAULT_TTS_STRETCH_LOCAL_MAX),
+            cache_model=_bool_env("YOUDUB_TTS_CACHE_MODEL", DEFAULT_TTS_CACHE_MODEL),
         ),
         synthesis=SynthesisConfig(
             burn_subtitles=_bool_env("YOUDUB_BURN_SUBTITLES", True),

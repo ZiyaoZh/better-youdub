@@ -18,6 +18,7 @@ from .synthesis import SynthesisConfig, ffmpeg_has_filter
 from .storage import TaskStore
 from .tts import (
     DEFAULT_TTS_ALIGN_AUDIO,
+    DEFAULT_TTS_CACHE_MODEL,
     DEFAULT_TTS_CFG_VALUE,
     DEFAULT_TTS_END_PAD_MS,
     DEFAULT_TTS_INFERENCE_TIMESTEPS,
@@ -256,6 +257,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="tts_align_audio",
         default=_bool_env("YOUDUB_TTS_ALIGN_AUDIO", DEFAULT_TTS_ALIGN_AUDIO),
         help="Disable time-stretch alignment when mixing TTS segments",
+    )
+    run_task.add_argument(
+        "--tts-cache-model",
+        action="store_true",
+        default=_bool_env("YOUDUB_TTS_CACHE_MODEL", DEFAULT_TTS_CACHE_MODEL),
+        help="Keep VoxCPM2 loaded after TTS for faster subsequent runs",
     )
     run_task.add_argument(
         "--tts-stretch-base-min",
@@ -529,6 +536,7 @@ def cmd_run_task(config: AppConfig, args: argparse.Namespace) -> int:
         stretch_base_max=args.tts_stretch_base_max,
         stretch_local_min=args.tts_stretch_local_min,
         stretch_local_max=args.tts_stretch_local_max,
+        cache_model=args.tts_cache_model,
     )
     synthesis_config = SynthesisConfig(
         burn_subtitles=args.burn_subtitles,
