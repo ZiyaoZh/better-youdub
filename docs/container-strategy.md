@@ -171,8 +171,11 @@ TORCH_HOME=/cache/torch
 
 `YOUDUB_DOWNLOAD_MAX_HEIGHT=0` 表示不限制下载高度。Compose 默认不注入具体高度，
 以便 `/data/config/youdub.json` 的运行时默认值和 Web UI 任务级下载参数按预期生效。
-Web 后台执行器固定为单线程 FIFO 队列，同一时刻只运行一个下载、单步或完整链路；
-同一任务仍由 `_RUNNING` 和目录 `.task.lock` 互斥，`tasks.json` 保持进程内单写入。
+Web 后台执行器按步骤分流：下载、翻译、字幕、合成、发布包和上传等非 GPU 步骤使用
+`max_workers=3` 的通用 worker 并发运行；Demucs、WhisperX、TTS 和 TTS 后识别使用
+单 worker GPU 队列串行运行。`run-all` 仍保持同一任务内步骤顺序，遇到 GPU 步骤时按
+单步骤进入 GPU 队列。同一任务仍由 `_RUNNING` 和目录 `.task.lock` 互斥，`tasks.json`
+保持进程内单写入。
 
 ## Compose 服务建议
 

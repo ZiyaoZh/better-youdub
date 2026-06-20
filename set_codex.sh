@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 用法: ./update_config_advanced.sh <vendor> <new_api_key>
-# vendor 可选: packy, rawchat, anyrouter
+# vendor 可选: packy, rawchat, anyrouter, sub2api
 
 set -e
 
@@ -20,7 +20,7 @@ trap cleanup EXIT
 if [ $# -ne 2 ]; then
     echo "错误：需要两个参数"
     echo "用法: $0 <vendor> <new_api_key>"
-    echo "vendor 可选: packy, rawchat, anyrouter"
+    echo "vendor 可选: packy, rawchat, anyrouter, sub2api"
     exit 1
 fi
 
@@ -46,6 +46,12 @@ case "$VENDOR" in
         SECTION="rawchat"
         BASE_URL="https://new.sharedchat.cc/codex"
         NAME="rawchat"
+        ;;
+    sub2api)
+        PROVIDER_VALUE="sub2api"
+        SECTION="sub2api"
+        BASE_URL="http://222.20.126.109:18080"
+        NAME="sub2api"
         ;;
     *)
         echo "错误：不支持的供应商 '$VENDOR'"

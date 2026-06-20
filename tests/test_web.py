@@ -644,7 +644,7 @@ def test_web_schedules_queued_task_without_holding_task_lock(monkeypatch, tmp_pa
     web_module._RUNNING[task["id"]].result(timeout=2)
 
 
-def test_web_queues_different_tasks_on_single_worker(monkeypatch, tmp_path: Path) -> None:
+def test_web_runs_non_gpu_steps_on_worker_pool(monkeypatch, tmp_path: Path) -> None:
     client = _client(monkeypatch, tmp_path)
     first_source = tmp_path / "first.mp4"
     second_source = tmp_path / "second.mp4"
@@ -671,6 +671,46 @@ def test_web_queues_different_tasks_on_single_worker(monkeypatch, tmp_path: Path
 
     first_response = client.post(f"/api/tasks/{first['id']}/run", json={"step": "extract-audio"})
     second_response = client.post(f"/api/tasks/{second['id']}/run", json={"step": "extract-audio"})
+
+    try:
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        assert first_started.wait(timeout=1)
+        assert second_started.wait(timeout=1)
+        assert set(started) == {first["id"], second["id"]}
+    finally:
+        release.set()
+        web_module._RUNNING[first["id"]].result(timeout=2)
+        web_module._RUNNING[second["id"]].result(timeout=2)
+
+
+def test_web_queues_gpu_steps_on_single_gpu_worker(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    first_source = tmp_path / "first.mp4"
+    second_source = tmp_path / "second.mp4"
+    first_source.write_bytes(b"first")
+    second_source.write_bytes(b"second")
+    first = client.post("/api/tasks/local", json={"source": str(first_source), "title": "First"}).json()
+    second = client.post("/api/tasks/local", json={"source": str(second_source), "title": "Second"}).json()
+    started: list[str] = []
+    started_lock = threading.Lock()
+    first_started = threading.Event()
+    second_started = threading.Event()
+    release = threading.Event()
+
+    def delayed_job(task_id: str, *args: object, **kwargs: object) -> None:
+        with started_lock:
+            started.append(task_id)
+            if len(started) == 1:
+                first_started.set()
+            if len(started) == 2:
+                second_started.set()
+        release.wait(timeout=2)
+
+    monkeypatch.setattr(web_module, "_run_step_job", delayed_job)
+
+    first_response = client.post(f"/api/tasks/{first['id']}/run", json={"step": "separate-audio"})
+    second_response = client.post(f"/api/tasks/{second['id']}/run", json={"step": "separate-audio"})
 
     try:
         assert first_response.status_code == 200

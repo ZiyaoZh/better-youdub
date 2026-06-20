@@ -4,16 +4,17 @@
 
 ## 结论摘要
 
-本次核对确认 4 个问题均有代码层面的依据，但状态不完全相同：
+本次核对确认 4 个问题均有代码层面的依据，但状态不完全相同。2026-06-15 已进一步优化
+Web 后台队列：非 GPU 步骤走 3 worker 并发，GPU 步骤走单 worker 队列。
 
-1. 多任务并发问题已确认。当前 Web 后台执行器是全局单 worker，不同任务会被串行排队；同时调度时提前持有任务锁，导致第二个任务在 UI 上显示运行中，但实际下载/处理尚未开始。
+1. 多任务并发问题已确认。核对时 Web 后台执行器是全局单 worker，不同任务会被串行排队；同时调度时提前持有任务锁，导致第二个任务在 UI 上显示运行中，但实际下载/处理尚未开始。后续实现已改为按步骤分流队列。
 2. URL 草稿 `_pending` 清理问题已确认。草稿下载完成后会切换到正式任务目录，但旧 `_pending/<draft>` 目录没有删除。URL 草稿创建也缺少预下载去重逻辑，下载完成后还可能和已有稳定任务形成重复记录。
 3. Bilibili 上传单步已接入，但未纳入 Web “运行完整链路”。`run-all` 当前只执行到 `prepare-publish`，不会执行 `publish-bilibili`。
 4. 运行中状态不是完全缺失。模型、CSS 和前端标签已经有 `running`，但任务卡片存在展示和持久化缺口：状态主要依赖进程内 Future/目录锁推断，提交任务后不会立即持久化为 `running`；列表卡片的样式 class 仍使用原始 `task.status`，运行中时文字和样式可能不一致。
 
 ## 1. 多任务并发与任务锁
 
-### 当前实现
+### 核对时实现
 
 - `src/youdub/web.py` 中 `_EXECUTOR = ThreadPoolExecutor(max_workers=1, ...)`，Web 所有下载、单步运行、完整链路运行共用一个后台 worker。
 - 同一任务启动时会进入 `_RUNNING[task.id]`，后台 job 真正开始时才获取该任务目录下的 `.task.lock`。
@@ -173,7 +174,7 @@
 
 实施日期：2026-06-14
 
-- Web executor 改为单线程 FIFO 队列；不同任务按提交顺序串行执行。
+- Web executor 先改为单线程 FIFO 队列；不同任务按提交顺序串行执行。
 - 调度阶段只登记 Future 并持久化 `queued`，目录锁在后台 job 真正开始时获取；同一任务
   的重复启动仍返回 409。
 - `TaskStore` 的读取-修改-写入增加进程内可重入锁，避免多 Web worker 同时更新
@@ -185,3 +186,12 @@
   使用 dry-run。
 - 调度后立即持久化任务/首步骤 `queued` 状态；后台 job 开始后转为 `running`；
   任务列表 badge 的文字和 CSS class 统一使用有效状态。
+
+追加优化日期：2026-06-15
+
+- Web executor 改为按步骤分流：下载、翻译、字幕、合成、发布包和上传等非 GPU 步骤使用
+  `max_workers=3` 的通用 worker 并发执行。
+- `separate-audio`、`transcribe`、`transcribe-whisper`、`transcribe-align`、
+  `transcribe-diarize`、`tts` 和 `transcribe-tts` 使用单 worker GPU 队列串行执行。
+- `run-all` 保持同一任务内步骤顺序，遇到 GPU 步骤时以单步骤为单位进入 GPU 队列；
+  同一任务仍由 `_RUNNING` 和 `.task.lock` 互斥。

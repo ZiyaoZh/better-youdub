@@ -234,7 +234,7 @@ def create_app() -> FastAPI:
             if task_is_locked(task.folder):
                 raise HTTPException(status_code=409, detail="Task is already running")
             _mark_task_scheduled(task, payload.step)
-            _RUNNING[task_id] = _EXECUTOR.submit(_run_step_job, task.id, payload.step, f"web-run-step:{payload.step.value}")
+            _RUNNING[task_id] = _submit_step_job(task.id, payload.step, f"web-run-step:{payload.step.value}")
         return _task_payload(task)
 
     @app.post("/api/tasks/{task_id}/run-all")
@@ -625,6 +625,18 @@ def _schedule_download_for_task(task: Task, label: str, *, force: bool = False) 
         _RUNNING[task.id] = _EXECUTOR.submit(_download_url_job, task.id, label, force=force)
 
 
+def _submit_step_job(task_id: str, step: PipelineStep, label: str) -> Future[Any]:
+    return _executor_for_step(step).submit(_run_step_job, task_id, step, label)
+
+
+def _executor_for_step(step: PipelineStep) -> ThreadPoolExecutor:
+    return _GPU_EXECUTOR if _step_uses_gpu(step) else _EXECUTOR
+
+
+def _step_uses_gpu(step: PipelineStep) -> bool:
+    return step in GPU_STEPS
+
+
 def _mark_task_scheduled(task: Task, step: PipelineStep | None = None) -> None:
     task.status = TaskStatus.QUEUED
     task.error = None
@@ -790,7 +802,7 @@ def _run_all_job(task_id: str, task_lock: TaskLock | None = None) -> None:
             task = _store().get(task_id)
             if _step_completed(task, step):
                 continue
-            _run_step_job(task_id, step, task_lock=task_lock, release_lock=False)
+            _run_step_for_run_all(task_id, step, task_lock)
         task = _store().get(task_id)
         task.status = TaskStatus.SUCCESS
         task.error = None
@@ -798,6 +810,27 @@ def _run_all_job(task_id: str, task_lock: TaskLock | None = None) -> None:
     finally:
         if task_lock is not None:
             task_lock.release()
+
+
+def _run_step_for_run_all(task_id: str, step: PipelineStep, task_lock: TaskLock | None) -> None:
+    if _step_uses_gpu(step):
+        _mark_run_all_step_queued(task_id, step)
+        _GPU_EXECUTOR.submit(
+            _run_step_job,
+            task_id,
+            step,
+            task_lock=task_lock,
+            release_lock=False,
+        ).result()
+        return
+    _run_step_job(task_id, step, task_lock=task_lock, release_lock=False)
+
+
+def _mark_run_all_step_queued(task_id: str, step: PipelineStep) -> None:
+    task = _store().get(task_id)
+    task.error = None
+    task.mark_step(step, StepStatus.QUEUED)
+    _store().update(task)
 
 
 def _download_for_run_all_if_needed(

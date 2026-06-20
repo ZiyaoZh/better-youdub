@@ -155,9 +155,12 @@ GPU Docker 镜像安装运行依赖。
 
 同一任务目录内的 URL 下载和 `run-task` 步骤使用 `.task.lock` 做非阻塞互斥。
 如果同一任务已经在下载、运行单步或运行完整链路，再次启动同一任务会失败；Web API
-返回 `409 Task is already running`。Web 后台执行器使用单线程 FIFO 队列，不同任务会
-按提交顺序排队执行，同一时刻只会有一个后台下载、单步或完整链路在运行；`tasks.json`
-仍保持进程内单写入，适合当前单实例部署。
+返回 `409 Task is already running`。Web 后台执行器按步骤分流：非 GPU 步骤使用
+`max_workers=3` 的通用 worker 并发运行；`separate-audio`、`transcribe`、
+`transcribe-whisper`、`transcribe-align`、`transcribe-diarize`、`tts` 和
+`transcribe-tts` 使用单 worker GPU 队列串行运行，避免多个显存任务同时执行。
+`run-all` 保持同一任务内的步骤顺序，遇到 GPU 步骤时按单步骤进入 GPU 队列；
+`tasks.json` 仍保持进程内单写入，适合当前单实例部署。
 
 `create-url-task` 会用 `yt-dlp` 下载单个视频 URL，并在任务目录写出：
 
