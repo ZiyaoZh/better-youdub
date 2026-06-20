@@ -36,6 +36,8 @@ class PipelineStep(str, Enum):
     TTS = "tts"
     TRANSCRIBE_TTS = "transcribe-tts"
     SUBTITLE = "subtitle"
+    INSPECT_TTS = "inspect-tts"
+    REDUB_TTS = "redub-tts"
     SYNTHESIZE = "synthesize"
     PREPARE_PUBLISH = "prepare-publish"
     PUBLISH_BILIBILI = "publish-bilibili"

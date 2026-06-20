@@ -32,6 +32,8 @@ from .tts import (
     DEFAULT_TTS_STRETCH_LOCAL_MIN,
     TTSConfig,
 )
+from .tts_quality import TTSQualityConfig
+from .tts_redub import RedubTTSConfig
 from .translation import (
     DEFAULT_CONTEXT_EXTRA_PROMPT,
     DEFAULT_CORRECTION_PROMPT,
@@ -109,6 +111,8 @@ def build_parser() -> argparse.ArgumentParser:
             PipelineStep.TTS.value,
             PipelineStep.TRANSCRIBE_TTS.value,
             PipelineStep.SUBTITLE.value,
+            PipelineStep.INSPECT_TTS.value,
+            PipelineStep.REDUB_TTS.value,
             PipelineStep.SYNTHESIZE.value,
             PipelineStep.PREPARE_PUBLISH.value,
             PipelineStep.PUBLISH_BILIBILI.value,
@@ -287,6 +291,36 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=float(os.getenv("YOUDUB_TTS_STRETCH_LOCAL_MAX", str(DEFAULT_TTS_STRETCH_LOCAL_MAX))),
         help="Maximum per-segment TTS stretch correction",
+    )
+    run_task.add_argument(
+        "--tts-quality-include-review",
+        action="store_true",
+        default=_bool_env("YOUDUB_TTS_QUALITY_INCLUDE_REVIEW", False),
+        help="Include review-severity TTS quality segments in the redub plan",
+    )
+    run_task.add_argument(
+        "--tts-quality-max-segments-per-round",
+        type=int,
+        default=int(os.getenv("YOUDUB_TTS_QUALITY_MAX_SEGMENTS_PER_ROUND", "50")),
+        help="Maximum TTS segments to redub in one round",
+    )
+    run_task.add_argument(
+        "--tts-quality-max-task-hard-ratio",
+        type=float,
+        default=float(os.getenv("YOUDUB_TTS_QUALITY_MAX_TASK_HARD_RATIO", "0.20")),
+        help="Hard-fail ratio above which the report flags the task for review",
+    )
+    run_task.add_argument(
+        "--tts-redub-round",
+        type=int,
+        default=int(os.getenv("YOUDUB_TTS_REDUB_ROUND", "1")),
+        help="Current TTS redub round",
+    )
+    run_task.add_argument(
+        "--tts-redub-max-rounds",
+        type=int,
+        default=int(os.getenv("YOUDUB_TTS_REDUB_MAX_ROUNDS", "1")),
+        help="Maximum TTS redub rounds",
     )
     run_task.add_argument(
         "--no-burn-subtitles",
@@ -547,6 +581,27 @@ def cmd_run_task(config: AppConfig, args: argparse.Namespace) -> int:
         subtitle_language=args.subtitle_language,
         subtitle_font=args.subtitle_font,
     )
+    tts_quality_defaults = TTSQualityConfig.from_env()
+    tts_quality_config = TTSQualityConfig(
+        hard_similarity_min=tts_quality_defaults.hard_similarity_min,
+        review_similarity_min=tts_quality_defaults.review_similarity_min,
+        hard_alignment_confidence_min=tts_quality_defaults.hard_alignment_confidence_min,
+        review_alignment_confidence_min=tts_quality_defaults.review_alignment_confidence_min,
+        hard_drift_seconds=tts_quality_defaults.hard_drift_seconds,
+        review_drift_seconds=tts_quality_defaults.review_drift_seconds,
+        extreme_stretch_min=tts_quality_defaults.extreme_stretch_min,
+        extreme_stretch_max=tts_quality_defaults.extreme_stretch_max,
+        min_text_chars_for_empty_asr_hard=tts_quality_defaults.min_text_chars_for_empty_asr_hard,
+        include_review=args.tts_quality_include_review,
+        max_segments_per_round=args.tts_quality_max_segments_per_round,
+        max_task_hard_ratio=args.tts_quality_max_task_hard_ratio,
+        round=args.tts_redub_round,
+        max_rounds=args.tts_redub_max_rounds,
+    )
+    redub_tts_config = RedubTTSConfig(
+        round=args.tts_redub_round,
+        max_rounds=args.tts_redub_max_rounds,
+    )
     publish_config = PublishPackageConfig(
         max_title_chars=args.publish_title_max_chars,
         max_tags=args.publish_max_tags,
@@ -571,6 +626,8 @@ def cmd_run_task(config: AppConfig, args: argparse.Namespace) -> int:
             synthesis_config=synthesis_config,
             publish_config=publish_config,
             bilibili_publish_config=bilibili_publish_config,
+            tts_quality_config=tts_quality_config,
+            redub_tts_config=redub_tts_config,
         ).run_step(task, step)
     finally:
         store.update(task)

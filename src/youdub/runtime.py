@@ -32,6 +32,8 @@ from .tts import (
     DEFAULT_TTS_STRETCH_LOCAL_MIN,
     TTSConfig,
 )
+from .tts_quality import TTSQualityConfig
+from .tts_redub import RedubTTSConfig
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,8 @@ class RuntimeOptions:
     synthesis: SynthesisConfig
     publish: PublishPackageConfig
     bilibili: BilibiliPublishConfig
+    tts_quality: TTSQualityConfig
+    redub_tts: RedubTTSConfig
 
 
 def runtime_options_from_env(config: AppConfig) -> RuntimeOptions:
@@ -119,6 +123,8 @@ def runtime_options_from_env(config: AppConfig) -> RuntimeOptions:
             max_tag_chars=_int_env("YOUDUB_PUBLISH_MAX_TAG_CHARS", 20),
         ),
         bilibili=BilibiliPublishConfig.from_env(),
+        tts_quality=TTSQualityConfig.from_env(),
+        redub_tts=RedubTTSConfig.from_env(),
     )
 
 

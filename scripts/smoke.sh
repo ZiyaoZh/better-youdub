@@ -23,6 +23,8 @@ SMOKE_TRANSLATE="${YOUDUB_SMOKE_TRANSLATE:-0}"
 SMOKE_TTS="${YOUDUB_SMOKE_TTS:-0}"
 SMOKE_TRANSCRIBE_TTS="${YOUDUB_SMOKE_TRANSCRIBE_TTS:-0}"
 SMOKE_SUBTITLE="${YOUDUB_SMOKE_SUBTITLE:-0}"
+SMOKE_INSPECT_TTS="${YOUDUB_SMOKE_INSPECT_TTS:-0}"
+SMOKE_REDUB_TTS="${YOUDUB_SMOKE_REDUB_TTS:-0}"
 SMOKE_SYNTHESIZE="${YOUDUB_SMOKE_SYNTHESIZE:-0}"
 SMOKE_PREPARE_PUBLISH="${YOUDUB_SMOKE_PREPARE_PUBLISH:-0}"
 SMOKE_PUBLISH_BILIBILI="${YOUDUB_SMOKE_PUBLISH_BILIBILI:-0}"
@@ -68,6 +70,14 @@ if [[ "$SMOKE_TRANSCRIBE_TTS" == "1" && "$SMOKE_TTS" != "1" ]]; then
 fi
 if [[ "$SMOKE_SUBTITLE" == "1" && "$SMOKE_TRANSCRIBE_TTS" != "1" ]]; then
   echo "error: YOUDUB_SMOKE_SUBTITLE=1 requires YOUDUB_SMOKE_TRANSCRIBE_TTS=1" >&2
+  exit 2
+fi
+if [[ "$SMOKE_INSPECT_TTS" == "1" && "$SMOKE_SUBTITLE" != "1" ]]; then
+  echo "error: YOUDUB_SMOKE_INSPECT_TTS=1 requires YOUDUB_SMOKE_SUBTITLE=1" >&2
+  exit 2
+fi
+if [[ "$SMOKE_REDUB_TTS" == "1" && "$SMOKE_INSPECT_TTS" != "1" ]]; then
+  echo "error: YOUDUB_SMOKE_REDUB_TTS=1 requires YOUDUB_SMOKE_INSPECT_TTS=1" >&2
   exit 2
 fi
 if [[ "$SMOKE_SYNTHESIZE" == "1" && "$SMOKE_SUBTITLE" != "1" ]]; then
@@ -142,6 +152,14 @@ if [[ "$SMOKE_TRANSCRIBE_TTS" == "1" ]]; then
   "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step transcribe-tts
 fi
 if [[ "$SMOKE_SUBTITLE" == "1" ]]; then
+  "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step subtitle
+fi
+if [[ "$SMOKE_INSPECT_TTS" == "1" ]]; then
+  "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step inspect-tts
+fi
+if [[ "$SMOKE_REDUB_TTS" == "1" ]]; then
+  "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step redub-tts
+  "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step transcribe-tts
   "$PYTHON_BIN" -m youdub.cli run-task "$task_id" --step subtitle
 fi
 if [[ "$SMOKE_SYNTHESIZE" == "1" ]]; then

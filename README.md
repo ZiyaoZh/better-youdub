@@ -357,6 +357,54 @@ export YOUDUB_TTS_ASR_INITIAL_PROMPT=以下是普通话的句子。
 `proportional_fallback`。最终输出的字幕文本会去掉每条字幕末尾的标点符号，
 `standard_translation` 仍保留完整标准译文用于追踪。
 
+`inspect-tts` 会复用 `translation.json`、`audio_tts.timings.json`、
+`audio_tts.transcript.json` 和 `subtitles.segments.json`，按译文片段聚合 TTS-ASR
+内容匹配、字幕 fallback、词级对齐置信度、漂移和拉伸状态，写出：
+
+- `tts.quality.json`
+- `tts.redub.plan.json`
+
+默认只有 `hard` 严重失败片段进入重配计划；短文本空 ASR 会先标记为 `review`，避免
+把“好吧”“嗯”等口头语无条件送入 GPU 重配。可以通过 CLI 或环境变量调节阈值：
+
+```bash
+python3 -m youdub.cli run-task <task-id> --step inspect-tts \
+  --tts-quality-max-segments-per-round 50 \
+  --tts-quality-max-task-hard-ratio 0.20
+```
+
+```bash
+export YOUDUB_TTS_QUALITY_HARD_SIMILARITY_MIN=0.45
+export YOUDUB_TTS_QUALITY_REVIEW_SIMILARITY_MIN=0.60
+export YOUDUB_TTS_QUALITY_HARD_ALIGNMENT_CONFIDENCE_MIN=0.35
+export YOUDUB_TTS_QUALITY_REVIEW_ALIGNMENT_CONFIDENCE_MIN=0.50
+export YOUDUB_TTS_QUALITY_HARD_DRIFT_SECONDS=2.0
+export YOUDUB_TTS_QUALITY_REVIEW_DRIFT_SECONDS=1.2
+export YOUDUB_TTS_QUALITY_EXTREME_STRETCH_MIN=0.75
+export YOUDUB_TTS_QUALITY_EXTREME_STRETCH_MAX=1.25
+export YOUDUB_TTS_QUALITY_MIN_TEXT_CHARS_FOR_EMPTY_ASR_HARD=6
+export YOUDUB_TTS_QUALITY_INCLUDE_REVIEW=0
+export YOUDUB_TTS_QUALITY_MAX_SEGMENTS_PER_ROUND=50
+export YOUDUB_TTS_QUALITY_MAX_TASK_HARD_RATIO=0.20
+```
+
+`redub-tts` 读取 `tts.redub.plan.json`，只重新生成计划里的 `segments/tts/*.wav`。
+旧片段会备份到 `segments/tts_versions/round-001/*.previous.wav`，新片段会写入同目录的
+`*.new.wav` 后替换当前 `segments/tts/0001.wav` 这类生效文件。重配后会重新构建
+`audio_tts.wav` 和 `audio_tts.timings.json`，并追加 `tts.redub.history.jsonl`。
+重配后需要重新运行 `transcribe-tts`、`subtitle`，再运行 `synthesize` 和发布相关步骤：
+
+```bash
+python3 -m youdub.cli run-task <task-id> --step redub-tts
+python3 -m youdub.cli run-task <task-id> --step transcribe-tts
+python3 -m youdub.cli run-task <task-id> --step subtitle
+```
+
+Web `run-all` 默认不启用自动重配。任务配置中的 `workflow.enable_tts_redub=true` 后，
+完整链路会在首次 `subtitle` 后执行 `inspect-tts -> redub-tts -> transcribe-tts ->
+subtitle`，然后继续 `synthesize` 和发布包步骤。`workflow.tts_redub_max_rounds`
+当前保留为配置语义，第一版默认只运行一轮。
+
 `synthesize` 读取：
 
 - `download.mp4`
@@ -669,6 +717,23 @@ YOUDUB_SMOKE_TRANSLATE=1 \
 YOUDUB_SMOKE_TTS=1 \
 YOUDUB_SMOKE_TRANSCRIBE_TTS=1 \
 YOUDUB_SMOKE_SUBTITLE=1 \
+YOUDUB_SMOKE_INSPECT_TTS=1 \
+OPENAI_API_KEY=sk-... \
+OPENAI_MODEL=gpt-... \
+scripts/gpu_smoke.sh
+```
+
+如果还要验证局部重配闭环，开启 `YOUDUB_SMOKE_REDUB_TTS=1`。脚本会在重配后重新运行
+`transcribe-tts` 和 `subtitle`：
+
+```bash
+YOUDUB_SMOKE_TRANSCRIBE=1 \
+YOUDUB_SMOKE_TRANSLATE=1 \
+YOUDUB_SMOKE_TTS=1 \
+YOUDUB_SMOKE_TRANSCRIBE_TTS=1 \
+YOUDUB_SMOKE_SUBTITLE=1 \
+YOUDUB_SMOKE_INSPECT_TTS=1 \
+YOUDUB_SMOKE_REDUB_TTS=1 \
 OPENAI_API_KEY=sk-... \
 OPENAI_MODEL=gpt-... \
 scripts/gpu_smoke.sh
@@ -718,6 +783,8 @@ docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> 
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step tts
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step transcribe-tts
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step subtitle
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step inspect-tts
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step redub-tts
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step synthesize
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step prepare-publish
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step publish-bilibili --publish-dry-run

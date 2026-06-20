@@ -8,6 +8,8 @@ from youdub.models import PipelineStep, StepStatus, Task, TaskStatus
 from youdub.publishing import BilibiliPublishConfig, PublishPackageConfig
 from youdub.synthesis import SynthesisConfig
 from youdub.tts import TTSConfig
+from youdub.tts_quality import TTSQualityConfig
+from youdub.tts_redub import RedubTTSConfig
 from youdub.translation import TranslationConfig
 from youdub.pipeline import PipelineRunner
 from youdub.transcription import WhisperXConfig
@@ -190,6 +192,48 @@ def test_pipeline_marks_subtitle_success(tmp_path: Path, monkeypatch) -> None:
     assert result.error is None
     assert result.steps[PipelineStep.SUBTITLE.value] == StepStatus.SUCCESS
     assert (tmp_path / "subtitles.segments.json").exists()
+
+
+def test_pipeline_marks_inspect_tts_success(tmp_path: Path, monkeypatch) -> None:
+    task = Task(id="abc123", title="demo", source="/tmp/demo.mp4", folder=tmp_path)
+    config = TTSQualityConfig(include_review=True)
+
+    def fake_inspect(task_dir: Path, quality_config: TTSQualityConfig) -> Path:
+        assert task_dir == tmp_path
+        assert quality_config == config
+        output = task_dir / "tts.quality.json"
+        output.write_text("{}", encoding="utf-8")
+        return output
+
+    monkeypatch.setattr(pipeline, "inspect_tts_quality", fake_inspect)
+
+    result = PipelineRunner(tts_quality_config=config).run_step(task, PipelineStep.INSPECT_TTS)
+
+    assert result.status == TaskStatus.SUCCESS
+    assert result.steps[PipelineStep.INSPECT_TTS.value] == StepStatus.SUCCESS
+    assert (tmp_path / "tts.quality.json").exists()
+
+
+def test_pipeline_marks_redub_tts_success(tmp_path: Path, monkeypatch) -> None:
+    task = Task(id="abc123", title="demo", source="/tmp/demo.mp4", folder=tmp_path)
+    tts_config = TTSConfig(model="openbmb/VoxCPM2")
+    redub_config = RedubTTSConfig(round=1)
+
+    def fake_redub(task_dir: Path, incoming_tts_config: TTSConfig, incoming_redub_config: RedubTTSConfig) -> Path:
+        assert task_dir == tmp_path
+        assert incoming_tts_config == tts_config
+        assert incoming_redub_config == redub_config
+        output = task_dir / "audio_tts.wav"
+        output.write_bytes(b"redub")
+        return output
+
+    monkeypatch.setattr(pipeline, "redub_tts", fake_redub)
+
+    result = PipelineRunner(tts_config=tts_config, redub_tts_config=redub_config).run_step(task, PipelineStep.REDUB_TTS)
+
+    assert result.status == TaskStatus.SUCCESS
+    assert result.steps[PipelineStep.REDUB_TTS.value] == StepStatus.SUCCESS
+    assert (tmp_path / "audio_tts.wav").exists()
 
 
 def test_pipeline_marks_synthesize_success(tmp_path: Path, monkeypatch) -> None:

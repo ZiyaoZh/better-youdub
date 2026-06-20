@@ -597,7 +597,10 @@ def test_web_force_rerun_cleans_step_and_downstream_outputs(monkeypatch, tmp_pat
         PipelineStep.TRANSCRIBE,
         PipelineStep.TRANSLATE,
         PipelineStep.TTS,
+        PipelineStep.TRANSCRIBE_TTS,
         PipelineStep.SUBTITLE,
+        PipelineStep.INSPECT_TTS,
+        PipelineStep.REDUB_TTS,
         PipelineStep.SYNTHESIZE,
         PipelineStep.PREPARE_PUBLISH,
         PipelineStep.PUBLISH_BILIBILI,
@@ -628,6 +631,63 @@ def test_web_force_rerun_cleans_step_and_downstream_outputs(monkeypatch, tmp_pat
     assert not (task.folder / "video.mp4").exists()
     assert task.steps[PipelineStep.SEPARATE_AUDIO.value] == StepStatus.SUCCESS
     assert task.steps[PipelineStep.TRANSLATE.value] == StepStatus.PENDING
+
+
+def test_web_redub_cleans_tts_downstream_outputs_only(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task_payload = client.post("/api/tasks/local", json={"source": str(source), "title": "Redub Clean"}).json()
+    store = web_module._store()
+    task = store.get(task_payload["id"])
+    for name in (
+        "audio_tts.wav",
+        "audio_tts.timings.json",
+        "audio_tts.transcript.json",
+        "subtitles.segments.json",
+        "subtitles.srt",
+        "audio_mixed.m4a",
+        "video.mp4",
+        "publish.json",
+        "tts.quality.json",
+        "tts.redub.history.jsonl",
+    ):
+        (task.folder / name).write_bytes(b"old")
+    (task.folder / "tts.redub.plan.json").write_text('{"segments":[{"tts_index":1}]}', encoding="utf-8")
+    for step in (
+        PipelineStep.TRANSCRIBE_TTS,
+        PipelineStep.SUBTITLE,
+        PipelineStep.INSPECT_TTS,
+        PipelineStep.REDUB_TTS,
+        PipelineStep.SYNTHESIZE,
+        PipelineStep.PREPARE_PUBLISH,
+    ):
+        task.mark_step(step, StepStatus.SUCCESS)
+    store.update(task)
+
+    class FakeRunner:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def run_step(self, task, step: PipelineStep, task_lock=None):
+            task.mark_step(step, StepStatus.SUCCESS)
+            task.status = TaskStatus.SUCCESS
+            return task
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+
+    web_module._run_step_job(task.id, PipelineStep.REDUB_TTS)
+    task = store.get(task.id)
+
+    assert (task.folder / "audio_tts.wav").exists()
+    assert (task.folder / "audio_tts.timings.json").exists()
+    assert (task.folder / "tts.quality.json").exists()
+    assert (task.folder / "tts.redub.history.jsonl").exists()
+    assert not (task.folder / "audio_tts.transcript.json").exists()
+    assert not (task.folder / "subtitles.srt").exists()
+    assert not (task.folder / "video.mp4").exists()
+    assert task.steps[PipelineStep.REDUB_TTS.value] == StepStatus.SUCCESS
+    assert task.steps[PipelineStep.TRANSCRIBE_TTS.value] == StepStatus.PENDING
 
 
 def test_web_schedules_queued_task_without_holding_task_lock(monkeypatch, tmp_path: Path) -> None:

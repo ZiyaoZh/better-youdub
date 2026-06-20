@@ -6,6 +6,8 @@ const STEPS = [
   ["tts", "配音"],
   ["transcribe-tts", "配音识别"],
   ["subtitle", "字幕"],
+  ["inspect-tts", "配音质检"],
+  ["redub-tts", "局部重配"],
   ["synthesize", "合成"],
   ["prepare-publish", "发布包"],
   ["publish-bilibili", "Bilibili"],
@@ -87,6 +89,34 @@ const CONFIG_SECTIONS = [
     ],
   },
   {
+    key: "tts_quality",
+    label: "配音质检",
+    fields: [
+      ["hard_similarity_min", "严重相似度阈值", "number", {min: 0, max: 1, step: 0.01}],
+      ["review_similarity_min", "复核相似度阈值", "number", {min: 0, max: 1, step: 0.01}],
+      ["hard_alignment_confidence_min", "严重对齐置信度", "number", {min: 0, max: 1, step: 0.01}],
+      ["review_alignment_confidence_min", "复核对齐置信度", "number", {min: 0, max: 1, step: 0.01}],
+      ["hard_drift_seconds", "严重漂移秒数", "number", {min: 0, step: 0.1}],
+      ["review_drift_seconds", "复核漂移秒数", "number", {min: 0, step: 0.1}],
+      ["extreme_stretch_min", "极限拉伸下限", "number", {step: 0.01}],
+      ["extreme_stretch_max", "极限拉伸上限", "number", {step: 0.01}],
+      ["min_text_chars_for_empty_asr_hard", "空识别严重最小字数", "integer", {min: 1}],
+      ["include_review", "重配包含复核片段", "boolean"],
+      ["max_segments_per_round", "每轮最大重配片段", "integer", {min: 0}],
+      ["max_task_hard_ratio", "任务复核严重比例", "number", {min: 0, max: 1, step: 0.01}],
+      ["round", "质检轮次", "integer", {min: 1}],
+      ["max_rounds", "最大轮次", "integer", {min: 1}],
+    ],
+  },
+  {
+    key: "redub_tts",
+    label: "局部重配",
+    fields: [
+      ["round", "重配轮次", "integer", {min: 1}],
+      ["max_rounds", "最大重配轮次", "integer", {min: 1}],
+    ],
+  },
+  {
     key: "synthesis",
     label: "合成",
     fields: [
@@ -129,6 +159,8 @@ const CONFIG_SECTIONS = [
     label: "流程",
     fields: [
       ["include_bilibili_upload", "完整链路包含 Bilibili", "boolean"],
+      ["enable_tts_redub", "完整链路包含局部重配", "boolean"],
+      ["tts_redub_max_rounds", "最大重配轮次", "integer", {min: 1}],
     ],
   },
 ]
@@ -139,6 +171,8 @@ const STEP_CONFIG_SECTIONS = {
   tts: "tts",
   "transcribe-tts": "whisperx",
   subtitle: "synthesis",
+  "inspect-tts": "tts_quality",
+  "redub-tts": "redub_tts",
   synthesize: "synthesis",
   "prepare-publish": "publish",
   "publish-bilibili": "bilibili",

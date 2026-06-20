@@ -12,6 +12,8 @@ from .publishing import (
 from .subtitles import build_subtitles_from_tts_asr
 from .synthesis import SynthesisConfig, synthesize_video
 from .tts import TTSConfig, generate_tts
+from .tts_quality import TTSQualityConfig, inspect_tts_quality
+from .tts_redub import RedubTTSConfig, redub_tts
 from .translation import TranslationConfig, translate_task
 from .transcription import (
     WhisperXConfig,
@@ -33,6 +35,8 @@ class PipelineRunner:
         synthesis_config: SynthesisConfig | None = None,
         publish_config: PublishPackageConfig | None = None,
         bilibili_publish_config: BilibiliPublishConfig | None = None,
+        tts_quality_config: TTSQualityConfig | None = None,
+        redub_tts_config: RedubTTSConfig | None = None,
     ):
         self.whisperx_config = whisperx_config
         self.translation_config = translation_config
@@ -40,6 +44,8 @@ class PipelineRunner:
         self.synthesis_config = synthesis_config
         self.publish_config = publish_config
         self.bilibili_publish_config = bilibili_publish_config
+        self.tts_quality_config = tts_quality_config
+        self.redub_tts_config = redub_tts_config
 
     def run_step(self, task: Task, step: PipelineStep, task_lock: TaskLock | None = None) -> Task:
         if task_lock is None:
@@ -75,6 +81,10 @@ class PipelineRunner:
                 transcribe_tts_audio(task.folder, self._whisperx_config())
             elif step == PipelineStep.SUBTITLE:
                 build_subtitles_from_tts_asr(task.folder)
+            elif step == PipelineStep.INSPECT_TTS:
+                inspect_tts_quality(task.folder, self.tts_quality_config or TTSQualityConfig.from_env())
+            elif step == PipelineStep.REDUB_TTS:
+                redub_tts(task.folder, self._tts_config(), self.redub_tts_config or RedubTTSConfig.from_env())
             elif step == PipelineStep.SYNTHESIZE:
                 synthesize_video(task.folder, self._synthesis_config())
             elif step == PipelineStep.PREPARE_PUBLISH:

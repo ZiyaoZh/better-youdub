@@ -48,6 +48,8 @@ ARTIFACTS: dict[str, tuple[str, str]] = {
     "summary": ("summary.json", "application/json"),
     "transcript": ("transcript.json", "application/json"),
     "translation": ("translation.json", "application/json"),
+    "tts-quality": ("tts.quality.json", "application/json"),
+    "tts-redub-plan": ("tts.redub.plan.json", "application/json"),
     "subtitles": ("subtitles.srt", "application/x-subrip"),
     "bilibili-dry-run": ("bilibili.dry-run.json", "application/json"),
 }
@@ -67,6 +69,7 @@ GPU_STEPS = {
     PipelineStep.TRANSCRIBE_DIARIZE,
     PipelineStep.TTS,
     PipelineStep.TRANSCRIBE_TTS,
+    PipelineStep.REDUB_TTS,
 }
 
 
@@ -710,6 +713,7 @@ def _download_url_job(
         )
         task = _merge_downloaded_task(store, task, incoming)
         store.update(task)
+        _alias_running_future(task_id, task.id)
         _cleanup_pending_task_dir(config.root, task_lock.task_dir, task.folder)
         return task.id
     except Exception as exc:
@@ -731,9 +735,9 @@ def _merge_downloaded_task(store: TaskStore, existing: Task, incoming: Task) -> 
     stable = store.find_by_source_key(incoming.source_key) if incoming.source_key else None
     if stable is not None and stable.id != existing.id:
         merged = _downloaded_task_payload(stable, incoming, config=existing.config)
+        _TASK_ALIASES[existing.id] = stable.id
         store.update(merged)
         store.delete(existing.id)
-        _TASK_ALIASES[existing.id] = stable.id
         return merged
     return _downloaded_task_payload(existing, incoming)
 
@@ -756,6 +760,14 @@ def _downloaded_task_payload(existing: Task, incoming: Task, config: dict[str, A
     )
     merged.mark_step(PipelineStep.INGEST, StepStatus.SUCCESS)
     return merged
+
+
+def _alias_running_future(source_id: str, target_id: str) -> None:
+    if source_id == target_id:
+        return
+    future = _RUNNING.get(source_id)
+    if future is not None:
+        _RUNNING[target_id] = future
 
 
 def _cleanup_pending_task_dir(root: Path, old_folder: Path, new_folder: Path) -> None:
@@ -782,7 +794,8 @@ def _run_step_job(
         if isinstance(task_lock, str):
             task_lock = TaskLock(task.folder, task_lock).acquire(blocking=False)
             acquired_here = True
-        _clear_step_outputs(task, step)
+        if step != PipelineStep.REDUB_TTS or _redub_plan_has_segments(task):
+            _clear_step_outputs(task, step)
         task.status = TaskStatus.RUNNING
         task.error = None
         task.mark_step(step, StepStatus.RUNNING)
@@ -797,6 +810,8 @@ def _run_step_job(
             synthesis_config=options.synthesis,
             publish_config=options.publish,
             bilibili_publish_config=options.bilibili,
+            tts_quality_config=options.tts_quality,
+            redub_tts_config=options.redub_tts,
         ).run_step(task, step, task_lock=task_lock)
     except Exception as exc:
         task.status = TaskStatus.FAILED
@@ -891,6 +906,12 @@ def _run_all_steps_for_task(task: Task) -> tuple[PipelineStep, ...]:
         PipelineStep.PREPARE_PUBLISH,
     ]
     workflow = task.config.get("workflow") if isinstance(task.config, dict) else None
+    enable_tts_redub = isinstance(workflow, dict) and bool(workflow.get("enable_tts_redub"))
+    if enable_tts_redub:
+        steps.insert(steps.index(PipelineStep.SYNTHESIZE), PipelineStep.INSPECT_TTS)
+        steps.insert(steps.index(PipelineStep.SYNTHESIZE), PipelineStep.REDUB_TTS)
+        steps.insert(steps.index(PipelineStep.SYNTHESIZE), PipelineStep.TRANSCRIBE_TTS)
+        steps.insert(steps.index(PipelineStep.SYNTHESIZE), PipelineStep.SUBTITLE)
     include_bilibili_upload = isinstance(workflow, dict) and bool(workflow.get("include_bilibili_upload"))
     if include_bilibili_upload:
         steps.append(PipelineStep.PUBLISH_BILIBILI)
@@ -923,6 +944,8 @@ STEP_OUTPUTS: dict[PipelineStep, tuple[str, ...]] = {
         "audio_tts.transcript.json",
     ),
     PipelineStep.SUBTITLE: ("subtitles.segments.json", "subtitles.srt"),
+    PipelineStep.INSPECT_TTS: ("tts.quality.json", "tts.redub.plan.json"),
+    PipelineStep.REDUB_TTS: ("audio_tts.wav", "audio_tts.timings.json"),
     PipelineStep.SYNTHESIZE: ("video.mp4",),
     PipelineStep.PREPARE_PUBLISH: ("publish.json", "publish.md", "cover.jpg"),
     PipelineStep.PUBLISH_BILIBILI: ("bilibili.dry-run.json", "bilibili.json"),
@@ -942,6 +965,7 @@ STEP_CLEANUP_GROUPS: tuple[tuple[tuple[PipelineStep, ...], tuple[str, ...]], ...
         ("audio_tts.transcript.whisper.json", "audio_tts.transcript.aligned.json", "audio_tts.transcript.json"),
     ),
     ((PipelineStep.SUBTITLE,), ("subtitles.segments.json", "subtitles.srt")),
+    ((PipelineStep.INSPECT_TTS,), ("tts.quality.json", "tts.redub.plan.json")),
     ((PipelineStep.SYNTHESIZE,), ("audio_mixed.m4a", "video.mp4")),
     ((PipelineStep.PREPARE_PUBLISH,), ("publish.json", "publish.md", "cover.jpg")),
     ((PipelineStep.PUBLISH_BILIBILI,), ("bilibili.dry-run.json", "bilibili.json")),
@@ -984,6 +1008,17 @@ def _has_step_resource(path: Path) -> bool:
 
 
 def _clear_step_outputs(task: Task, step: PipelineStep) -> None:
+    if step == PipelineStep.INSPECT_TTS:
+        _remove_task_resource(task.folder, "tts.quality.json")
+        _remove_task_resource(task.folder, "tts.redub.plan.json")
+        if step.value in task.steps:
+            task.mark_step(step, StepStatus.PENDING)
+        task.status = TaskStatus.PENDING
+        task.error = None
+        return
+    if step == PipelineStep.REDUB_TTS:
+        _clear_redub_downstream_outputs(task)
+        return
     start = _cleanup_start_index(step)
     if start is None:
         return
@@ -1005,6 +1040,49 @@ def _cleanup_start_index(step: PipelineStep) -> int | None:
         if step in steps:
             return index
     return None
+
+
+def _clear_redub_downstream_outputs(task: Task) -> None:
+    resources = (
+        "audio_tts.transcript.whisper.json",
+        "audio_tts.transcript.aligned.json",
+        "audio_tts.transcript.json",
+        "subtitles.segments.json",
+        "subtitles.srt",
+        "audio_mixed.m4a",
+        "video.mp4",
+        "publish.json",
+        "publish.md",
+        "cover.jpg",
+        "bilibili.dry-run.json",
+        "bilibili.json",
+    )
+    for resource in resources:
+        _remove_task_resource(task.folder, resource)
+    for affected in (
+        PipelineStep.REDUB_TTS,
+        PipelineStep.TRANSCRIBE_TTS,
+        PipelineStep.SUBTITLE,
+        PipelineStep.SYNTHESIZE,
+        PipelineStep.PREPARE_PUBLISH,
+        PipelineStep.PUBLISH_BILIBILI,
+    ):
+        if affected.value in task.steps:
+            task.mark_step(affected, StepStatus.PENDING)
+    task.status = TaskStatus.PENDING
+    task.error = None
+
+
+def _redub_plan_has_segments(task: Task) -> bool:
+    path = task.folder / "tts.redub.plan.json"
+    if not path.exists():
+        return True
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return True
+    segments = data.get("segments") if isinstance(data, dict) else None
+    return isinstance(segments, list) and bool(segments)
 
 
 def _remove_task_resource(task_dir: Path, resource: str) -> None:

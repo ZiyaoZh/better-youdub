@@ -13,6 +13,8 @@ from .synthesis import SynthesisConfig
 from .translation import TranslationConfig
 from .transcription import WhisperXConfig
 from .tts import TTSConfig
+from .tts_quality import TTSQualityConfig
+from .tts_redub import RedubTTSConfig
 
 MASKED_SECRET = "********"
 
@@ -46,11 +48,15 @@ def default_task_config(config: AppConfig, *, include_secrets: bool = False) -> 
         "whisperx": whisperx,
         "translation": translation,
         "tts": tts,
+        "tts_quality": _config_dict(options.tts_quality),
+        "redub_tts": _config_dict(options.redub_tts),
         "synthesis": _config_dict(options.synthesis),
         "publish": _config_dict(options.publish),
         "bilibili": _config_dict(options.bilibili),
         "workflow": {
             "include_bilibili_upload": False,
+            "enable_tts_redub": False,
+            "tts_redub_max_rounds": options.redub_tts.max_rounds,
         },
     }
     if not include_secrets:
@@ -131,6 +137,7 @@ def runtime_options_from_task_config(config: AppConfig, overrides: Mapping[str, 
         for field in fields:
             if not _optional_str(values[section][field]):
                 values[section][field] = defaults[section][field]
+    workflow_max_rounds = int(values["workflow"]["tts_redub_max_rounds"])
     return RuntimeOptions(
         whisperx=WhisperXConfig(
             models_dir=config.models_dir,
@@ -183,6 +190,26 @@ def runtime_options_from_task_config(config: AppConfig, overrides: Mapping[str, 
             stretch_local_max=float(values["tts"]["stretch_local_max"]),
             stretch_noop_epsilon=float(values["tts"]["stretch_noop_epsilon"]),
             cache_model=bool(values["tts"]["cache_model"]),
+        ),
+        tts_quality=TTSQualityConfig(
+            hard_similarity_min=float(values["tts_quality"]["hard_similarity_min"]),
+            review_similarity_min=float(values["tts_quality"]["review_similarity_min"]),
+            hard_alignment_confidence_min=float(values["tts_quality"]["hard_alignment_confidence_min"]),
+            review_alignment_confidence_min=float(values["tts_quality"]["review_alignment_confidence_min"]),
+            hard_drift_seconds=float(values["tts_quality"]["hard_drift_seconds"]),
+            review_drift_seconds=float(values["tts_quality"]["review_drift_seconds"]),
+            extreme_stretch_min=float(values["tts_quality"]["extreme_stretch_min"]),
+            extreme_stretch_max=float(values["tts_quality"]["extreme_stretch_max"]),
+            min_text_chars_for_empty_asr_hard=int(values["tts_quality"]["min_text_chars_for_empty_asr_hard"]),
+            include_review=bool(values["tts_quality"]["include_review"]),
+            max_segments_per_round=int(values["tts_quality"]["max_segments_per_round"]),
+            max_task_hard_ratio=float(values["tts_quality"]["max_task_hard_ratio"]),
+            round=int(values["tts_quality"]["round"]),
+            max_rounds=workflow_max_rounds,
+        ),
+        redub_tts=RedubTTSConfig(
+            round=int(values["redub_tts"]["round"]),
+            max_rounds=workflow_max_rounds,
         ),
         synthesis=SynthesisConfig(
             burn_subtitles=bool(values["synthesis"]["burn_subtitles"]),

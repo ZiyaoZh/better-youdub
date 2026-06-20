@@ -302,6 +302,22 @@ BILI_BILI_JCT=
   或 `audio_tts.timings.json` 的句级实际时间分配，最后才使用 `proportional_fallback`。
   最终字幕显示文本会去掉每条字幕末尾的标点符号，完整标准译文保留在
   `standard_translation` 字段。
+- TTS 质量检测入口：`run-task --step inspect-tts` 已接入；读取
+  `translation.json`、`audio_tts.timings.json`、`audio_tts.transcript.json` 和
+  `subtitles.segments.json`，按译文片段聚合 ASR 文本匹配、字幕 fallback、对齐置信度、
+  漂移和拉伸状态，输出 `tts.quality.json` 与 `tts.redub.plan.json`。默认只有
+  `hard` 片段进入重配计划，`YOUDUB_TTS_QUALITY_INCLUDE_REVIEW=1` 后可把 `review`
+  片段也纳入计划；`YOUDUB_TTS_QUALITY_MAX_SEGMENTS_PER_ROUND=50` 用于限制单轮 GPU
+  成本。
+- TTS 局部重配入口：`run-task --step redub-tts` 已接入；读取
+  `tts.redub.plan.json`，复用 `segments/vocals/{index}.wav` 或 fallback 参考重新生成
+  计划内片段。旧片段备份到 `segments/tts_versions/round-001/*.previous.wav`，新片段
+  写入 `*.new.wav` 并替换 `segments/tts/*.wav`，随后重建 `audio_tts.wav` 和
+  `audio_tts.timings.json`，追加 `tts.redub.history.jsonl`。运行后必须重新执行
+  `transcribe-tts`、`subtitle`、`synthesize` 和发布相关步骤。
+- Web `run-all` 默认不启用自动重配。任务配置 `workflow.enable_tts_redub=true` 后，
+  链路变为 `... tts -> transcribe-tts -> subtitle -> inspect-tts -> redub-tts ->
+  transcribe-tts -> subtitle -> synthesize ...`。第一版默认一轮，避免 GPU 成本不可控。
 - 合成入口：`run-task --step synthesize` 已接入；读取 `download.mp4`、
   `audio_tts.wav`、`audio_instruments.wav` 和 `subtitles.srt`，输出
   `audio_mixed.m4a` 与 `video.mp4`。合成阶段依赖 FFmpeg `subtitles` filter 和
@@ -355,7 +371,7 @@ YOUDUB_SMOKE_TRANSCRIBE=1 HF_READ_TOKEN=hf_... scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_WHISPER_DIARIZATION=0 scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
-YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_SMOKE_TRANSCRIBE_TTS=1 YOUDUB_SMOKE_SUBTITLE=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
+YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_SMOKE_TRANSCRIBE_TTS=1 YOUDUB_SMOKE_SUBTITLE=1 YOUDUB_SMOKE_INSPECT_TTS=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_SMOKE_TRANSLATE=1 YOUDUB_SMOKE_TTS=1 YOUDUB_SMOKE_TRANSCRIBE_TTS=1 YOUDUB_SMOKE_SUBTITLE=1 YOUDUB_SMOKE_SYNTHESIZE=1 YOUDUB_SMOKE_PREPARE_PUBLISH=1 YOUDUB_SMOKE_PUBLISH_BILIBILI=1 YOUDUB_WHISPER_DIARIZATION=0 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-... scripts/gpu_smoke.sh
 scripts/gpu_smoke.sh /data/samples/demo.mp4 /data/samples/download.info.json /data/samples/download.webp
 scripts/gpu_smoke.sh "https://www.youtube.com/watch?v=6o68Fg2-bhM" /data/cookies/cookies.txt
@@ -374,6 +390,8 @@ docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> 
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step tts
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step transcribe-tts
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step subtitle
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step inspect-tts
+docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step redub-tts
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step synthesize
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step prepare-publish
 docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step publish-bilibili --publish-dry-run

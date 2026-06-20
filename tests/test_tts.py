@@ -10,6 +10,7 @@ from youdub.tts import (
     split_reference_audio,
     write_tts_mix,
 )
+from youdub.tts_redub import RedubTTSConfig, redub_tts
 
 
 def _audio_modules():
@@ -163,3 +164,51 @@ def test_write_tts_mix_aligns_long_segments_without_accumulating_drift(tmp_path:
     assert timings[-1]["actual_end"] < sum(item["raw_duration"] for item in timings)
     assert all(item["alignment_status"] in {"stretched", "overflow"} for item in timings)
     assert all(item["stretch_ratio"] < 1.0 for item in timings)
+
+
+def test_redub_tts_replaces_segment_and_rebuilds_mix(tmp_path: Path, monkeypatch) -> None:
+    np, sf = _audio_modules()
+    (tmp_path / "translation.json").write_text(
+        json.dumps(
+            [
+                {"start": 0.0, "end": 0.5, "translation": "第一句。"},
+                {"start": 0.5, "end": 1.0, "translation": "第二句。"},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    vocals_dir = tmp_path / "segments" / "vocals"
+    tts_dir = tmp_path / "segments" / "tts"
+    vocals_dir.mkdir(parents=True)
+    tts_dir.mkdir(parents=True)
+    for index in range(1, 3):
+        sf.write(vocals_dir / f"{index:04d}.wav", np.ones(16000, dtype=np.float32) * 0.05, 16000)
+        sf.write(tts_dir / f"{index:04d}.wav", np.zeros(800, dtype=np.float32), 16000)
+    (tmp_path / "tts.redub.plan.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "round": 1,
+                "max_rounds": 1,
+                "segments": [{"segment_id": 0, "tts_index": 1, "translation": "第一句。", "similarity": 0.0}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("youdub.tts_redub.load_voxcpm_model", lambda _config: _FakeModel())
+    unloaded = []
+    monkeypatch.setattr("youdub.tts_redub.unload_voxcpm_model", lambda: unloaded.append(True))
+
+    redub_tts(tmp_path, TTSConfig(min_reference_ms=100, align_audio=False), RedubTTSConfig())
+
+    audio, _sample_rate = sf.read(tts_dir / "0001.wav", dtype="float32")
+    assert float(audio.max()) > 0.09
+    assert (tmp_path / "segments" / "tts_versions" / "round-001" / "0001.previous.wav").exists()
+    assert (tmp_path / "segments" / "tts_versions" / "round-001" / "0001.new.wav").exists()
+    assert (tmp_path / "audio_tts.wav").exists()
+    history = (tmp_path / "tts.redub.history.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(history) == 1
+    assert json.loads(history[0])["status"] == "success"
+    assert unloaded == [True]
