@@ -4,6 +4,7 @@
 !.env.example
 command.md
 Dockerfile
+!codex-container/Dockerfile
 
 # Runtime data
 data/
@@ -30,4 +31,3 @@ dist/
 .DS_Store
 .idea/
 .vscode/
-

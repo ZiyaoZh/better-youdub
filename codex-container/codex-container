@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  codex-container [options] [command...]
+
+Options:
+  --agent codex|claude   Start the selected coding agent. Defaults to codex.
+  --repo PATH            Mount PATH as the workspace. Defaults to the current directory.
+  --image IMAGE          Docker image to run. Defaults to codex-universal:latest.
+  --name NAME            Container name. Defaults to codex-<repo-name>.
+  --home PATH            Persistent container home. Defaults to ~/.cache/codex-container/home.
+  --docker               Mount /var/run/docker.sock when it exists.
+  --no-ssh               Do not mount ~/.ssh.
+  --no-gitconfig         Do not mount ~/.gitconfig.
+  -h, --help             Show this help.
+
+Examples:
+  codex-container
+  codex-container --agent claude
+  codex-container bash
+  codex-container --repo /path/to/repo --agent claude
+  CODEX_IMAGE=my-codex:dev codex-container
+EOF
+}
+
+IMAGE="${CODEX_IMAGE:-codex-universal:latest}"
+REPO_DIR="${CODEX_REPO_DIR:-$PWD}"
+AGENT="${CODEX_AGENT:-codex}"
+CONTAINER_NAME="${CODEX_CONTAINER_NAME:-}"
+MOUNT_DOCKER="${CODEX_MOUNT_DOCKER:-0}"
+MOUNT_SSH=1
+MOUNT_GITCONFIG=1
+CONTAINER_HOME="${CODEX_CONTAINER_HOME:-}"
+
+command_args=()
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --agent)
+      [[ "$#" -ge 2 ]] || { echo "Missing value for --agent" >&2; exit 2; }
+      AGENT="$2"
+      shift 2
+      ;;
+    --repo)
+      [[ "$#" -ge 2 ]] || { echo "Missing value for --repo" >&2; exit 2; }
+      REPO_DIR="$2"
+      shift 2
+      ;;
+    --image)
+      [[ "$#" -ge 2 ]] || { echo "Missing value for --image" >&2; exit 2; }
+      IMAGE="$2"
+      shift 2
+      ;;
+    --name)
+      [[ "$#" -ge 2 ]] || { echo "Missing value for --name" >&2; exit 2; }
+      CONTAINER_NAME="$2"
+      shift 2
+      ;;
+    --home)
+      [[ "$#" -ge 2 ]] || { echo "Missing value for --home" >&2; exit 2; }
+      CONTAINER_HOME="$2"
+      shift 2
+      ;;
+    --docker)
+      MOUNT_DOCKER=1
+      shift
+      ;;
+    --no-ssh)
+      MOUNT_SSH=0
+      shift
+      ;;
+    --no-gitconfig)
+      MOUNT_GITCONFIG=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      command_args+=("$@")
+      break
+      ;;
+    *)
+      command_args+=("$@")
+      break
+      ;;
+  esac
+done
+
+case "$AGENT" in
+  codex|claude) ;;
+  *)
+    echo "Unsupported agent: $AGENT" >&2
+    echo "Expected: codex or claude" >&2
+    exit 2
+    ;;
+esac
+
+if [[ ! -d "$REPO_DIR" ]]; then
+  echo "Repo directory does not exist: $REPO_DIR" >&2
+  exit 1
+fi
+
+REPO_DIR="$(cd "$REPO_DIR" && pwd)"
+REPO_NAME="$(basename "$REPO_DIR" | tr -c 'a-zA-Z0-9_.-' '-')"
+CONTAINER_NAME="${CONTAINER_NAME:-codex-${REPO_NAME}}"
+CONTAINER_WORKDIR="/workspace/repo"
+CACHE_ROOT="${CODEX_CACHE_ROOT:-$HOME/.cache/codex-container}"
+CONTAINER_HOME="${CONTAINER_HOME:-$CACHE_ROOT/home}"
+
+docker_args=(
+  run
+  --rm
+  -it
+  --name "$CONTAINER_NAME"
+  -e "CODEX_UID=$(id -u)"
+  -e "CODEX_GID=$(id -g)"
+  -e "TERM=${TERM:-xterm-256color}"
+  -e "COLORTERM=${COLORTERM:-truecolor}"
+  -v "$REPO_DIR:$CONTAINER_WORKDIR"
+  -w "$CONTAINER_WORKDIR"
+)
+
+mount_if_exists() {
+  local source="$1"
+  local target="$2"
+  local mode="${3:-}"
+
+  if [[ -e "$source" ]]; then
+    if [[ -n "$mode" ]]; then
+      docker_args+=(-v "$source:$target:$mode")
+    else
+      docker_args+=(-v "$source:$target")
+    fi
+  fi
+}
+
+mkdir -p "$HOME/.codex" "$HOME/.claude" "$CACHE_ROOT"/{npm,pip,cargo,go,maven,gradle,cache} "$CONTAINER_HOME"
+
+docker_args+=(
+  -v "$CONTAINER_HOME:/home/codex"
+  -v "$HOME/.codex:/home/codex/.codex"
+  -v "$HOME/.claude:/home/codex/.claude"
+  -v "$CACHE_ROOT/npm:/home/codex/.npm"
+  -v "$CACHE_ROOT/pip:/home/codex/.cache/pip"
+  -v "$CACHE_ROOT/cargo:/home/codex/.cargo"
+  -v "$CACHE_ROOT/go:/home/codex/go"
+  -v "$CACHE_ROOT/maven:/home/codex/.m2"
+  -v "$CACHE_ROOT/gradle:/home/codex/.gradle"
+  -v "$CACHE_ROOT/cache:/cache"
+)
+
+if [[ "$MOUNT_SSH" == "1" ]]; then
+  mount_if_exists "$HOME/.ssh" "/home/codex/.ssh" "ro"
+fi
+
+if [[ "$MOUNT_GITCONFIG" == "1" ]]; then
+  mount_if_exists "$HOME/.gitconfig" "/home/codex/.gitconfig" "ro"
+fi
+
+mount_if_exists "$HOME/.git-credentials" "/home/codex/.git-credentials" "ro"
+mount_if_exists "$HOME/.gnupg" "/home/codex/.gnupg" "ro"
+mount_if_exists "$HOME/.claude.json" "/home/codex/.claude.json"
+
+if [[ "$MOUNT_DOCKER" == "1" ]]; then
+  if [[ -S /var/run/docker.sock ]]; then
+    docker_args+=(-v /var/run/docker.sock:/var/run/docker.sock)
+  else
+    echo "Docker socket was requested but /var/run/docker.sock does not exist." >&2
+    exit 1
+  fi
+fi
+
+docker_args+=("$IMAGE")
+
+if [[ "${#command_args[@]}" -gt 0 ]]; then
+  docker_args+=("${command_args[@]}")
+else
+  docker_args+=("$AGENT")
+fi
+
+exec docker "${docker_args[@]}"
