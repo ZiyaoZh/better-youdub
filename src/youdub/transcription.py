@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import inspect
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -268,6 +269,11 @@ def process_transcript(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]
     processed = []
     for segment in transcript:
         text = str(segment.get("text", ""))
+        normalized_text = _normalize_transcript_text(text)
+        if not _has_speech_content(normalized_text):
+            _attach_punctuation_to_previous_segment(processed, segment, normalized_text)
+            continue
+
         text_no_spaces = text.replace(" ", "")
         words = text.split(" ")
 
@@ -283,14 +289,41 @@ def process_transcript(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]
             continue
 
         segment = dict(segment)
-        segment["text"] = (
-            text.replace("B-80", "BAD")
-            .replace("Dark Monkeys", "Dart Monkeys")
-            .replace("dark monkeys", "dart monkeys")
-        )
+        segment["text"] = normalized_text
         processed.append(segment)
 
     return processed
+
+
+def _normalize_transcript_text(text: str) -> str:
+    return (
+        text.replace("B-80", "BAD")
+        .replace("Dark Monkeys", "Dart Monkeys")
+        .replace("dark monkeys", "dart monkeys")
+    )
+
+
+def _has_speech_content(text: str) -> bool:
+    return any(unicodedata.category(char)[0] in {"L", "N"} for char in text)
+
+
+def _attach_punctuation_to_previous_segment(
+    processed: list[dict[str, Any]],
+    segment: dict[str, Any],
+    punctuation: str,
+) -> None:
+    punctuation = punctuation.strip()
+    if not punctuation or not processed:
+        return
+    previous = processed[-1]
+    if str(previous.get("speaker", "SPEAKER_00")) != str(segment.get("speaker", "SPEAKER_00")):
+        return
+    previous_text = str(previous.get("text", "")).rstrip()
+    if not previous_text or previous_text[-1] in ".!?。！？":
+        return
+    previous["text"] = f"{previous_text}{punctuation}"
+    if "end" in segment:
+        previous["end"] = max(float(previous.get("end", 0.0)), float(segment["end"]))
 
 
 def run_whisper(

@@ -5,6 +5,7 @@ import hashlib
 import math
 import re
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -339,7 +340,15 @@ def ensure_segment_translations(
             "text": str(segment.get("text", "")).strip(),
         }
         prior = existing.get(segment_id)
-        if _matches_segment(prior, record) and _clean_text(prior.get("translation")):
+        if not _has_translatable_content(record["text"]):
+            complete[segment_id] = {
+                **record,
+                "translation": "",
+                "skip_reason": "punctuation_only_source",
+            }
+        elif _matches_segment(prior, record) and (
+            _clean_text(prior.get("translation")) or prior.get("skip_reason") == "punctuation_only_source"
+        ):
             complete[segment_id] = prior
         else:
             pending.append(record)
@@ -1164,6 +1173,10 @@ def _is_punctuation_only(text: str) -> bool:
     return bool(text) and all(char in _ALL_SPLIT_PUNCTUATION for char in text)
 
 
+def _has_translatable_content(text: str) -> bool:
+    return any(unicodedata.category(char)[0] in {"L", "N"} for char in text)
+
+
 def _merge_short_translation_parts(parts: list[str], max_chars: int) -> list[str]:
     merged: list[str] = []
     pending = ""
@@ -1236,7 +1249,11 @@ def _rebalance_short_tail_chunks(chunks: list[str], max_chars: int) -> list[str]
 
 
 def _transcript_excerpt(transcript: list[dict[str, Any]], window: int = 3) -> list[str]:
-    texts = [str(item.get("text", "")).strip() for item in transcript if str(item.get("text", "")).strip()]
+    texts = [
+        text
+        for item in transcript
+        if (text := str(item.get("text", "")).strip()) and _has_translatable_content(text)
+    ]
     if len(texts) <= window * 2:
         return texts
     return texts[:window] + texts[-window:]
@@ -1244,9 +1261,9 @@ def _transcript_excerpt(transcript: list[dict[str, Any]], window: int = 3) -> li
 
 def _full_transcript_text(transcript: list[dict[str, Any]]) -> str:
     return "\n".join(
-        str(item.get("text", "")).strip()
+        text
         for item in transcript
-        if str(item.get("text", "")).strip()
+        if (text := str(item.get("text", "")).strip()) and _has_translatable_content(text)
     )
 
 

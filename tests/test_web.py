@@ -56,6 +56,19 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
         response = client.get(path)
         assert response.status_code == 200
 
+    index = client.get("/").text
+    assert 'id="workflowConfigButton"' in index
+    assert "/assets/app.js?v=" in index
+    assert "/assets/styles.css?v=" in index
+    app_js = client.get("/assets/app.js").text
+    assert "完整链路包含局部重配" in app_js
+    assert "重配包含复核片段" in app_js
+    assert "每轮最大重配片段" in app_js
+    assert "质检轮次" not in app_js
+    assert "最大轮次" not in app_js
+    assert "重配轮次" not in app_js
+    assert "最大重配轮次" not in app_js
+
     assert client.get("/api/health").json() == {"status": "ok"}
 
 

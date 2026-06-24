@@ -59,6 +59,58 @@ def test_finalize_transcript_normalizes_segments(
     ]
 
 
+def test_finalize_transcript_drops_punctuation_only_segments(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    aligned = {
+        "segments": [
+            {
+                "start": 0.0,
+                "end": 1.0,
+                "text": "What?",
+                "speaker": "SPEAKER_00",
+            },
+            {
+                "start": 0.6,
+                "end": 1.0,
+                "text": "!",
+                "speaker": "SPEAKER_00",
+            },
+            {
+                "start": 1.2,
+                "end": 2.0,
+                "text": "BTD 6",
+                "speaker": "SPEAKER_00",
+            },
+        ]
+    }
+    (tmp_path / transcription.DIARIZE_OUTPUT).write_text(
+        json.dumps(aligned),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(transcription, "generate_speaker_audio", lambda *_args: [])
+
+    output = transcription.finalize_transcript(tmp_path)
+
+    transcript = json.loads(output.read_text(encoding="utf-8"))
+    assert transcript == [
+        {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "What?",
+            "speaker": "SPEAKER_00",
+        },
+        {
+            "start": 1.2,
+            "end": 2.0,
+            "text": "BTD 6",
+            "speaker": "SPEAKER_00",
+        },
+    ]
+
+
 def test_prepare_whisperx_runtime_sets_token_and_torch_load_defaults(
     tmp_path: Path,
     monkeypatch,

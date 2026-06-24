@@ -402,8 +402,10 @@ python3 -m youdub.cli run-task <task-id> --step subtitle
 
 Web `run-all` 默认不启用自动重配。任务配置中的 `workflow.enable_tts_redub=true` 后，
 完整链路会在首次 `subtitle` 后执行 `inspect-tts -> redub-tts -> transcribe-tts ->
-subtitle`，然后继续 `synthesize` 和发布包步骤。`workflow.tts_redub_max_rounds`
-当前保留为配置语义，第一版默认只运行一轮。
+subtitle`，然后继续 `synthesize` 和发布包步骤。第一版固定只运行一轮，轮次参数仅在
+CLI 和内部配置中保留，不在 Web UI 暴露。
+Web UI 中可以在任务详情点击“流程参数”打开该配置；也可以点击“配音质检”或“局部重配”
+步骤卡片的齿轮调整质检阈值和单轮最多重配片段数。
 
 `synthesize` 读取：
 

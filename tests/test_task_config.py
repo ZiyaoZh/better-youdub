@@ -143,6 +143,26 @@ def test_task_config_exposes_web_tts_defaults(monkeypatch, tmp_path: Path) -> No
     assert options.tts.end_pad_ms == 160
 
 
+def test_task_config_exposes_tts_redub_defaults(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("YOUDUB_ROOT", str(tmp_path / "videos"))
+    monkeypatch.setenv("YOUDUB_TASKS_PATH", str(tmp_path / "tasks" / "tasks.json"))
+    monkeypatch.setenv("YOUDUB_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("YOUDUB_MODELS_DIR", str(tmp_path / "models"))
+    monkeypatch.setenv("YOUDUB_CONFIG_PATH", str(tmp_path / "config" / "youdub.json"))
+
+    config = AppConfig.from_env()
+    task_config = default_task_config(config)
+    options = runtime_options_from_task_config(config, task_config)
+
+    assert task_config["workflow"]["enable_tts_redub"] is False
+    assert task_config["workflow"]["tts_redub_max_rounds"] == 1
+    assert task_config["tts_quality"]["include_review"] is False
+    assert task_config["tts_quality"]["max_segments_per_round"] == 50
+    assert task_config["redub_tts"]["round"] == 1
+    assert options.tts_quality.max_segments_per_round == 50
+    assert options.redub_tts.max_rounds == 1
+
+
 def test_task_config_partial_update_preserves_sections_and_masked_secrets(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("YOUDUB_ROOT", str(tmp_path / "videos"))
     monkeypatch.setenv("YOUDUB_TASKS_PATH", str(tmp_path / "tasks" / "tasks.json"))

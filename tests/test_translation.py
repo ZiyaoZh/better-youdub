@@ -438,6 +438,31 @@ def test_segment_translation_cache_uses_metadata(tmp_path, monkeypatch) -> None:
     assert len(client.chat.completions.calls) == 1
 
 
+def test_segment_translation_skips_punctuation_only_source(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("youdub.translation.time.sleep", lambda *_args: None)
+    client = _FakeClient([_response('{"segments":[{"segment_id":1,"translation":"下一句。"}]}')])
+    config = TranslationConfig(api_key="sk-test", model="gpt-test", max_retries=1)
+    info = {"title": "Demo", "uploader": "Author"}
+    summary = {"title": "标题", "author": "作者", "summary": "摘要"}
+    context = {"content_summary": "上下文", "glossary": [], "corrections": []}
+    transcript = [
+        {"start": 0.0, "end": 0.4, "speaker": "SPEAKER_00", "text": "!"},
+        {"start": 0.5, "end": 1.0, "speaker": "SPEAKER_00", "text": "Next sentence."},
+    ]
+
+    translated = ensure_segment_translations(tmp_path, info, summary, context, transcript, client, config)
+    cache = __import__("json").loads((tmp_path / SEGMENTS_OUTPUT).read_text(encoding="utf-8"))
+    payload = client.chat.completions.calls[0]["messages"][1]["content"]
+
+    assert translated[0]["translation"] == ""
+    assert translated[0]["skip_reason"] == "punctuation_only_source"
+    assert translated[1]["translation"] == "下一句。"
+    assert cache["segments"][0]["skip_reason"] == "punctuation_only_source"
+    assert '"segment_id": 0' not in payload
+    assert '"segment_id": 1' in payload
+    assert len(client.chat.completions.calls) == 1
+
+
 def test_translation_context_cache_changes_when_prompt_changes(tmp_path) -> None:
     client = _FakeClient(
         [

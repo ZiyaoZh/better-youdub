@@ -104,16 +104,6 @@ const CONFIG_SECTIONS = [
       ["include_review", "重配包含复核片段", "boolean"],
       ["max_segments_per_round", "每轮最大重配片段", "integer", {min: 0}],
       ["max_task_hard_ratio", "任务复核严重比例", "number", {min: 0, max: 1, step: 0.01}],
-      ["round", "质检轮次", "integer", {min: 1}],
-      ["max_rounds", "最大轮次", "integer", {min: 1}],
-    ],
-  },
-  {
-    key: "redub_tts",
-    label: "局部重配",
-    fields: [
-      ["round", "重配轮次", "integer", {min: 1}],
-      ["max_rounds", "最大重配轮次", "integer", {min: 1}],
     ],
   },
   {
@@ -160,7 +150,6 @@ const CONFIG_SECTIONS = [
     fields: [
       ["include_bilibili_upload", "完整链路包含 Bilibili", "boolean"],
       ["enable_tts_redub", "完整链路包含局部重配", "boolean"],
-      ["tts_redub_max_rounds", "最大重配轮次", "integer", {min: 1}],
     ],
   },
 ]
@@ -172,7 +161,7 @@ const STEP_CONFIG_SECTIONS = {
   "transcribe-tts": "whisperx",
   subtitle: "synthesis",
   "inspect-tts": "tts_quality",
-  "redub-tts": "redub_tts",
+  "redub-tts": "tts_quality",
   synthesize: "synthesis",
   "prepare-publish": "publish",
   "publish-bilibili": "bilibili",
@@ -354,6 +343,8 @@ function renderDetail(task, options = {}) {
   $("detailError").textContent = task.error || ""
   const hasDownload = taskHasArtifact(task, "download-video")
   $("runAllButton").disabled = taskActive(task) || (!hasDownload && !isUrlSource(task.source))
+  $("workflowConfigButton").disabled = taskActive(task)
+  $("workflowConfigButton").onclick = () => openTaskConfig(task, "workflow")
   $("deleteButton").disabled = taskActive(task)
   $("saveTaskConfigButton").disabled = taskActive(task)
   renderSteps(task)
