@@ -552,12 +552,28 @@ def _get_task(task_id: str) -> Task:
 
 def _task_payload(task: Task) -> dict[str, Any]:
     data = task.to_dict()
+    data["display_status"] = _task_display_status(task)
     data["queued"] = _task_queued(task.id)
     data["running"] = _task_running(task.id)
     data["artifacts"] = _artifact_summary(task)
     data["config"] = public_task_config(_config(), task.config)
     data["step_completion"] = _step_completion_summary(task)
     return data
+
+
+def _task_display_status(task: Task) -> str:
+    if (
+        task.status == TaskStatus.SUCCESS
+        and _step_completed(task, PipelineStep.PREPARE_PUBLISH)
+        and not _bilibili_upload_completed(task)
+    ):
+        return "pending-upload"
+    return task.status.value
+
+
+def _bilibili_upload_completed(task: Task) -> bool:
+    step_success = task.steps.get(PipelineStep.PUBLISH_BILIBILI.value) == StepStatus.SUCCESS
+    return step_success and _has_step_resource(task.folder / "bilibili.json")
 
 
 def _artifact_summary(task: Task) -> list[dict[str, Any]]:
@@ -973,13 +989,63 @@ STEP_CLEANUP_GROUPS: tuple[tuple[tuple[PipelineStep, ...], tuple[str, ...]], ...
 
 
 def _step_completion_summary(task: Task) -> dict[str, dict[str, Any]]:
+    return {step.value: _step_completion_for_task(task, step) for step in STEP_OUTPUTS}
+
+
+def _step_completion_for_task(task: Task, step: PipelineStep) -> dict[str, Any]:
+    outputs = _step_outputs_for_task(task, step)
+    missing = _missing_step_resources(task, step)
+    completed = len(outputs) - len(missing)
+    total = len(outputs)
+    unit = "artifact"
+    progress = _step_segment_progress(task, step)
+    if progress is not None:
+        completed, total, unit = progress
+    percent = round(completed / total * 100) if total else 0
+    step_status = task.steps.get(step.value)
+    step_started = step_status is not None and step_status != StepStatus.PENDING
+    show_progress = total > 1 and (completed > 0 or step_started)
     return {
-        step.value: {
-            "complete": _step_completed(task, step),
-            "missing": _missing_step_resources(task, step),
-        }
-        for step in STEP_OUTPUTS
+        "complete": step_status == StepStatus.SUCCESS and not missing,
+        "missing": missing,
+        "completed": completed,
+        "total": total,
+        "percent": percent,
+        "unit": unit,
+        "show_progress": show_progress,
     }
+
+
+def _step_segment_progress(task: Task, step: PipelineStep) -> tuple[int, int, str] | None:
+    if step != PipelineStep.TTS:
+        return None
+    total = _translation_entry_count(task.folder / "translation.json")
+    if total <= 1:
+        return None
+    completed = _count_numbered_wavs(task.folder / "segments" / "tts", total)
+    return completed, total, "segment"
+
+
+def _translation_entry_count(path: Path) -> int:
+    if not path.exists() or not path.is_file():
+        return 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if isinstance(data, dict):
+        data = data.get("translation")
+    return len(data) if isinstance(data, list) else 0
+
+
+def _count_numbered_wavs(directory: Path, total: int) -> int:
+    if total <= 0 or not directory.exists() or not directory.is_dir():
+        return 0
+    count = 0
+    for index in range(1, total + 1):
+        if _has_step_resource(directory / f"{index:04d}.wav"):
+            count += 1
+    return count
 
 
 def _step_completed(task: Task, step: PipelineStep) -> bool:

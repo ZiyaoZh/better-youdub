@@ -11,24 +11,47 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     docker.io \
     fd-find \
+    file \
     git \
     git-lfs \
     gnupg \
     gosu \
+    htop \
+    iproute2 \
+    iputils-ping \
     jq \
     less \
+    lsof \
     make \
     nano \
+    netcat-openbsd \
     openssh-client \
     pkg-config \
+    procps \
     python3 \
     python3-pip \
     python3-venv \
     ripgrep \
+    rsync \
+    sqlite3 \
     sudo \
+    tree \
     unzip \
     vim-tiny \
+    bubblewrap \
+    wget \
+    zip \
     xz-utils \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN install -d -m 0755 /etc/apt/keyrings \
+  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+  && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    > /etc/apt/sources.list.d/github-cli.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends gh \
   && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
@@ -46,6 +69,8 @@ RUN install -d -m 0755 /etc/apt/keyrings \
   && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @openai/codex
+
+RUN pip3 install --no-cache-dir beautifulsoup4 ruff pytest requests
 
 RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd
 

@@ -140,12 +140,18 @@ mount_if_exists() {
   fi
 }
 
-mkdir -p "$HOME/.codex" "$HOME/.claude" "$CACHE_ROOT"/{npm,pip,cargo,go,maven,gradle,cache} "$CONTAINER_HOME"
+mkdir -p \
+  "$HOME/.codex" \
+  "$HOME/.claude" \
+  "$HOME/.config/gh" \
+  "$CACHE_ROOT"/{npm,pip,cargo,go,maven,gradle,cache} \
+  "$CONTAINER_HOME/.config"
 
 docker_args+=(
   -v "$CONTAINER_HOME:/home/codex"
   -v "$HOME/.codex:/home/codex/.codex"
   -v "$HOME/.claude:/home/codex/.claude"
+  -v "$HOME/.config/gh:/home/codex/.config/gh"
   -v "$CACHE_ROOT/npm:/home/codex/.npm"
   -v "$CACHE_ROOT/pip:/home/codex/.cache/pip"
   -v "$CACHE_ROOT/cargo:/home/codex/.cargo"

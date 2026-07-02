@@ -62,6 +62,10 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert "/assets/styles.css?v=" in index
     app_js = client.get("/assets/app.js").text
     assert "完整链路包含局部重配" in app_js
+    assert "待上传" in app_js
+    assert "step-progress" in app_js
+    styles = client.get("/assets/styles.css").text
+    assert "step-progress-fill" in styles
     assert "重配包含复核片段" in app_js
     assert "每轮最大重配片段" in app_js
     assert "质检轮次" not in app_js
@@ -70,6 +74,108 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert "最大重配轮次" not in app_js
 
     assert client.get("/api/health").json() == {"status": "ok"}
+
+
+def test_web_step_completion_includes_progress_for_multi_output_steps(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task_payload = client.post("/api/tasks/local", json={"source": str(source), "title": "Progress"}).json()
+    task = web_module._store().get(task_payload["id"])
+    (task.folder / "transcript.whisper.json").write_text("{}", encoding="utf-8")
+    task.mark_step(PipelineStep.TRANSCRIBE, StepStatus.RUNNING)
+    web_module._store().update(task)
+
+    payload = client.get(f"/api/tasks/{task.id}").json()
+
+    transcribe = payload["step_completion"]["transcribe"]
+    assert transcribe["complete"] is False
+    assert transcribe["completed"] == 1
+    assert transcribe["total"] == 4
+    assert transcribe["percent"] == 25
+    assert transcribe["unit"] == "artifact"
+    assert transcribe["show_progress"] is True
+    assert payload["step_completion"]["translate"]["show_progress"] is False
+    assert payload["step_completion"]["extract-audio"]["show_progress"] is False
+
+
+def test_web_tts_completion_prefers_segment_progress_when_available(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task_payload = client.post("/api/tasks/local", json={"source": str(source), "title": "TTS Progress"}).json()
+    task = web_module._store().get(task_payload["id"])
+    (task.folder / "translation.json").write_text(
+        json.dumps(
+            [
+                {"start": 0.0, "end": 1.0, "translation": "一"},
+                {"start": 1.0, "end": 2.0, "translation": "二"},
+                {"start": 2.0, "end": 3.0, "translation": "三"},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    tts_dir = task.folder / "segments" / "tts"
+    tts_dir.mkdir(parents=True)
+    (tts_dir / "0001.wav").write_bytes(b"wav")
+    (tts_dir / "0003.wav").write_bytes(b"wav")
+    task.mark_step(PipelineStep.TTS, StepStatus.RUNNING)
+    web_module._store().update(task)
+
+    payload = client.get(f"/api/tasks/{task.id}").json()
+
+    tts = payload["step_completion"]["tts"]
+    assert tts["complete"] is False
+    assert tts["completed"] == 2
+    assert tts["total"] == 3
+    assert tts["percent"] == 67
+    assert tts["unit"] == "segment"
+    assert tts["show_progress"] is True
+
+
+def test_web_displays_pending_upload_after_publish_package_until_real_upload(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task_payload = client.post("/api/tasks/local", json={"source": str(source), "title": "Ready To Upload"}).json()
+    task = web_module._store().get(task_payload["id"])
+    (task.folder / "publish.json").write_text(json.dumps({"status": "ready"}), encoding="utf-8")
+    (task.folder / "publish.md").write_text("ready", encoding="utf-8")
+    (task.folder / "cover.jpg").write_bytes(b"jpg")
+    task.status = TaskStatus.SUCCESS
+    task.mark_step(PipelineStep.PREPARE_PUBLISH, StepStatus.SUCCESS)
+    web_module._store().update(task)
+
+    published = client.get(f"/api/tasks/{task.id}").json()
+
+    assert published["status"] == "success"
+    assert published["display_status"] == "pending-upload"
+
+    (task.folder / "bilibili.dry-run.json").write_text(json.dumps({"status": "dry_run"}), encoding="utf-8")
+    task.mark_step(PipelineStep.PUBLISH_BILIBILI, StepStatus.SUCCESS)
+    web_module._store().update(task)
+
+    dry_run = client.get(f"/api/tasks/{task.id}").json()
+
+    assert dry_run["display_status"] == "pending-upload"
+
+    task.status = TaskStatus.FAILED
+    task.mark_step(PipelineStep.PUBLISH_BILIBILI, StepStatus.FAILED)
+    web_module._store().update(task)
+
+    failed_upload = client.get(f"/api/tasks/{task.id}").json()
+
+    assert failed_upload["display_status"] == "failed"
+
+    task.status = TaskStatus.SUCCESS
+    task.mark_step(PipelineStep.PUBLISH_BILIBILI, StepStatus.SUCCESS)
+    web_module._store().update(task)
+    (task.folder / "bilibili.json").write_text(json.dumps({"status": "uploaded"}), encoding="utf-8")
+
+    uploaded = client.get(f"/api/tasks/{task.id}").json()
+
+    assert uploaded["display_status"] == "success"
 
 
 def test_web_basic_auth_protects_static_and_api(monkeypatch, tmp_path: Path) -> None:

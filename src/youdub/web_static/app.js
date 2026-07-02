@@ -226,6 +226,7 @@ function statusLabel(status) {
     queued: "排队",
     running: "运行中",
     success: "成功",
+    "pending-upload": "待上传",
     failed: "失败",
     skipped: "跳过",
   }[status] || status || "等待"
@@ -246,7 +247,7 @@ function taskActive(task) {
 function effectiveTaskStatus(task) {
   if (task?.queued) return "queued"
   if (task?.running) return "running"
-  return task?.status
+  return task?.display_status || task?.status
 }
 
 function setMessage(id, text, isError = false) {
@@ -373,6 +374,7 @@ function renderSteps(task) {
         <div>
           <h3>${label}</h3>
           <span class="status-badge ${statusClass(status)}">${statusLabel(status)}</span>
+          ${renderStepProgress(task, step)}
         </div>
         ${configKey ? `<button class="icon-button step-config-button" type="button" title="${label}参数" aria-label="${label}参数">⚙</button>` : ""}
       </div>
@@ -433,6 +435,37 @@ function renderDownloadConfigCard(task) {
     })
   }
   return card
+}
+
+function renderStepProgress(task, step) {
+  const completion = task.step_completion?.[step]
+  if (!completion?.show_progress) return ""
+  const completed = Number(completion.completed)
+  const total = Number(completion.total)
+  const percent = clampPercent(Number(completion.percent))
+  if (!Number.isFinite(completed) || !Number.isFinite(total) || total <= 1) return ""
+  const label = `${Math.max(0, completed)}/${total} ${progressUnitLabel(completion.unit)}`
+  return `
+    <div class="step-progress" aria-label="完成进度 ${percent}%">
+      <span class="step-progress-fill" style="width: ${percent}%"></span>
+    </div>
+    <div class="step-progress-meta">
+      <span>${percent}%</span>
+      <span>${label}</span>
+    </div>
+  `
+}
+
+function progressUnitLabel(unit) {
+  return {
+    artifact: "产物",
+    segment: "片段",
+  }[unit] || escapeHtml(String(unit || "产物"))
+}
+
+function clampPercent(value) {
+  if (!Number.isFinite(value)) return 0
+  return Math.min(100, Math.max(0, Math.round(value)))
 }
 
 function taskHasArtifact(task, artifactKey) {

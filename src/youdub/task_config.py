@@ -25,7 +25,7 @@ SECRET_FIELDS: dict[str, set[str]] = {
     "bilibili": {"sessdata", "bili_jct"},
 }
 
-WEB_TRANSLATION_BASE_URL_DEFAULT = "https://sg.uiuiapi.com/v1"
+WEB_TRANSLATION_BASE_URL_DEFAULT = "https://api.uiuihao.com/v1"
 WEB_TRANSLATION_MODEL_DEFAULT = "gemini-3.1-flash-lite-preview"
 
 
