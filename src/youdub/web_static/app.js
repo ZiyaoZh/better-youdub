@@ -167,14 +167,23 @@ const STEP_CONFIG_SECTIONS = {
   "publish-bilibili": "bilibili",
 }
 
-const FINAL_VIDEO_KEY = "final-video"
-const POLL_INTERVAL_MS = 2500
+const ACTIVE_POLL_INTERVAL_MS = 5000
+const IDLE_POLL_INTERVAL_MS = 15000
+const TASK_ROW_HEIGHT_PX = 66
+const TASK_PAGE_SIZE_MIN = 4
+const TASK_PAGE_SIZE_MAX = 50
 
 const state = {
   tasks: [],
   selectedId: null,
   loading: false,
   tasksRefreshing: false,
+  taskPage: {
+    offset: 0,
+    limit: 10,
+    total: 0,
+    hasMore: false,
+  },
   defaultConfig: null,
   configTab: "download",
   configDirty: false,
@@ -182,13 +191,9 @@ const state = {
   configTaskId: null,
   configDraft: null,
   configDrawerOpen: false,
-  videoPreview: {
-    taskId: null,
-    signature: "",
-    url: "",
-    open: false,
-  },
 }
+
+let taskPollTimer = null
 
 const $ = (id) => document.getElementById(id)
 
@@ -277,27 +282,84 @@ async function refreshTasks() {
   if (state.tasksRefreshing) return
   state.tasksRefreshing = true
   try {
-    const payload = await api("/api/tasks")
-    state.tasks = payload.tasks
-    renderTasks()
-    if (state.selectedId) {
-      const selected = state.tasks.find((task) => task.id === state.selectedId)
-      if (selected) renderDetail(selected)
+    updateTaskPageLimit()
+    const query = new URLSearchParams({
+      offset: String(state.taskPage.offset),
+      limit: String(state.taskPage.limit),
+    })
+    let payload = await api(`/api/tasks?${query}`)
+    if (Number(payload.total) > 0 && Number(payload.offset) >= Number(payload.total)) {
+      const limit = Number(payload.limit) || state.taskPage.limit
+      state.taskPage.offset = Math.floor((Number(payload.total) - 1) / limit) * limit
+      const fallbackQuery = new URLSearchParams({
+        offset: String(state.taskPage.offset),
+        limit: String(limit),
+      })
+      payload = await api(`/api/tasks?${fallbackQuery}`)
     }
+    state.tasks = payload.tasks
+    state.taskPage = {
+      offset: Number(payload.offset) || 0,
+      limit: Number(payload.limit) || state.taskPage.limit,
+      total: Number(payload.total) || 0,
+      hasMore: Boolean(payload.has_more),
+    }
+    renderTasks()
+    await refreshSelectedTask()
   } finally {
     state.tasksRefreshing = false
+    renderTaskPager()
   }
 }
 
+async function refreshSelectedTask() {
+  if (!state.selectedId) return
+  try {
+    const task = await api(`/api/tasks/${state.selectedId}`)
+    renderDetail(task)
+  } catch (error) {
+    if (!/not found/i.test(error.message)) return
+    state.selectedId = null
+    state.configDirty = false
+    state.configTransient = {}
+    state.configTaskId = null
+    state.configDraft = null
+    closeTaskConfig()
+    $("taskDetail").classList.add("hidden")
+    $("emptyDetail").classList.remove("hidden")
+  }
+}
+
+function updateTaskPageLimit() {
+  const nextLimit = calculateTaskPageLimit()
+  if (!nextLimit || nextLimit === state.taskPage.limit) return
+  const currentIndex = state.taskPage.offset
+  state.taskPage.limit = nextLimit
+  state.taskPage.offset = Math.floor(currentIndex / nextLimit) * nextLimit
+}
+
+function calculateTaskPageLimit() {
+  const panel = $("taskList")?.closest(".tasks-panel")
+  const taskList = $("taskList")
+  if (!panel || !taskList) return state.taskPage.limit
+  const panelHeight = panel.getBoundingClientRect().height
+  const headHeight = panel.querySelector(".panel-head")?.getBoundingClientRect().height || 0
+  const pagerHeight = $("taskPager")?.getBoundingClientRect().height || 48
+  const available = panelHeight - headHeight - pagerHeight
+  if (!Number.isFinite(available) || available <= 0) return state.taskPage.limit
+  return Math.min(TASK_PAGE_SIZE_MAX, Math.max(TASK_PAGE_SIZE_MIN, Math.floor(available / TASK_ROW_HEIGHT_PX)))
+}
+
 function renderTasks() {
-  $("taskCount").textContent = String(state.tasks.length)
+  $("taskCount").textContent = String(state.taskPage.total)
   const list = $("taskList")
   list.innerHTML = ""
   if (!state.tasks.length) {
     const empty = document.createElement("div")
     empty.className = "empty-state"
-    empty.innerHTML = "<p>暂无任务</p>"
+    empty.innerHTML = state.taskPage.total ? "<p>当前页暂无任务</p>" : "<p>暂无任务</p>"
     list.appendChild(empty)
+    renderTaskPager()
     return
   }
   for (const task of state.tasks) {
@@ -315,6 +377,24 @@ function renderTasks() {
     item.addEventListener("click", () => selectTask(task.id))
     list.appendChild(item)
   }
+  renderTaskPager()
+}
+
+function renderTaskPager() {
+  const total = state.taskPage.total
+  const start = total ? state.taskPage.offset + 1 : 0
+  const end = Math.min(total, state.taskPage.offset + state.tasks.length)
+  $("taskPageInfo").textContent = total ? `${start}-${end} / ${total}` : "0 / 0"
+  $("prevTaskPageButton").disabled = state.taskPage.offset <= 0 || state.tasksRefreshing
+  $("nextTaskPageButton").disabled = !state.taskPage.hasMore || state.tasksRefreshing
+}
+
+function changeTaskPage(direction) {
+  const nextOffset = state.taskPage.offset + direction * state.taskPage.limit
+  state.taskPage.offset = Math.max(0, nextOffset)
+  refreshTasks().catch((error) => {
+    $("runtimeLine").textContent = error.message
+  })
 }
 
 async function selectTask(taskId) {
@@ -497,80 +577,6 @@ function renderArtifacts(task) {
       list.appendChild(link)
     }
   }
-  const final = artifacts.find((item) => item.key === FINAL_VIDEO_KEY)
-  renderVideoPreview(task, final)
-}
-
-function renderVideoPreview(task, artifact) {
-  const panel = $("videoPreview")
-  const video = $("finalVideo")
-  const openButton = $("openVideoPreviewButton")
-  const closeButton = $("closeVideoPreviewButton")
-
-  panel.classList.toggle("hidden", !artifact)
-  if (!artifact) {
-    unloadVideoPreview()
-    return
-  }
-
-  const signature = videoPreviewSignature(task, artifact)
-  const previewOpen = state.videoPreview.open
-    && state.videoPreview.taskId === task.id
-    && state.videoPreview.signature === signature
-
-  if (state.videoPreview.open && !previewOpen) {
-    unloadVideoPreview()
-  }
-
-  video.classList.toggle("hidden", !previewOpen)
-  openButton.classList.toggle("hidden", previewOpen)
-  closeButton.classList.toggle("hidden", !previewOpen)
-  openButton.onclick = () => openVideoPreview(task, artifact)
-  closeButton.onclick = () => unloadVideoPreview()
-}
-
-function openVideoPreview(task, artifact) {
-  const video = $("finalVideo")
-  const signature = videoPreviewSignature(task, artifact)
-  const url = artifactUrl(task.id, artifact.key, {v: String(artifact.size)})
-
-  if (state.videoPreview.url !== url) {
-    video.pause()
-    video.src = url
-    video.load()
-  }
-
-  state.videoPreview = {
-    taskId: task.id,
-    signature,
-    url,
-    open: true,
-  }
-  $("finalVideo").classList.remove("hidden")
-  $("openVideoPreviewButton").classList.add("hidden")
-  $("closeVideoPreviewButton").classList.remove("hidden")
-}
-
-function unloadVideoPreview() {
-  const video = $("finalVideo")
-  if (video) {
-    video.pause()
-    video.removeAttribute("src")
-    video.load()
-    video.classList.add("hidden")
-  }
-  state.videoPreview = {
-    taskId: null,
-    signature: "",
-    url: "",
-    open: false,
-  }
-  if ($("openVideoPreviewButton")) $("openVideoPreviewButton").classList.remove("hidden")
-  if ($("closeVideoPreviewButton")) $("closeVideoPreviewButton").classList.add("hidden")
-}
-
-function videoPreviewSignature(task, artifact) {
-  return `${task.id}:${artifact.key}:${artifact.size}:${artifact.name}`
 }
 
 function renderTaskConfig(task, options = {}) {
@@ -817,7 +823,6 @@ async function deleteSelected() {
   state.configTaskId = null
   state.configDraft = null
   closeTaskConfig()
-  unloadVideoPreview()
   $("taskDetail").classList.add("hidden")
   $("emptyDetail").classList.remove("hidden")
   await refreshTasks()
@@ -836,6 +841,7 @@ async function submitUrl(event) {
     $("urlInput").value = ""
     setMessage("createMessage", "任务已创建")
     closeCreateDialog()
+    state.taskPage.offset = 0
     await refreshTasks()
     selectTask(task.id)
   } catch (error) {
@@ -870,6 +876,8 @@ function bindEvents() {
     refreshDoctor()
     refreshTasks()
   })
+  $("prevTaskPageButton").addEventListener("click", () => changeTaskPage(-1))
+  $("nextTaskPageButton").addEventListener("click", () => changeTaskPage(1))
   $("newTaskButton").addEventListener("click", openCreateDialog)
   document.querySelectorAll("[data-close-create]").forEach((node) => node.addEventListener("click", closeCreateDialog))
   $("urlForm").addEventListener("submit", submitUrl)
@@ -877,16 +885,38 @@ function bindEvents() {
   document.querySelectorAll("[data-close-config]").forEach((node) => node.addEventListener("click", closeTaskConfig))
   $("runAllButton").addEventListener("click", () => runAll().catch((error) => window.alert(error.message)))
   $("deleteButton").addEventListener("click", () => deleteSelected().catch((error) => window.alert(error.message)))
+  window.addEventListener("resize", debounce(() => {
+    const previousLimit = state.taskPage.limit
+    updateTaskPageLimit()
+    if (state.taskPage.limit !== previousLimit) refreshTasks().catch(() => undefined)
+  }, 150))
+}
+
+function debounce(callback, delay) {
+  let timeout = null
+  return (...args) => {
+    if (timeout !== null) window.clearTimeout(timeout)
+    timeout = window.setTimeout(() => callback(...args), delay)
+  }
+}
+
+function scheduleTaskPolling() {
+  if (taskPollTimer !== null) window.clearTimeout(taskPollTimer)
+  const delay = state.tasks.some(taskActive) ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS
+  taskPollTimer = window.setTimeout(async () => {
+    if (!document.hidden) {
+      await refreshTasks().catch(() => undefined)
+    }
+    scheduleTaskPolling()
+  }, delay)
 }
 
 bindEvents()
 Promise.all([loadDefaultConfig(), refreshDoctor(), refreshTasks()]).catch((error) => {
   $("runtimeLine").textContent = error.message
+}).finally(() => {
+  scheduleTaskPolling()
 })
-window.setInterval(() => {
-  if (document.hidden) return
-  refreshTasks().catch(() => undefined)
-}, POLL_INTERVAL_MS)
 
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) refreshTasks().catch(() => undefined)

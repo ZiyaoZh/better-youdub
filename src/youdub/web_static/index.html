@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>YouDub</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=20260620-tts-redub-ui2" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20260706-low-bandwidth-ui" />
   </head>
   <body>
     <div class="app-shell">
@@ -28,6 +28,11 @@
             <button id="newTaskButton" class="button secondary compact-button" type="button">新建</button>
           </div>
           <div id="taskList" class="task-list"></div>
+          <div id="taskPager" class="task-pager">
+            <button id="prevTaskPageButton" class="button secondary compact-button" type="button">上一页</button>
+            <span id="taskPageInfo">0 / 0</span>
+            <button id="nextTaskPageButton" class="button secondary compact-button" type="button">下一页</button>
+          </div>
         </section>
 
         <section class="panel detail-panel">
@@ -62,14 +67,6 @@
 
             <div class="section-title">产物</div>
             <div id="artifactList" class="artifact-list"></div>
-
-            <div id="videoPreview" class="video-preview hidden">
-              <div class="video-preview-actions">
-                <button id="openVideoPreviewButton" class="button secondary" type="button">打开播放器</button>
-                <button id="closeVideoPreviewButton" class="button secondary hidden" type="button">停止加载</button>
-              </div>
-              <video id="finalVideo" class="hidden" controls preload="none"></video>
-            </div>
 
             <div id="detailError" class="error-box hidden"></div>
           </div>
@@ -115,6 +112,6 @@
       </div>
     </aside>
 
-    <script src="/assets/app.js?v=20260620-tts-redub-ui2"></script>
+    <script src="/assets/app.js?v=20260706-low-bandwidth-ui"></script>
   </body>
 </html>

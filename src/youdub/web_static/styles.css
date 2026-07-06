@@ -383,6 +383,7 @@ textarea:focus {
 .task-list {
   overflow: auto;
   min-height: 0;
+  flex: 1;
 }
 
 .task-item {
@@ -416,6 +417,23 @@ textarea:focus {
   color: var(--muted);
   font-size: 12px;
   min-width: 0;
+}
+
+.task-pager {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--panel-alt);
+}
+
+.task-pager span {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .status-badge {
@@ -698,24 +716,6 @@ textarea:focus {
   color: var(--accent);
   background: var(--panel-alt);
   font-size: 13px;
-}
-
-.video-preview {
-  margin-top: 14px;
-}
-
-.video-preview-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.video-preview video {
-  width: 100%;
-  max-height: 54dvh;
-  background: #000;
-  border-radius: 8px;
 }
 
 .message {

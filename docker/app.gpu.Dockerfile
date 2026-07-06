@@ -1,4 +1,5 @@
-FROM pytorch/pytorch:2.8.0-cuda12.6-cudnn9-runtime
+ARG PYTORCH_BASE_IMAGE=pytorch/pytorch:2.8.0-cuda12.6-cudnn9-runtime
+FROM ${PYTORCH_BASE_IMAGE}
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1

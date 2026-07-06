@@ -140,6 +140,11 @@ cookies 内容只会写入任务下载配置指向的本地文件，不会保存
 缓存失效并重新请求模型。空的密钥字段会继续回退到环境变量或运行时配置文件；为单个任务
 填写密钥时，接口响应只返回 `********`，后续保存该掩码会保留原值。
 
+Web UI 的任务列表使用分页摘要接口，不再一次性返回完整任务配置、产物和步骤完成度。
+页面会按当前任务面板高度估算每页数量，并提供上一页/下一页翻页；选中任务后才单独
+请求完整详情。产物区只提供下载链接，最终 `video.mp4` 不再内嵌到页面播放器中，避免
+远程低带宽访问时误触发大文件流式传输。
+
 设置 `YOUDUB_WEB_USERNAME` 和 `YOUDUB_WEB_PASSWORD` 后，Web UI 会启用 HTTP Basic
 Auth，所有静态页面、API 和产物下载都需要认证。只设置其中一个会拒绝所有请求，
 避免误以为认证已正确启用。Docker Compose 默认只把 Web 端口绑定到
@@ -617,6 +622,18 @@ GPU 镜像使用适合 Ada GPU，例如 RTX 4090，的 CUDA 12 栈，并以 Whis
   在安装 WhisperX 或 Demucs 依赖时静默升级/降级 torch 栈
 - Demucs 本体从固定上游 commit 以 `--no-deps` 安装，避免它旧的
   torchaudio 元数据把 CUDA 12 的 PyTorch 栈降级
+
+默认基础镜像可通过 `PYTORCH_BASE_IMAGE` 覆盖。若宿主机到 Docker Hub 的
+`auth.docker.io` 不稳定，可以先从可访问的镜像仓库拉取同一 PyTorch 镜像并重打本地
+tag，或直接把 `PYTORCH_BASE_IMAGE` 指向内部 registry / pull-through cache：
+
+```bash
+PYTORCH_BASE_IMAGE=registry.example.com/pytorch/pytorch:2.8.0-cuda12.6-cudnn9-runtime \
+  docker compose -f compose.gpu.yml build --no-cache
+```
+
+这只替换 Dockerfile 的 `FROM` 镜像；镜像内的 torch、torchaudio、torchvision 版本
+仍由基础镜像和 `requirements/torch-constraints.txt` 约束。
 
 WhisperX 从 `requirements/gpu.txt` 中固定的上游 commit 安装：
 

@@ -58,12 +58,15 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
 
     index = client.get("/").text
     assert 'id="workflowConfigButton"' in index
+    assert 'id="taskPager"' in index
+    assert 'id="finalVideo"' not in index
     assert "/assets/app.js?v=" in index
     assert "/assets/styles.css?v=" in index
     app_js = client.get("/assets/app.js").text
     assert "完整链路包含局部重配" in app_js
     assert "待上传" in app_js
     assert "step-progress" in app_js
+    assert "videoPreview" not in app_js
     styles = client.get("/assets/styles.css").text
     assert "step-progress-fill" in styles
     assert "重配包含复核片段" in app_js
@@ -218,12 +221,45 @@ def test_web_creates_local_task_and_lists_artifacts(monkeypatch, tmp_path: Path)
         }
     ]
 
-    tasks = client.get("/api/tasks").json()["tasks"]
+    tasks_payload = client.get("/api/tasks").json()
+    assert tasks_payload["total"] == 1
+    assert tasks_payload["offset"] == 0
+    assert tasks_payload["limit"] == 20
+    assert tasks_payload["has_more"] is False
+    tasks = tasks_payload["tasks"]
     assert [item["id"] for item in tasks] == [task["id"]]
+    assert "config" not in tasks[0]
+    assert "artifacts" not in tasks[0]
+    assert "step_completion" not in tasks[0]
 
     artifacts = client.get(f"/api/tasks/{task['id']}/artifacts").json()["artifacts"]
     assert artifacts[0]["key"] == "download-video"
     assert artifacts[0]["url"] == f"/api/tasks/{task['id']}/artifacts/download-video"
+
+
+def test_web_task_list_paginates_summary_payloads(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    for index in range(3):
+        source = tmp_path / f"sample-{index}.mp4"
+        source.write_bytes(b"video")
+        client.post("/api/tasks/local", json={"source": str(source), "title": f"Task {index}"})
+
+    first_page = client.get("/api/tasks?offset=0&limit=2").json()
+    second_page = client.get("/api/tasks?offset=2&limit=2").json()
+
+    assert first_page["total"] == 3
+    assert first_page["offset"] == 0
+    assert first_page["limit"] == 2
+    assert first_page["has_more"] is True
+    assert len(first_page["tasks"]) == 2
+    assert second_page["total"] == 3
+    assert second_page["offset"] == 2
+    assert second_page["limit"] == 2
+    assert second_page["has_more"] is False
+    assert len(second_page["tasks"]) == 1
+    assert "config" not in first_page["tasks"][0]
+    assert "artifacts" not in first_page["tasks"][0]
+    assert "step_completion" not in first_page["tasks"][0]
 
 
 def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path: Path) -> None:

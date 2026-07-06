@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -72,6 +73,9 @@ GPU_STEPS = {
     PipelineStep.REDUB_TTS,
 }
 
+DEFAULT_TASK_LIST_LIMIT = 20
+MAX_TASK_LIST_LIMIT = 100
+
 
 class UrlTaskRequest(BaseModel):
     url: str
@@ -119,6 +123,7 @@ class YtdlpSettingsUpdate(BaseModel):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="YouDub WebUI")
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     static_dir = Path(__file__).resolve().parent / "web_static"
     _install_auth_middleware(app)
 
@@ -148,10 +153,21 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/tasks")
-    def list_tasks() -> dict[str, Any]:
+    def list_tasks(
+        offset: int = Query(0, ge=0),
+        limit: int = Query(DEFAULT_TASK_LIST_LIMIT, ge=1, le=MAX_TASK_LIST_LIMIT),
+    ) -> dict[str, Any]:
         tasks = _store().load_all()
         tasks.sort(key=lambda task: task.updated_at, reverse=True)
-        return {"tasks": [_task_payload(task) for task in tasks]}
+        total = len(tasks)
+        page = tasks[offset : offset + limit]
+        return {
+            "tasks": [_task_list_payload(task) for task in page],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(page) < total,
+        }
 
     @app.get("/api/tasks/{task_id}")
     def get_task(task_id: str) -> dict[str, Any]:
@@ -559,6 +575,31 @@ def _task_payload(task: Task) -> dict[str, Any]:
     data["config"] = public_task_config(_config(), task.config)
     data["step_completion"] = _step_completion_summary(task)
     return data
+
+
+def _task_list_payload(task: Task) -> dict[str, Any]:
+    return {
+        "id": task.id,
+        "title": task.title,
+        "source": task.source,
+        "author": task.author,
+        "status": task.status.value,
+        "display_status": _task_display_status(task),
+        "queued": _task_queued(task.id),
+        "running": _task_running(task.id),
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+        "error": task.error,
+        "active_step": _active_step(task),
+    }
+
+
+def _active_step(task: Task) -> str | None:
+    for status in (StepStatus.RUNNING, StepStatus.QUEUED):
+        for step, step_status in task.steps.items():
+            if step_status == status:
+                return step
+    return None
 
 
 def _task_display_status(task: Task) -> str:
