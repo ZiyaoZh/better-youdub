@@ -22,6 +22,7 @@ from youdub.web import create_app
 def _client(monkeypatch, tmp_path: Path) -> TestClient:
     web_module._RUNNING.clear()
     web_module._TASK_ALIASES.clear()
+    web_module._TERMINATING.clear()
     monkeypatch.setenv("YOUDUB_ROOT", str(tmp_path / "videos"))
     monkeypatch.setenv("YOUDUB_TASKS_PATH", str(tmp_path / "tasks" / "tasks.json"))
     monkeypatch.setenv("YOUDUB_LOG_DIR", str(tmp_path / "logs"))
@@ -58,6 +59,7 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
 
     index = client.get("/").text
     assert 'id="workflowConfigButton"' in index
+    assert 'id="terminateButton"' in index
     assert 'id="taskPager"' in index
     assert 'id="finalVideo"' not in index
     assert "/assets/app.js?v=" in index
@@ -65,10 +67,13 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     app_js = client.get("/assets/app.js").text
     assert "完整链路包含局部重配" in app_js
     assert "待上传" in app_js
+    assert "终止中" in app_js
+    assert "已终止" in app_js
     assert "step-progress" in app_js
     assert "videoPreview" not in app_js
     styles = client.get("/assets/styles.css").text
     assert "step-progress-fill" in styles
+    assert "status-terminating" in styles
     assert "grid-template-rows: minmax(0, 1fr)" in styles
     assert "height: 100dvh" in styles
     assert "重配包含复核片段" in app_js
@@ -954,6 +959,105 @@ def test_web_queues_gpu_steps_on_single_gpu_worker(monkeypatch, tmp_path: Path) 
         _wait_for_task_idle(client, first["id"])
         _wait_for_task_idle(client, second["id"])
     assert started == [first["id"], second["id"]]
+
+
+def test_web_terminates_queued_gpu_task(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    first_source = tmp_path / "first.mp4"
+    second_source = tmp_path / "second.mp4"
+    first_source.write_bytes(b"first")
+    second_source.write_bytes(b"second")
+    first = client.post("/api/tasks/local", json={"source": str(first_source), "title": "First"}).json()
+    second = client.post("/api/tasks/local", json={"source": str(second_source), "title": "Second"}).json()
+    started: list[str] = []
+    first_started = threading.Event()
+    second_started = threading.Event()
+    release = threading.Event()
+
+    def delayed_job(task_id: str, *args: object, **kwargs: object) -> None:
+        started.append(task_id)
+        if task_id == first["id"]:
+            first_started.set()
+        if task_id == second["id"]:
+            second_started.set()
+        release.wait(timeout=2)
+
+    monkeypatch.setattr(web_module, "_run_step_job", delayed_job)
+
+    first_response = client.post(f"/api/tasks/{first['id']}/run", json={"step": "separate-audio"})
+    second_response = client.post(f"/api/tasks/{second['id']}/run", json={"step": "separate-audio"})
+
+    try:
+        assert first_response.status_code == 200
+        assert second_response.status_code == 200
+        assert first_started.wait(timeout=1)
+        assert second_response.json()["queued"] is True
+
+        response = client.post(f"/api/tasks/{second['id']}/terminate")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["queued"] is False
+        assert payload["running"] is False
+        assert payload["terminating"] is False
+        assert payload["status"] == "failed"
+        assert payload["display_status"] == "terminated"
+        assert payload["error"] == web_module.TASK_TERMINATED_MESSAGE
+        assert payload["steps"]["separate-audio"] == "failed"
+        assert not second_started.wait(timeout=0.2)
+    finally:
+        release.set()
+        _wait_for_task_idle(client, first["id"])
+        _wait_for_task_idle(client, second["id"])
+    assert started == [first["id"]]
+
+
+def test_web_terminate_running_run_all_stops_after_current_step(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task = client.post("/api/tasks/local", json={"source": str(source), "title": "Terminate Run All"}).json()
+    captured = {"steps": []}
+    step_started = threading.Event()
+    release = threading.Event()
+
+    class FakeRunner:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def run_step(self, task, step: PipelineStep, task_lock=None):
+            captured["steps"].append(step.value)
+            if step == PipelineStep.EXTRACT_AUDIO:
+                step_started.set()
+                release.wait(timeout=2)
+            task.status = TaskStatus.SUCCESS
+            task.mark_step(step, StepStatus.SUCCESS)
+            return task
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+
+    response = client.post(f"/api/tasks/{task['id']}/run-all")
+
+    try:
+        assert response.status_code == 200
+        assert step_started.wait(timeout=1)
+
+        terminated = client.post(f"/api/tasks/{task['id']}/terminate")
+
+        assert terminated.status_code == 200
+        assert terminated.json()["terminating"] is True
+        assert terminated.json()["display_status"] == "terminating"
+    finally:
+        release.set()
+
+    payload = _wait_for_task_idle(client, task["id"])
+
+    assert captured["steps"] == ["extract-audio"]
+    assert payload["status"] == "failed"
+    assert payload["display_status"] == "terminated"
+    assert payload["error"] == web_module.TASK_TERMINATED_MESSAGE
+    assert payload["steps"]["extract-audio"] == "failed"
+    assert "separate-audio" not in payload["steps"]
 
 
 def test_web_url_task_accepts_cookies_content_without_echoing_it(monkeypatch, tmp_path: Path) -> None:

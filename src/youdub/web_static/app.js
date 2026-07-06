@@ -232,6 +232,8 @@ function statusLabel(status) {
     running: "运行中",
     success: "成功",
     "pending-upload": "待上传",
+    terminating: "终止中",
+    terminated: "已终止",
     failed: "失败",
     skipped: "跳过",
   }[status] || status || "等待"
@@ -240,6 +242,8 @@ function statusLabel(status) {
 function statusClass(status) {
   if (status === "success") return "status-success"
   if (status === "failed") return "status-failed"
+  if (status === "terminated") return "status-failed"
+  if (status === "terminating") return "status-terminating"
   if (status === "queued") return "status-queued"
   if (status === "running") return "status-running"
   return "status-pending"
@@ -250,6 +254,7 @@ function taskActive(task) {
 }
 
 function effectiveTaskStatus(task) {
+  if (task?.terminating) return "terminating"
   if (task?.queued) return "queued"
   if (task?.running) return "running"
   return task?.display_status || task?.status
@@ -426,6 +431,8 @@ function renderDetail(task, options = {}) {
   $("runAllButton").disabled = taskActive(task) || (!hasDownload && !isUrlSource(task.source))
   $("workflowConfigButton").disabled = taskActive(task)
   $("workflowConfigButton").onclick = () => openTaskConfig(task, "workflow")
+  $("terminateButton").disabled = !taskActive(task) || task.terminating
+  $("terminateButton").textContent = task.terminating ? "终止中" : "终止任务"
   $("deleteButton").disabled = taskActive(task)
   $("saveTaskConfigButton").disabled = taskActive(task)
   renderSteps(task)
@@ -789,6 +796,13 @@ async function runAll() {
   await refreshTasks()
 }
 
+async function terminateSelected() {
+  if (!state.selectedId) return
+  if (!window.confirm("终止正在进行的任务？当前步骤可能需要等待外部命令返回后才会停止。")) return
+  await api(`/api/tasks/${state.selectedId}/terminate`, {method: "POST"})
+  await refreshTasks()
+}
+
 async function downloadTask(task) {
   const force = await confirmRerunIfCompleted(task, "ingest")
   if (force === null) return
@@ -884,6 +898,7 @@ function bindEvents() {
   $("taskConfigForm").addEventListener("submit", saveTaskConfig)
   document.querySelectorAll("[data-close-config]").forEach((node) => node.addEventListener("click", closeTaskConfig))
   $("runAllButton").addEventListener("click", () => runAll().catch((error) => window.alert(error.message)))
+  $("terminateButton").addEventListener("click", () => terminateSelected().catch((error) => window.alert(error.message)))
   $("deleteButton").addEventListener("click", () => deleteSelected().catch((error) => window.alert(error.message)))
   window.addEventListener("resize", debounce(() => {
     const previousLimit = state.taskPage.limit

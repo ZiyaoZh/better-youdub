@@ -26,7 +26,7 @@ from .downloader import download_url_to_artifacts, supported_js_runtimes
 from .gpu import cleanup_gpu_memory
 from .ingest import create_pending_url_task, create_task_from_download_artifacts, create_task_from_local_media
 from .locking import TaskLock, TaskLockBusy, task_is_locked
-from .models import PipelineStep, StepStatus, Task, TaskStatus
+from .models import PipelineStep, StepStatus, Task, TaskStatus, utc_now
 from .pipeline import PipelineRunner
 from .storage import TaskStore
 from .synthesis import ffmpeg_has_filter
@@ -61,6 +61,7 @@ _GPU_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="youdub-gpu
 _LOCK = threading.RLock()
 _RUNNING: dict[str, Future[Any]] = {}
 _TASK_ALIASES: dict[str, str] = {}
+_TERMINATING: set[str] = set()
 
 GPU_STEPS = {
     PipelineStep.SEPARATE_AUDIO,
@@ -75,6 +76,11 @@ GPU_STEPS = {
 
 DEFAULT_TASK_LIST_LIMIT = 20
 MAX_TASK_LIST_LIMIT = 100
+TASK_TERMINATED_MESSAGE = "任务已终止"
+
+
+class TaskTerminationRequested(RuntimeError):
+    pass
 
 
 class UrlTaskRequest(BaseModel):
@@ -149,7 +155,7 @@ def create_app() -> FastAPI:
             "huggingface_token_configured": config.secrets.huggingface.token is not None,
             "openai_api_key_configured": config.secrets.openai.api_key is not None,
             "openai_base_url_configured": config.secrets.openai.base_url is not None,
-            "ffmpeg_subtitles_filter": ffmpeg_has_filter("subtitles"),
+            "ffmpeg_subtitles_filter": _ffmpeg_has_filter("subtitles"),
         }
 
     @app.get("/api/tasks")
@@ -274,6 +280,23 @@ def create_app() -> FastAPI:
         if _step_completed(task, PipelineStep.INGEST) and not force:
             raise HTTPException(status_code=409, detail="Step is already completed")
         _schedule_download_for_task(task, "web-download-url", force=force)
+        return _task_payload(task)
+
+    @app.post("/api/tasks/{task_id}/terminate")
+    def terminate_task(task_id: str) -> dict[str, Any]:
+        task = _get_task(task_id)
+        with _LOCK:
+            future = _unfinished_future_for_task(task_id) or _unfinished_future_for_task(task.id)
+            if future is None:
+                if task_is_locked(task.folder):
+                    raise HTTPException(status_code=409, detail="Task is running outside this WebUI process")
+                raise HTTPException(status_code=409, detail="Task is not running")
+            _request_task_termination(task_id, task.id)
+            canceled = future.cancel()
+            task = _mark_task_terminated(_store().get(task.id))
+            _store().update(task)
+            if canceled or future.done():
+                _clear_running_future(task_id, future)
         return _task_payload(task)
 
     @app.delete("/api/tasks/{task_id}", status_code=204)
@@ -478,6 +501,13 @@ def _optional_env(name: str) -> str | None:
     return value or None
 
 
+def _ffmpeg_has_filter(name: str) -> bool:
+    try:
+        return ffmpeg_has_filter(name)
+    except FileNotFoundError:
+        return False
+
+
 app = create_app()
 
 
@@ -571,6 +601,7 @@ def _task_payload(task: Task) -> dict[str, Any]:
     data["display_status"] = _task_display_status(task)
     data["queued"] = _task_queued(task.id)
     data["running"] = _task_running(task.id)
+    data["terminating"] = _task_terminating(task.id)
     data["artifacts"] = _artifact_summary(task)
     data["config"] = public_task_config(_config(), task.config)
     data["step_completion"] = _step_completion_summary(task)
@@ -587,6 +618,7 @@ def _task_list_payload(task: Task) -> dict[str, Any]:
         "display_status": _task_display_status(task),
         "queued": _task_queued(task.id),
         "running": _task_running(task.id),
+        "terminating": _task_terminating(task.id),
         "created_at": task.created_at,
         "updated_at": task.updated_at,
         "error": task.error,
@@ -603,6 +635,10 @@ def _active_step(task: Task) -> str | None:
 
 
 def _task_display_status(task: Task) -> str:
+    if _task_terminating(task.id):
+        return "terminating"
+    if task.status == TaskStatus.FAILED and task.error == TASK_TERMINATED_MESSAGE:
+        return "terminated"
     if (
         task.status == TaskStatus.SUCCESS
         and _step_completed(task, PipelineStep.PREPARE_PUBLISH)
@@ -634,6 +670,10 @@ def _task_running(task_id: str) -> bool:
     except KeyError:
         return False
     return task_is_locked(task.folder)
+
+
+def _task_terminating(task_id: str) -> bool:
+    return _termination_requested(task_id) and _unfinished_future_for_task(task_id) is not None
 
 
 def _task_queued(task_id: str) -> bool:
@@ -706,8 +746,55 @@ def _track_running(task_id: str, future: Future[Any]) -> Future[Any]:
 
 def _clear_running_future(task_id: str, future: Future[Any]) -> None:
     with _LOCK:
-        if _RUNNING.get(task_id) is future:
-            _RUNNING.pop(task_id, None)
+        for runtime_id in _runtime_task_ids(task_id):
+            if _RUNNING.get(runtime_id) is future:
+                _RUNNING.pop(runtime_id, None)
+        _clear_task_termination(task_id)
+
+
+def _request_task_termination(*task_ids: str) -> None:
+    for task_id in task_ids:
+        _TERMINATING.update(_runtime_task_ids(task_id))
+
+
+def _clear_task_termination(task_id: str) -> None:
+    for runtime_id in _runtime_task_ids(task_id):
+        _TERMINATING.discard(runtime_id)
+
+
+def _termination_requested(task_id: str) -> bool:
+    return any(runtime_id in _TERMINATING for runtime_id in _runtime_task_ids(task_id))
+
+
+def _raise_if_termination_requested(task_id: str) -> None:
+    if _termination_requested(task_id):
+        raise TaskTerminationRequested()
+
+
+def _runtime_task_ids(task_id: str) -> set[str]:
+    ids = {task_id}
+    changed = True
+    while changed:
+        changed = False
+        for source_id, target_id in _TASK_ALIASES.items():
+            if source_id in ids or target_id in ids:
+                before = len(ids)
+                ids.add(source_id)
+                ids.add(target_id)
+                changed = changed or len(ids) != before
+    return ids
+
+
+def _mark_task_terminated(task: Task, step: PipelineStep | None = None) -> Task:
+    task.status = TaskStatus.FAILED
+    task.error = TASK_TERMINATED_MESSAGE
+    if step is not None:
+        task.mark_step(step, StepStatus.FAILED)
+    for step_key, step_status in list(task.steps.items()):
+        if step_status in {StepStatus.QUEUED, StepStatus.RUNNING}:
+            task.steps[step_key] = StepStatus.FAILED
+    task.updated_at = utc_now()
+    return task
 
 
 def _executor_for_step(step: PipelineStep) -> ThreadPoolExecutor:
@@ -746,15 +833,18 @@ def _download_url_job(
     task = store.get(task_id)
     acquired_here = False
     try:
+        _raise_if_termination_requested(task_id)
         if task_lock is None:
             task_lock = TaskLock(task.folder, label).acquire(blocking=False)
             acquired_here = True
+        _raise_if_termination_requested(task_id)
         if force:
             _clear_step_outputs(task, PipelineStep.INGEST)
         task.status = TaskStatus.RUNNING
         task.error = None
         task.mark_step(PipelineStep.INGEST, StepStatus.RUNNING)
         store.update(task)
+        _raise_if_termination_requested(task_id)
 
         config = _config()
         result = download_url_to_artifacts(
@@ -762,6 +852,7 @@ def _download_url_job(
             config.root,
             download_config_from_task_config(config, task.config),
         )
+        _raise_if_termination_requested(task_id)
         incoming = create_task_from_download_artifacts(
             source=result.media_path,
             info_path=result.info_path,
@@ -771,8 +862,16 @@ def _download_url_job(
         task = _merge_downloaded_task(store, task, incoming)
         store.update(task)
         _alias_running_future(task_id, task.id)
+        _raise_if_termination_requested(task.id)
         _cleanup_pending_task_dir(config.root, task_lock.task_dir, task.folder)
         return task.id
+    except TaskTerminationRequested:
+        try:
+            task = store.get(_TASK_ALIASES.get(task_id, task_id))
+            store.update(_mark_task_terminated(task, PipelineStep.INGEST))
+        except KeyError:
+            pass
+        raise
     except Exception as exc:
         try:
             task = store.get(_TASK_ALIASES.get(task_id, task_id))
@@ -825,6 +924,8 @@ def _alias_running_future(source_id: str, target_id: str) -> None:
     future = _RUNNING.get(source_id)
     if future is not None:
         _RUNNING[target_id] = future
+    if source_id in _TERMINATING:
+        _TERMINATING.add(target_id)
 
 
 def _cleanup_pending_task_dir(root: Path, old_folder: Path, new_folder: Path) -> None:
@@ -848,15 +949,18 @@ def _run_step_job(
     task = store.get(task_id)
     acquired_here = False
     try:
+        _raise_if_termination_requested(task_id)
         if isinstance(task_lock, str):
             task_lock = TaskLock(task.folder, task_lock).acquire(blocking=False)
             acquired_here = True
+        _raise_if_termination_requested(task_id)
         if step != PipelineStep.REDUB_TTS or _redub_plan_has_segments(task):
             _clear_step_outputs(task, step)
         task.status = TaskStatus.RUNNING
         task.error = None
         task.mark_step(step, StepStatus.RUNNING)
         store.update(task)
+        _raise_if_termination_requested(task_id)
         options = runtime_options_from_task_config(_config(), task.config)
         if step == PipelineStep.PUBLISH_BILIBILI and not options.bilibili.dry_run and not options.bilibili.confirm:
             options = dry_run_bilibili_options(options)
@@ -870,6 +974,10 @@ def _run_step_job(
             tts_quality_config=options.tts_quality,
             redub_tts_config=options.redub_tts,
         ).run_step(task, step, task_lock=task_lock)
+        _raise_if_termination_requested(task_id)
+    except TaskTerminationRequested:
+        task = _mark_task_terminated(task, step)
+        raise
     except Exception as exc:
         task.status = TaskStatus.FAILED
         task.error = str(exc)
@@ -893,15 +1001,22 @@ def _run_all_job(task_id: str, task_lock: TaskLock | None = None) -> None:
         label = "web-run-all"
     try:
         task_id, task_lock = _download_for_run_all_if_needed(task_id, task_lock, label)
+        _raise_if_termination_requested(task_id)
         for step in _run_all_steps(task_id):
             task = _store().get(task_id)
+            _raise_if_termination_requested(task_id)
             if _step_completed(task, step):
                 continue
             _run_step_for_run_all(task_id, step, task_lock)
+            _raise_if_termination_requested(task_id)
         task = _store().get(task_id)
         task.status = TaskStatus.SUCCESS
         task.error = None
         _store().update(task)
+    except TaskTerminationRequested:
+        task = _store().get(_TASK_ALIASES.get(task_id, task_id))
+        _store().update(_mark_task_terminated(task))
+        raise
     finally:
         if task_lock is not None:
             task_lock.release()

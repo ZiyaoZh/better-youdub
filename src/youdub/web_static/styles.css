@@ -481,6 +481,12 @@ textarea:focus {
   border-color: #fedf89;
 }
 
+.status-terminating {
+  color: #93370d;
+  background: #fff6ed;
+  border-color: #f9dbaf;
+}
+
 .status-pending {
   color: var(--warning);
   background: #fffaeb;
