@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -53,15 +55,17 @@ def _basic_auth(username: str, password: str) -> dict[str, str]:
 def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) -> None:
     client = _client(monkeypatch, tmp_path)
 
-    for path in ("/", "/assets/app.js", "/assets/styles.css", "/api/health", "/api/doctor"):
+    for path in ("/", "/assets/app.js", "/assets/styles.css", "/api/health", "/api/doctor", "/api/system"):
         response = client.get(path)
         assert response.status_code == 200
 
     index = client.get("/").text
     assert 'id="workflowConfigButton"' in index
     assert 'id="terminateButton"' in index
+    assert 'id="systemLine"' in index
     assert 'id="taskPager"' in index
     assert 'id="finalVideo"' not in index
+    assert "20260706-system-monitor" in index
     assert "/assets/app.js?v=" in index
     assert "/assets/styles.css?v=" in index
     app_js = client.get("/assets/app.js").text
@@ -69,11 +73,14 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert "待上传" in app_js
     assert "终止中" in app_js
     assert "已终止" in app_js
+    assert "/api/system" in app_js
+    assert "CPU" in app_js
     assert "step-progress" in app_js
     assert "videoPreview" not in app_js
     styles = client.get("/assets/styles.css").text
     assert "step-progress-fill" in styles
     assert "status-terminating" in styles
+    assert "system-line" in styles
     assert "grid-template-rows: minmax(0, 1fr)" in styles
     assert "height: 100dvh" in styles
     assert "重配包含复核片段" in app_js
@@ -84,6 +91,83 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert "最大重配轮次" not in app_js
 
     assert client.get("/api/health").json() == {"status": "ok"}
+
+
+def test_web_system_status_reports_compact_resource_summary(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    gib = 1024 * 1024 * 1024
+    monkeypatch.setattr(web_module, "_cpu_percent", lambda: 12.3)
+    monkeypatch.setattr(web_module, "_memory_usage_payload", lambda: web_module._resource_usage_payload(2 * gib, 8 * gib))
+    monkeypatch.setattr(
+        web_module,
+        "_gpu_memory_usage_payload",
+        lambda: web_module._resource_usage_payload(3 * gib, 12 * gib),
+    )
+    monkeypatch.setattr(
+        web_module,
+        "_disk_usage_payload",
+        lambda path: {**web_module._resource_usage_payload(40 * gib, 100 * gib), "path": str(path)},
+    )
+
+    payload = client.get("/api/system").json()
+
+    assert payload == {
+        "cpu": {"percent": 12.3},
+        "memory": {"available": True, "used_bytes": 2 * gib, "total_bytes": 8 * gib, "percent": 25.0},
+        "gpu_memory": {"available": True, "used_bytes": 3 * gib, "total_bytes": 12 * gib, "percent": 25.0},
+        "disk": {
+            "available": True,
+            "used_bytes": 40 * gib,
+            "total_bytes": 100 * gib,
+            "percent": 40.0,
+            "path": str(tmp_path / "videos"),
+        },
+    }
+
+
+def test_web_gpu_memory_falls_back_to_torch_when_nvidia_smi_is_missing(monkeypatch) -> None:
+    gib = 1024 * 1024 * 1024
+
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def device_count() -> int:
+            return 2
+
+        @staticmethod
+        def mem_get_info(index: int) -> tuple[int, int]:
+            return {
+                0: (6 * gib, 8 * gib),
+                1: (10 * gib, 12 * gib),
+            }[index]
+
+    monkeypatch.setattr(web_module.shutil, "which", lambda name: None)
+    monkeypatch.setitem(sys.modules, "pynvml", None)
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=FakeCuda()))
+
+    payload = web_module._gpu_memory_usage_payload()
+
+    assert payload == {
+        "available": True,
+        "used_bytes": 4 * gib,
+        "total_bytes": 20 * gib,
+        "percent": 20.0,
+    }
+
+
+def test_web_disk_status_uses_existing_parent_for_missing_task_root(tmp_path: Path) -> None:
+    missing_root = tmp_path / "missing" / "videos"
+
+    payload = web_module._disk_usage_payload(missing_root)
+
+    assert payload["available"] is True
+    assert payload["used_bytes"] > 0
+    assert payload["total_bytes"] > 0
+    assert payload["path"] == str(missing_root)
+    assert not missing_root.exists()
 
 
 def test_web_step_completion_includes_progress_for_multi_output_steps(monkeypatch, tmp_path: Path) -> None:

@@ -22,6 +22,14 @@ if not torch.cuda.is_available():
 print(f"cuda_device_name={torch.cuda.get_device_name(0)}")
 PY
 
+echo "[check-gpu] checking nvidia-smi"
+if ! nvidia_smi_path="$(command -v nvidia-smi)"; then
+  echo "[check-gpu] nvidia-smi is not available; ensure NVIDIA_DRIVER_CAPABILITIES includes utility" >&2
+  exit 1
+fi
+echo "[check-gpu] nvidia-smi=$nvidia_smi_path"
+nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader,nounits
+
 echo "[check-gpu] checking demucs"
 demucs --help >/dev/null
 echo "[check-gpu] checking ffmpeg subtitle rendering support"

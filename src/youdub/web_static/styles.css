@@ -45,7 +45,7 @@ textarea {
 }
 
 .topbar {
-  height: 68px;
+  height: 84px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -54,6 +54,10 @@ textarea {
   border-bottom: 1px solid var(--border);
   background: var(--panel);
   box-shadow: var(--shadow);
+}
+
+.topbar-copy {
+  min-width: 0;
 }
 
 .topbar h1,
@@ -73,12 +77,21 @@ textarea {
   margin-top: 4px;
   color: var(--muted);
   font-size: 13px;
+  max-width: min(980px, calc(100vw - 112px));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.system-line {
+  color: #475467;
 }
 
 .topbar-actions {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 0 0 auto;
 }
 
 .workspace {

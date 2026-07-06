@@ -622,6 +622,9 @@ GPU 镜像使用适合 Ada GPU，例如 RTX 4090，的 CUDA 12 栈，并以 Whis
   在安装 WhisperX 或 Demucs 依赖时静默升级/降级 torch 栈
 - Demucs 本体从固定上游 commit 以 `--no-deps` 安装，避免它旧的
   torchaudio 元数据把 CUDA 12 的 PyTorch 栈降级
+- GPU compose 和镜像默认设置 `NVIDIA_DRIVER_CAPABILITIES=compute,utility`，
+  由 NVIDIA Container Toolkit 在运行时暴露 CUDA compute 能力、NVML 和
+  `nvidia-smi`；镜像不内置宿主机驱动包，避免驱动版本不匹配。
 
 默认基础镜像可通过 `PYTORCH_BASE_IMAGE` 覆盖。若宿主机到 Docker Hub 的
 `auth.docker.io` 不稳定，可以先从可访问的镜像仓库拉取同一 PyTorch 镜像并重打本地
@@ -663,6 +666,14 @@ docker compose -f compose.gpu.yml config
 docker compose -f compose.gpu.yml build
 docker compose -f compose.gpu.yml run --rm youdub-gpu scripts/check_gpu.sh
 ```
+
+`scripts/check_gpu.sh` 会检查 `nvidia-smi`。如果宿主机有 GPU 但容器内找不到
+`nvidia-smi`，先确认宿主机安装了 NVIDIA Container Toolkit，且没有覆盖
+`NVIDIA_DRIVER_CAPABILITIES=compute,utility`。
+
+WebUI 顶部系统监控的显存显示会优先使用 `nvidia-smi`；如果容器内没有该命令，
+会继续尝试 Python NVML 包和 `torch.cuda.mem_get_info()`，因此只要 PyTorch 能看到
+CUDA，显存通常仍能显示。
 
 启动 Web UI：
 

@@ -6,8 +6,10 @@ import json
 import os
 import secrets
 import shutil
+import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from http.cookiejar import MozillaCookieJar
@@ -157,6 +159,10 @@ def create_app() -> FastAPI:
             "openai_base_url_configured": config.secrets.openai.base_url is not None,
             "ffmpeg_subtitles_filter": _ffmpeg_has_filter("subtitles"),
         }
+
+    @app.get("/api/system")
+    def system_status() -> dict[str, Any]:
+        return _system_status_payload()
 
     @app.get("/api/tasks")
     def list_tasks(
@@ -506,6 +512,231 @@ def _ffmpeg_has_filter(name: str) -> bool:
         return ffmpeg_has_filter(name)
     except FileNotFoundError:
         return False
+
+
+def _system_status_payload() -> dict[str, Any]:
+    config = _config()
+    return {
+        "cpu": {"percent": _cpu_percent()},
+        "memory": _memory_usage_payload(),
+        "gpu_memory": _gpu_memory_usage_payload(),
+        "disk": _disk_usage_payload(config.root),
+    }
+
+
+def _cpu_percent() -> float | None:
+    first = _read_cpu_sample()
+    if first is None:
+        return None
+    time.sleep(0.05)
+    second = _read_cpu_sample()
+    if second is None:
+        return None
+    idle_delta = second["idle"] - first["idle"]
+    total_delta = second["total"] - first["total"]
+    if total_delta <= 0:
+        return None
+    return _round_percent((total_delta - idle_delta) / total_delta * 100)
+
+
+def _read_cpu_sample() -> dict[str, int] | None:
+    try:
+        first_line = Path("/proc/stat").read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, IndexError):
+        return None
+    parts = first_line.split()
+    if not parts or parts[0] != "cpu":
+        return None
+    try:
+        values = [int(value) for value in parts[1:]]
+    except ValueError:
+        return None
+    if len(values) < 4:
+        return None
+    idle = values[3] + (values[4] if len(values) > 4 else 0)
+    return {"idle": idle, "total": sum(values)}
+
+
+def _memory_usage_payload() -> dict[str, Any]:
+    meminfo = _read_meminfo()
+    total_kib = meminfo.get("MemTotal")
+    available_kib = meminfo.get("MemAvailable")
+    if total_kib is None or available_kib is None or total_kib <= 0:
+        return _resource_usage_payload(None, None)
+    total = total_kib * 1024
+    used = max(0, (total_kib - available_kib) * 1024)
+    return _resource_usage_payload(used, total)
+
+
+def _read_meminfo() -> dict[str, int]:
+    values: dict[str, int] = {}
+    try:
+        lines = Path("/proc/meminfo").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        key, separator, rest = line.partition(":")
+        if not separator:
+            continue
+        parts = rest.strip().split()
+        if not parts:
+            continue
+        try:
+            values[key] = int(parts[0])
+        except ValueError:
+            continue
+    return values
+
+
+def _gpu_memory_usage_payload() -> dict[str, Any]:
+    for reader in (
+        _gpu_memory_usage_from_nvidia_smi,
+        _gpu_memory_usage_from_pynvml,
+        _gpu_memory_usage_from_torch,
+    ):
+        payload = reader()
+        if payload["available"]:
+            return payload
+    return _resource_usage_payload(None, None, available=False)
+
+
+def _gpu_memory_usage_from_nvidia_smi() -> dict[str, Any]:
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi is None:
+        return _resource_usage_payload(None, None, available=False)
+    try:
+        result = subprocess.run(
+            [
+                nvidia_smi,
+                "--query-gpu=memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return _resource_usage_payload(None, None, available=False)
+    if result.returncode != 0:
+        return _resource_usage_payload(None, None, available=False)
+    used_mib = 0
+    total_mib = 0
+    for line in result.stdout.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 2:
+            continue
+        try:
+            used_mib += int(parts[0])
+            total_mib += int(parts[1])
+        except ValueError:
+            continue
+    if total_mib <= 0:
+        return _resource_usage_payload(None, None, available=False)
+    return _resource_usage_payload(used_mib * 1024 * 1024, total_mib * 1024 * 1024)
+
+
+def _gpu_memory_usage_from_pynvml() -> dict[str, Any]:
+    try:
+        import pynvml  # type: ignore[import-not-found]
+    except ImportError:
+        return _resource_usage_payload(None, None, available=False)
+    try:
+        pynvml.nvmlInit()
+        try:
+            count = pynvml.nvmlDeviceGetCount()
+            used = 0
+            total = 0
+            for index in range(count):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                used += int(info.used)
+                total += int(info.total)
+        finally:
+            pynvml.nvmlShutdown()
+    except Exception:
+        return _resource_usage_payload(None, None, available=False)
+    if total <= 0:
+        return _resource_usage_payload(None, None, available=False)
+    return _resource_usage_payload(used, total)
+
+
+def _gpu_memory_usage_from_torch() -> dict[str, Any]:
+    try:
+        import torch  # type: ignore[import-not-found]
+    except ImportError:
+        return _resource_usage_payload(None, None, available=False)
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None or not hasattr(cuda, "is_available") or not hasattr(cuda, "mem_get_info"):
+        return _resource_usage_payload(None, None, available=False)
+    try:
+        if not cuda.is_available():
+            return _resource_usage_payload(None, None, available=False)
+        count = int(cuda.device_count()) if hasattr(cuda, "device_count") else 1
+        used = 0
+        total = 0
+        for index in range(max(1, count)):
+            free_bytes, total_bytes = cuda.mem_get_info(index)
+            total_bytes = int(total_bytes)
+            free_bytes = int(free_bytes)
+            used += max(0, total_bytes - free_bytes)
+            total += total_bytes
+    except Exception:
+        return _resource_usage_payload(None, None, available=False)
+    if total <= 0:
+        return _resource_usage_payload(None, None, available=False)
+    return _resource_usage_payload(used, total)
+
+
+def _disk_usage_payload(path: Path) -> dict[str, Any]:
+    try:
+        usage = shutil.disk_usage(_existing_disk_usage_path(path))
+    except OSError:
+        return {
+            **_resource_usage_payload(None, None, available=False),
+            "path": str(path),
+        }
+    return {
+        **_resource_usage_payload(usage.used, usage.total),
+        "path": str(path),
+    }
+
+
+def _existing_disk_usage_path(path: Path) -> Path:
+    current = path
+    while True:
+        try:
+            if current.exists():
+                return current
+        except OSError:
+            pass
+        parent = current.parent
+        if parent == current:
+            return Path("/")
+        current = parent
+
+
+def _resource_usage_payload(
+    used_bytes: int | None,
+    total_bytes: int | None,
+    *,
+    available: bool | None = None,
+) -> dict[str, Any]:
+    if available is None:
+        available = used_bytes is not None and total_bytes is not None
+    percent = None
+    if used_bytes is not None and total_bytes is not None and total_bytes > 0:
+        percent = _round_percent(used_bytes / total_bytes * 100)
+    return {
+        "available": available,
+        "used_bytes": used_bytes,
+        "total_bytes": total_bytes,
+        "percent": percent,
+    }
+
+
+def _round_percent(value: float) -> float:
+    return round(max(0.0, min(100.0, value)), 1)
 
 
 app = create_app()

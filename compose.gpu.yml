@@ -29,6 +29,8 @@ services:
       XDG_CACHE_HOME: /tmp/youdub-cache/xdg
       NLTK_DATA: /cache/nltk
       TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD: "1"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
       HF_READ_TOKEN: ${HF_READ_TOKEN:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}

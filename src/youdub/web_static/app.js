@@ -225,6 +225,22 @@ function fmtSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
+function fmtCapacity(bytes) {
+  if (!Number.isFinite(bytes)) return "-"
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`
+}
+
+function fmtPercent(value) {
+  if (!Number.isFinite(value)) return "-"
+  return `${Math.round(value)}%`
+}
+
+function fmtResourceUsage(resource) {
+  if (!resource?.available) return "-"
+  return `${fmtCapacity(resource.used_bytes)}/${fmtCapacity(resource.total_bytes)} ${fmtPercent(resource.percent)}`
+}
+
 function statusLabel(status) {
   return {
     pending: "等待",
@@ -280,6 +296,19 @@ async function refreshDoctor() {
     $("runtimeLine").textContent = `${cookie} · ${openai} · ${doctor.root}`
   } catch (error) {
     $("runtimeLine").textContent = error.message
+  }
+}
+
+async function refreshSystem() {
+  try {
+    const system = await api("/api/system")
+    const cpu = fmtPercent(system.cpu?.percent)
+    const memory = fmtResourceUsage(system.memory)
+    const gpu = fmtResourceUsage(system.gpu_memory)
+    const disk = fmtResourceUsage(system.disk)
+    $("systemLine").textContent = `CPU ${cpu} · 内存 ${memory} · 显存 ${gpu} · 磁盘 ${disk}`
+  } catch (error) {
+    $("systemLine").textContent = `系统监控 ${error.message}`
   }
 }
 
@@ -888,6 +917,7 @@ function escapeHtml(value) {
 function bindEvents() {
   $("refreshButton").addEventListener("click", () => {
     refreshDoctor()
+    refreshSystem()
     refreshTasks()
   })
   $("prevTaskPageButton").addEventListener("click", () => changeTaskPage(-1))
@@ -921,18 +951,22 @@ function scheduleTaskPolling() {
   taskPollTimer = window.setTimeout(async () => {
     if (!document.hidden) {
       await refreshTasks().catch(() => undefined)
+      await refreshSystem().catch(() => undefined)
     }
     scheduleTaskPolling()
   }, delay)
 }
 
 bindEvents()
-Promise.all([loadDefaultConfig(), refreshDoctor(), refreshTasks()]).catch((error) => {
+Promise.all([loadDefaultConfig(), refreshDoctor(), refreshSystem(), refreshTasks()]).catch((error) => {
   $("runtimeLine").textContent = error.message
 }).finally(() => {
   scheduleTaskPolling()
 })
 
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) refreshTasks().catch(() => undefined)
+  if (!document.hidden) {
+    refreshTasks().catch(() => undefined)
+    refreshSystem().catch(() => undefined)
+  }
 })
