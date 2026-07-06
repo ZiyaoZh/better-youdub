@@ -69,6 +69,8 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert "videoPreview" not in app_js
     styles = client.get("/assets/styles.css").text
     assert "step-progress-fill" in styles
+    assert "grid-template-rows: minmax(0, 1fr)" in styles
+    assert "height: 100dvh" in styles
     assert "重配包含复核片段" in app_js
     assert "每轮最大重配片段" in app_js
     assert "质检轮次" not in app_js
