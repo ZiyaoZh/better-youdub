@@ -1003,7 +1003,59 @@ def test_web_runs_non_gpu_steps_on_worker_pool(monkeypatch, tmp_path: Path) -> N
         _wait_for_task_idle(client, second["id"])
 
 
-def test_web_queues_gpu_steps_on_single_gpu_worker(monkeypatch, tmp_path: Path) -> None:
+def test_web_executor_worker_counts_and_step_routes() -> None:
+    assert web_module._EXECUTOR._max_workers == 5
+    assert web_module._GPU_EXECUTOR._max_workers == 3
+    assert web_module._DUBBING_EXECUTOR._max_workers == 1
+    assert web_module._executor_for_step(PipelineStep.TTS) is web_module._DUBBING_EXECUTOR
+    assert web_module._executor_for_step(PipelineStep.REDUB_TTS) is web_module._DUBBING_EXECUTOR
+    assert web_module._executor_for_step(PipelineStep.SEPARATE_AUDIO) is web_module._GPU_EXECUTOR
+    assert web_module._executor_for_step(PipelineStep.TRANSCRIBE) is web_module._GPU_EXECUTOR
+    assert web_module._executor_for_step(PipelineStep.TRANSCRIBE_TTS) is web_module._GPU_EXECUTOR
+    assert web_module._executor_for_step(PipelineStep.TRANSLATE) is web_module._EXECUTOR
+
+
+def test_web_runs_non_dubbing_gpu_steps_on_gpu_worker_pool(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    tasks = []
+    for index in range(4):
+        source = tmp_path / f"gpu-{index}.mp4"
+        source.write_bytes(f"gpu-{index}".encode("ascii"))
+        tasks.append(client.post("/api/tasks/local", json={"source": str(source), "title": f"GPU {index}"}).json())
+    started: list[str] = []
+    started_lock = threading.Lock()
+    third_started = threading.Event()
+    fourth_started = threading.Event()
+    release = threading.Event()
+
+    def delayed_job(task_id: str, *args: object, **kwargs: object) -> None:
+        with started_lock:
+            started.append(task_id)
+            if len(started) == 3:
+                third_started.set()
+            if len(started) == 4:
+                fourth_started.set()
+        release.wait(timeout=2)
+
+    monkeypatch.setattr(web_module, "_run_step_job", delayed_job)
+
+    responses = [client.post(f"/api/tasks/{task['id']}/run", json={"step": "separate-audio"}) for task in tasks]
+
+    try:
+        assert [response.status_code for response in responses] == [200, 200, 200, 200]
+        assert third_started.wait(timeout=1)
+        assert responses[3].json()["queued"] is True
+        assert not fourth_started.wait(timeout=0.2)
+        with started_lock:
+            assert len(started) == 3
+    finally:
+        release.set()
+        for task in tasks:
+            _wait_for_task_idle(client, task["id"])
+    assert set(started) == {task["id"] for task in tasks}
+
+
+def test_web_queues_dubbing_steps_on_single_dubbing_worker(monkeypatch, tmp_path: Path) -> None:
     client = _client(monkeypatch, tmp_path)
     first_source = tmp_path / "first.mp4"
     second_source = tmp_path / "second.mp4"
@@ -1028,8 +1080,8 @@ def test_web_queues_gpu_steps_on_single_gpu_worker(monkeypatch, tmp_path: Path) 
 
     monkeypatch.setattr(web_module, "_run_step_job", delayed_job)
 
-    first_response = client.post(f"/api/tasks/{first['id']}/run", json={"step": "separate-audio"})
-    second_response = client.post(f"/api/tasks/{second['id']}/run", json={"step": "separate-audio"})
+    first_response = client.post(f"/api/tasks/{first['id']}/run", json={"step": "tts"})
+    second_response = client.post(f"/api/tasks/{second['id']}/run", json={"step": "tts"})
 
     try:
         assert first_response.status_code == 200
@@ -1045,7 +1097,7 @@ def test_web_queues_gpu_steps_on_single_gpu_worker(monkeypatch, tmp_path: Path) 
     assert started == [first["id"], second["id"]]
 
 
-def test_web_terminates_queued_gpu_task(monkeypatch, tmp_path: Path) -> None:
+def test_web_terminates_queued_dubbing_task(monkeypatch, tmp_path: Path) -> None:
     client = _client(monkeypatch, tmp_path)
     first_source = tmp_path / "first.mp4"
     second_source = tmp_path / "second.mp4"
@@ -1068,8 +1120,8 @@ def test_web_terminates_queued_gpu_task(monkeypatch, tmp_path: Path) -> None:
 
     monkeypatch.setattr(web_module, "_run_step_job", delayed_job)
 
-    first_response = client.post(f"/api/tasks/{first['id']}/run", json={"step": "separate-audio"})
-    second_response = client.post(f"/api/tasks/{second['id']}/run", json={"step": "separate-audio"})
+    first_response = client.post(f"/api/tasks/{first['id']}/run", json={"step": "tts"})
+    second_response = client.post(f"/api/tasks/{second['id']}/run", json={"step": "tts"})
 
     try:
         assert first_response.status_code == 200
@@ -1087,7 +1139,7 @@ def test_web_terminates_queued_gpu_task(monkeypatch, tmp_path: Path) -> None:
         assert payload["status"] == "failed"
         assert payload["display_status"] == "terminated"
         assert payload["error"] == web_module.TASK_TERMINATED_MESSAGE
-        assert payload["steps"]["separate-audio"] == "failed"
+        assert payload["steps"]["tts"] == "failed"
         assert not second_started.wait(timeout=0.2)
     finally:
         release.set()

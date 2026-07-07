@@ -246,11 +246,12 @@ BILI_BILI_JCT=
   重复启动同一任务的下载、单步或完整链路会被拒绝；Web API 返回 `409 Task is
   already running`。该锁用于当前单实例/共享卷部署下保护任务产物，不替代后续
   多 worker 队列和数据库事务设计。
-- Web 后台执行器按步骤分流：非 GPU 步骤使用 `max_workers=3` 的通用 worker 并发执行；
-  Demucs、WhisperX、TTS 和 TTS 后识别使用单 worker GPU 队列串行执行。任务锁只在
-  后台 job 真正开始时获取，排队任务不会提前占用目录锁。`run-all` 保持同一任务内步骤
-  顺序，遇到 GPU 步骤时按单步骤进入 GPU 队列。`tasks.json` 的读取-修改-写入仍在进程内
-  串行化，当前设计继续限定为单 Web 实例。
+- Web 后台执行器按步骤分流：非 GPU worker 使用 `max_workers=5` 并发执行下载、翻译、
+  字幕、合成、发布包和上传等步骤；GPU worker 使用 `max_workers=3` 并发执行 Demucs、
+  WhisperX、TTS 后识别等非配音独占步骤；`tts` 和 `redub-tts` 使用单 worker 配音队列
+  串行执行。任务锁只在后台 job 真正开始时获取，排队任务不会提前占用目录锁。`run-all`
+  保持同一任务内步骤顺序，遇到 GPU 或配音生成步骤时按单步骤进入对应队列等待完成。
+  `tasks.json` 的读取-修改-写入仍在进程内串行化，当前设计继续限定为单 Web 实例。
 - Web UI 已改为任务级参数模型：新任务会保存默认配置快照，任务详情页可独立覆盖
   下载、WhisperX、翻译、TTS、合成、发布包和 Bilibili 参数。URL 创建支持两种
   Web 入口：直接“下载并创建”会在下载成功后创建或复用稳定任务；“先创建任务”会

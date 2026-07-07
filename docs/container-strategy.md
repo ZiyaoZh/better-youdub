@@ -172,11 +172,12 @@ TORCH_HOME=/cache/torch
 
 `YOUDUB_DOWNLOAD_MAX_HEIGHT=0` 表示不限制下载高度。Compose 默认不注入具体高度，
 以便 `/data/config/youdub.json` 的运行时默认值和 Web UI 任务级下载参数按预期生效。
-Web 后台执行器按步骤分流：下载、翻译、字幕、合成、发布包和上传等非 GPU 步骤使用
-`max_workers=3` 的通用 worker 并发运行；Demucs、WhisperX、TTS 和 TTS 后识别使用
-单 worker GPU 队列串行运行。`run-all` 仍保持同一任务内步骤顺序，遇到 GPU 步骤时按
-单步骤进入 GPU 队列。同一任务仍由 `_RUNNING` 和目录 `.task.lock` 互斥，`tasks.json`
-保持进程内单写入。
+Web 后台执行器按步骤分流：非 GPU worker 使用 `max_workers=5` 并发运行下载、翻译、
+字幕、合成、发布包和上传等步骤；GPU worker 使用 `max_workers=3` 并发运行 Demucs、
+WhisperX、TTS 后识别等非配音独占步骤；`tts` 和 `redub-tts` 使用单 worker 配音队列
+串行运行，避免共享配音模型并发。`run-all` 仍保持同一任务内步骤顺序，遇到 GPU 或
+配音生成步骤时按单步骤进入对应队列等待完成。同一任务仍由 `_RUNNING` 和目录
+`.task.lock` 互斥，`tasks.json` 保持进程内单写入。
 Web UI 列表接口只返回分页摘要，完整详情按选中任务单独读取；产物区只提供下载链接，
 不在页面内直接预览最终 `video.mp4`，以降低远程低带宽连接的默认传输量。
 

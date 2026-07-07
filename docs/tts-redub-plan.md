@@ -395,7 +395,7 @@ segments/tts_versions/
 
 - 不对同一片段在同一轮内多次采样择优，避免 VoxCPM2 推理成本暴涨。
 - `max_rounds` 默认 1。
-- 单任务 `max_segments_per_round` 默认 50，防止坏任务一次占满 GPU 队列。
+- 单任务 `max_segments_per_round` 默认 50，防止坏任务一次占满配音队列。
 - 如果某任务 `hard` 比例超过 20%，建议标记为 `task_review_required`，不要直接重配
   全部片段。这个保护只用于控制 GPU 成本和提示人工复核，不用于推断任务来源、频道或
   内容类型存在系统性问题。
@@ -703,7 +703,7 @@ PYTHONPATH="$PWD/src" python3 -m youdub.cli run-task <task-id> --step inspect-tt
    `tts.redub.plan.json`，不改 TTS。
 2. 接入 `inspect-tts` CLI 和 Pipeline/Web 输出，不进入默认 `run-all`。
 3. 新增 `tts_redub.py`，实现按 plan 局部重配、备份、重建 mix。
-4. 接入 `redub-tts` CLI、Pipeline/Web、GPU 队列和清理规则。
+4. 接入 `redub-tts` CLI、Pipeline/Web、配音独占队列和清理规则。
 5. 增加 workflow 配置，允许用户显式开启 `run-all` 自动一轮重配。
 6. 对高异常任务做保护：hard 比例超过阈值时只出报告，不自动重配。
 7. 观察真实任务效果后再考虑多候选采样和局部 ASR 优化。

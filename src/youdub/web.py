@@ -58,8 +58,9 @@ ARTIFACTS: dict[str, tuple[str, str]] = {
 }
 
 
-_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="youdub-web")
-_GPU_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="youdub-gpu")
+_EXECUTOR = ThreadPoolExecutor(max_workers=5, thread_name_prefix="youdub-web")
+_GPU_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="youdub-gpu")
+_DUBBING_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="youdub-dubbing")
 _LOCK = threading.RLock()
 _RUNNING: dict[str, Future[Any]] = {}
 _TASK_ALIASES: dict[str, str] = {}
@@ -73,6 +74,10 @@ GPU_STEPS = {
     PipelineStep.TRANSCRIBE_DIARIZE,
     PipelineStep.TTS,
     PipelineStep.TRANSCRIBE_TTS,
+    PipelineStep.REDUB_TTS,
+}
+DUBBING_STEPS = {
+    PipelineStep.TTS,
     PipelineStep.REDUB_TTS,
 }
 
@@ -1029,11 +1034,19 @@ def _mark_task_terminated(task: Task, step: PipelineStep | None = None) -> Task:
 
 
 def _executor_for_step(step: PipelineStep) -> ThreadPoolExecutor:
-    return _GPU_EXECUTOR if _step_uses_gpu(step) else _EXECUTOR
+    if _step_requires_dubbing_exclusivity(step):
+        return _DUBBING_EXECUTOR
+    if _step_uses_gpu(step):
+        return _GPU_EXECUTOR
+    return _EXECUTOR
 
 
 def _step_uses_gpu(step: PipelineStep) -> bool:
     return step in GPU_STEPS
+
+
+def _step_requires_dubbing_exclusivity(step: PipelineStep) -> bool:
+    return step in DUBBING_STEPS
 
 
 def _mark_task_scheduled(task: Task, step: PipelineStep | None = None) -> None:
@@ -1254,17 +1267,29 @@ def _run_all_job(task_id: str, task_lock: TaskLock | None = None) -> None:
 
 
 def _run_step_for_run_all(task_id: str, step: PipelineStep, task_lock: TaskLock | None) -> None:
+    if _step_requires_dubbing_exclusivity(step):
+        _run_step_for_run_all_on_executor(_DUBBING_EXECUTOR, task_id, step, task_lock)
+        return
     if _step_uses_gpu(step):
-        _mark_run_all_step_queued(task_id, step)
-        _GPU_EXECUTOR.submit(
-            _run_step_job,
-            task_id,
-            step,
-            task_lock=task_lock,
-            release_lock=False,
-        ).result()
+        _run_step_for_run_all_on_executor(_GPU_EXECUTOR, task_id, step, task_lock)
         return
     _run_step_job(task_id, step, task_lock=task_lock, release_lock=False)
+
+
+def _run_step_for_run_all_on_executor(
+    executor: ThreadPoolExecutor,
+    task_id: str,
+    step: PipelineStep,
+    task_lock: TaskLock | None,
+) -> None:
+    _mark_run_all_step_queued(task_id, step)
+    executor.submit(
+        _run_step_job,
+        task_id,
+        step,
+        task_lock=task_lock,
+        release_lock=False,
+    ).result()
 
 
 def _mark_run_all_step_queued(task_id: str, step: PipelineStep) -> None:
