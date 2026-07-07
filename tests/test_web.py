@@ -326,6 +326,8 @@ def test_web_creates_local_task_and_lists_artifacts(monkeypatch, tmp_path: Path)
     artifacts = client.get(f"/api/tasks/{task['id']}/artifacts").json()["artifacts"]
     assert artifacts[0]["key"] == "download-video"
     assert artifacts[0]["url"] == f"/api/tasks/{task['id']}/artifacts/download-video"
+    saved_task = json.loads((tmp_path / "tasks" / "tasks.json").read_text(encoding="utf-8"))[0]
+    assert saved_task["config"] == {}
 
 
 def test_web_task_list_paginates_summary_payloads(monkeypatch, tmp_path: Path) -> None:
@@ -383,6 +385,9 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert task["config"]["tts"]["min_reference_ms"] == 1200
     assert task["config"]["tts"]["start_pad_ms"] == 80
     assert task["config"]["tts"]["end_pad_ms"] == 160
+    config_path = tmp_path / "tasks" / "tasks.json"
+    saved_task = json.loads(config_path.read_text(encoding="utf-8"))[0]
+    assert saved_task["config"] == {}
 
     updated = client.put(
         f"/api/tasks/{task['id']}/config",
@@ -413,12 +418,18 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert updated.json()["config"]["translation"]["api_key"] == "********"
     assert updated.json()["config"]["download"]["max_height"] == 720
 
-    config_path = tmp_path / "tasks" / "tasks.json"
     saved_task = json.loads(config_path.read_text(encoding="utf-8"))[0]
-    assert saved_task["config"]["translation"]["api_key"] == "sk-task"
-    assert saved_task["config"]["translation"]["segment_extra_prompt"] == "使用中文主播口吻。"
-    assert saved_task["config"]["translation"]["correction_prompt"] == "把 tax shooter 视为 Tack Shooter。"
-    assert saved_task["config"]["whisperx"]["batch_size"] == 12
+    assert saved_task["config"] == {
+        "download": {"proxy": "http://127.0.0.1:7890", "max_height": 720},
+        "whisperx": {"batch_size": 12},
+        "translation": {
+            "api_key": "sk-task",
+            "base_url": "https://example.test/v1",
+            "model": "gpt-task",
+            "segment_extra_prompt": "使用中文主播口吻。",
+            "correction_prompt": "把 tax shooter 视为 Tack Shooter。",
+        },
+    }
 
     masked_payload = updated.json()["config"]
     masked_payload["translation"]["model"] = "gpt-task-2"
@@ -488,6 +499,16 @@ def test_web_url_task_uses_and_saves_download_config(monkeypatch, tmp_path: Path
         "max_height": 720,
         "force_download": True,
     }
+    saved_task = json.loads((tmp_path / "tasks" / "tasks.json").read_text(encoding="utf-8"))[0]
+    assert saved_task["config"] == {
+        "download": {
+            "use_cookies": False,
+            "cookies_path": "/tmp/custom-cookies.txt",
+            "proxy": "http://127.0.0.1:7890",
+            "max_height": 720,
+            "force_download": True,
+        }
+    }
 
 
 def test_web_can_create_url_draft_before_download(monkeypatch, tmp_path: Path) -> None:
@@ -515,6 +536,8 @@ def test_web_can_create_url_draft_before_download(monkeypatch, tmp_path: Path) -
     assert task["artifacts"] == []
     assert Path(task["folder"]).parent == tmp_path / "videos" / "_pending"
     assert task["config"]["download"]["max_height"] == 720
+    saved_task = json.loads((tmp_path / "tasks" / "tasks.json").read_text(encoding="utf-8"))[0]
+    assert saved_task["config"] == {"download": {"max_height": 720}}
 
 
 def test_web_url_draft_reuses_existing_task_by_normalized_url(monkeypatch, tmp_path: Path) -> None:

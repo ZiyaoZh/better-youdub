@@ -36,9 +36,11 @@ from .task_config import (
     default_task_config,
     download_config_from_task_config,
     dry_run_bilibili_options,
+    effective_task_config,
     normalize_task_config_update,
     public_task_config,
     runtime_options_from_task_config,
+    sparse_task_config,
 )
 
 ALLOWED_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".flv", ".wmv"}
@@ -232,7 +234,6 @@ def create_app() -> FastAPI:
     def create_local_task(payload: LocalTaskRequest) -> dict[str, Any]:
         config = _config()
         task = create_task_from_local_media(Path(payload.source), config.root, payload.title)
-        task.config = default_task_config(config)
         _store().add(task)
         return _task_payload(task)
 
@@ -253,7 +254,6 @@ def create_app() -> FastAPI:
             if upload_path.stat().st_size <= 0:
                 raise HTTPException(status_code=422, detail="Uploaded file is empty")
             task = create_task_from_local_media(upload_path, config.root, title or Path(original_name).stem)
-            task.config = default_task_config(config)
             _store().add(task)
             return _task_payload(task)
         finally:
@@ -771,19 +771,34 @@ def _download_config_from_url_payload(config: AppConfig, payload: UrlTaskRequest
 
 
 def _task_config_for_url_payload(config: AppConfig, payload: UrlTaskRequest) -> dict[str, Any]:
-    task_config = default_task_config(config)
-    cookies_path = payload.cookies_path if payload.cookies_path is not None else task_config["download"]["cookies_path"]
+    defaults = default_task_config(config)
+    effective = default_task_config(config)
+    download = effective["download"]
+    fields_set = _payload_fields_set(payload)
+
+    cookies_path = download["cookies_path"]
+    if "cookies_path" in fields_set:
+        cookies_path = payload.cookies_path or ""
     if _clean_text(payload.cookies_content) and not _clean_text(cookies_path):
         cookies_path = str(config.cookies_path) if config.cookies_path is not None else ""
-    task_config["download"] = {
-        **task_config["download"],
-        "use_cookies": payload.use_cookies,
-        "cookies_path": cookies_path,
-        "proxy": payload.proxy if payload.proxy is not None else task_config["download"]["proxy"],
-        "max_height": payload.max_height if payload.max_height is not None else task_config["download"]["max_height"],
-        "force_download": payload.force_download,
-    }
-    return task_config
+    if "use_cookies" in fields_set:
+        download["use_cookies"] = payload.use_cookies
+    if "cookies_path" in fields_set or _clean_text(payload.cookies_content):
+        download["cookies_path"] = cookies_path
+    if "proxy" in fields_set:
+        download["proxy"] = payload.proxy or ""
+    if "max_height" in fields_set and payload.max_height is not None:
+        download["max_height"] = payload.max_height
+    if "force_download" in fields_set:
+        download["force_download"] = payload.force_download
+    return sparse_task_config(defaults, effective)
+
+
+def _payload_fields_set(payload: BaseModel) -> set[str]:
+    fields = getattr(payload, "model_fields_set", None)
+    if fields is None:
+        fields = getattr(payload, "__fields_set__", set())
+    return set(fields)
 
 
 def _find_task_by_source_url(url: str) -> Task | None:
@@ -1333,14 +1348,14 @@ def _run_all_steps_for_task(task: Task) -> tuple[PipelineStep, ...]:
         PipelineStep.SYNTHESIZE,
         PipelineStep.PREPARE_PUBLISH,
     ]
-    workflow = task.config.get("workflow") if isinstance(task.config, dict) else None
-    enable_tts_redub = isinstance(workflow, dict) and bool(workflow.get("enable_tts_redub"))
+    workflow = effective_task_config(_config(), task.config)["workflow"]
+    enable_tts_redub = bool(workflow["enable_tts_redub"])
     if enable_tts_redub:
         steps.insert(steps.index(PipelineStep.SYNTHESIZE), PipelineStep.INSPECT_TTS)
         steps.insert(steps.index(PipelineStep.SYNTHESIZE), PipelineStep.REDUB_TTS)
         steps.insert(steps.index(PipelineStep.SYNTHESIZE), PipelineStep.TRANSCRIBE_TTS)
         steps.insert(steps.index(PipelineStep.SYNTHESIZE), PipelineStep.SUBTITLE)
-    include_bilibili_upload = isinstance(workflow, dict) and bool(workflow.get("include_bilibili_upload"))
+    include_bilibili_upload = bool(workflow["include_bilibili_upload"])
     if include_bilibili_upload:
         steps.append(PipelineStep.PUBLISH_BILIBILI)
     return tuple(steps)
@@ -1471,8 +1486,8 @@ def _missing_step_resources(task: Task, step: PipelineStep) -> list[str]:
 
 def _step_outputs_for_task(task: Task, step: PipelineStep) -> tuple[str, ...]:
     if step == PipelineStep.PUBLISH_BILIBILI:
-        bilibili = task.config.get("bilibili") if isinstance(task.config, dict) else None
-        dry_run = not isinstance(bilibili, dict) or bool(bilibili.get("dry_run", True)) or not bool(bilibili.get("confirm"))
+        bilibili = effective_task_config(_config(), task.config)["bilibili"]
+        dry_run = bool(bilibili["dry_run"]) or not bool(bilibili["confirm"])
         return ("bilibili.dry-run.json",) if dry_run else ("bilibili.json",)
     return STEP_OUTPUTS.get(step, ())
 
@@ -1610,12 +1625,12 @@ def _task_download_cookies_path(task: Task) -> Path | None:
 
 def _ensure_task_download_cookies_path(task: Task, path: Path) -> None:
     config = _config()
-    normalized = normalize_task_config_update(config, task.config, task.config)
-    download = normalized.setdefault("download", {})
+    effective = effective_task_config(config, task.config)
+    download = effective.setdefault("download", {})
     if not _clean_text(download.get("cookies_path")):
         download["cookies_path"] = str(path)
     download["use_cookies"] = True
-    task.config = normalized
+    task.config = normalize_task_config_update(config, task.config, effective)
     _store().update(task)
 
 

@@ -6,6 +6,7 @@ from youdub.task_config import (
     WEB_TRANSLATION_BASE_URL_DEFAULT,
     WEB_TRANSLATION_MODEL_DEFAULT,
     default_task_config,
+    effective_task_config,
     normalize_task_config_update,
     runtime_options_from_task_config,
 )
@@ -27,7 +28,7 @@ def test_task_config_empty_secret_defaults_fall_back_to_runtime_secrets(monkeypa
     assert "Bloons TD 6" in task_config["translation"]["correction_prompt"]
     assert task_config["whisperx"]["hf_token"] == ""
 
-    options = runtime_options_from_task_config(config, task_config)
+    options = runtime_options_from_task_config(config, {})
 
     assert options.translation.api_key == "sk-env"
     assert options.translation.model == "gpt-env"
@@ -186,8 +187,18 @@ def test_task_config_partial_update_preserves_sections_and_masked_secrets(monkey
         },
     )
 
-    assert updated["download"]["max_height"] == 480
-    assert updated["translation"]["api_key"] == "sk-current"
-    assert updated["translation"]["model"] == "gpt-updated"
-    assert updated["translation"]["segment_extra_prompt"] == "旧分段提示"
-    assert updated["tts"]["cfg_value"] == 3.0
+    assert updated == {
+        "download": {"max_height": 480},
+        "translation": {
+            "api_key": "sk-current",
+            "model": "gpt-updated",
+            "segment_extra_prompt": "旧分段提示",
+        },
+        "tts": {"cfg_value": 3.0},
+    }
+    effective = effective_task_config(config, updated)
+    assert effective["download"]["max_height"] == 480
+    assert effective["translation"]["api_key"] == ""
+    assert effective["translation"]["model"] == "gpt-updated"
+    assert effective["translation"]["segment_extra_prompt"] == "旧分段提示"
+    assert effective["tts"]["cfg_value"] == 3.0

@@ -1,0 +1,4 @@
+interface:
+  display_name: "YouDub WebUI Low Bandwidth"
+  short_description: "Low-bandwidth YouDub WebUI rules"
+  default_prompt: "Use $youdub-webui-low-bandwidth when changing YouDub WebUI behavior or layout."

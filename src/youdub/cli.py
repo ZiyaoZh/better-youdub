@@ -2,47 +2,25 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
 from .config import AppConfig
 from .constants import TEST_VIDEO_URL
-from .downloader import DownloadConfig, download_url_to_artifacts, supported_js_runtimes
+from .downloader import download_url_to_artifacts, supported_js_runtimes
 from .ingest import create_task_from_download_artifacts, create_task_from_local_media
 from .media import require_binary
 from .models import PipelineStep
 from .pipeline import PipelineRunner
-from .publishing import BilibiliPublishConfig, PublishPackageConfig
-from .synthesis import SynthesisConfig, ffmpeg_has_filter
+from .synthesis import ffmpeg_has_filter
 from .storage import TaskStore
-from .tts import (
-    DEFAULT_TTS_ALIGN_AUDIO,
-    DEFAULT_TTS_CACHE_MODEL,
-    DEFAULT_TTS_CFG_VALUE,
-    DEFAULT_TTS_END_PAD_MS,
-    DEFAULT_TTS_INFERENCE_TIMESTEPS,
-    DEFAULT_TTS_LOAD_DENOISER,
-    DEFAULT_TTS_MIN_REFERENCE_MS,
-    DEFAULT_TTS_MODEL,
-    DEFAULT_TTS_START_PAD_MS,
-    DEFAULT_TTS_STRETCH_BASE_MAX,
-    DEFAULT_TTS_STRETCH_BASE_MIN,
-    DEFAULT_TTS_STRETCH_LOCAL_MAX,
-    DEFAULT_TTS_STRETCH_LOCAL_MIN,
-    TTSConfig,
+from .task_config import (
+    default_task_config,
+    download_config_from_task_config,
+    merge_task_config_overrides,
+    runtime_options_from_task_config,
+    sparse_task_config,
 )
-from .tts_quality import TTSQualityConfig
-from .tts_redub import RedubTTSConfig
-from .translation import (
-    DEFAULT_CONTEXT_EXTRA_PROMPT,
-    DEFAULT_CORRECTION_PROMPT,
-    DEFAULT_SEGMENT_EXTRA_PROMPT,
-    DEFAULT_SUMMARY_EXTRA_PROMPT,
-    DEFAULT_TRANSLATION_EXTRA_PROMPT,
-    TranslationConfig,
-)
-from .transcription import WhisperXConfig
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,25 +49,30 @@ def build_parser() -> argparse.ArgumentParser:
     create_url_task.add_argument(
         "--cookies",
         type=Path,
+        default=argparse.SUPPRESS,
         help="Optional Netscape cookies.txt path; defaults to YOUDUB_COOKIES_PATH",
     )
     create_url_task.add_argument(
         "--no-cookies",
         action="store_true",
+        default=argparse.SUPPRESS,
         help="Ignore YOUDUB_COOKIES_PATH and do not pass cookies to yt-dlp",
     )
     create_url_task.add_argument(
         "--proxy",
+        default=argparse.SUPPRESS,
         help="Optional yt-dlp proxy URL; defaults to YOUDUB_YTDLP_PROXY",
     )
     create_url_task.add_argument(
         "--max-height",
         type=int,
+        default=argparse.SUPPRESS,
         help="Preferred maximum video height; use 0 for no height limit",
     )
     create_url_task.add_argument(
         "--force-download",
         action="store_true",
+        default=argparse.SUPPRESS,
         help="Download media again even if download.mp4 already exists",
     )
 
@@ -121,305 +104,295 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_task.add_argument(
         "--whisper-model",
-        default=os.getenv("YOUDUB_WHISPER_MODEL", "large-v2"),
+        default=argparse.SUPPRESS,
         help="WhisperX model name for transcription steps",
     )
     run_task.add_argument(
         "--whisper-device",
-        default=os.getenv("YOUDUB_WHISPER_DEVICE", "auto"),
+        default=argparse.SUPPRESS,
         help="WhisperX device: auto, cuda, or cpu",
     )
     run_task.add_argument(
         "--whisper-batch-size",
         type=int,
-        default=int(os.getenv("YOUDUB_WHISPER_BATCH_SIZE", "32")),
+        default=argparse.SUPPRESS,
         help="WhisperX batch size",
     )
     run_task.add_argument(
         "--whisper-language",
-        default=_optional_str_env("YOUDUB_WHISPER_LANGUAGE"),
+        default=argparse.SUPPRESS,
         help="Optional WhisperX language code, for example zh or en",
     )
     run_task.add_argument(
         "--whisper-initial-prompt",
-        default=_optional_str_env("YOUDUB_WHISPER_INITIAL_PROMPT"),
+        default=argparse.SUPPRESS,
         help="Optional Whisper initial prompt for transcription decoding",
     )
     run_task.add_argument(
         "--no-diarization",
         action="store_false",
         dest="diarization",
-        default=os.getenv("YOUDUB_WHISPER_DIARIZATION", "1") not in {"0", "false", "False"},
+        default=argparse.SUPPRESS,
         help="Skip speaker diarization and assign SPEAKER_00 to all segments",
     )
     run_task.add_argument(
         "--min-speakers",
         type=int,
-        default=_optional_int_env("YOUDUB_WHISPER_MIN_SPEAKERS"),
+        default=argparse.SUPPRESS,
     )
     run_task.add_argument(
         "--max-speakers",
         type=int,
-        default=_optional_int_env("YOUDUB_WHISPER_MAX_SPEAKERS"),
+        default=argparse.SUPPRESS,
     )
     run_task.add_argument(
         "--translation-language",
-        default=os.getenv("YOUDUB_TRANSLATION_LANGUAGE", "简体中文"),
+        default=argparse.SUPPRESS,
         help="Target language for translation output",
     )
     run_task.add_argument(
         "--translation-batch-size",
         type=int,
-        default=int(os.getenv("YOUDUB_TRANSLATION_BATCH_SIZE", "20")),
+        default=argparse.SUPPRESS,
         help="Number of transcript segments per translation request",
     )
     run_task.add_argument(
         "--translation-extra-prompt",
-        default=None,
+        default=argparse.SUPPRESS,
         help="Additional prompt applied to all translation model requests",
     )
     run_task.add_argument(
         "--translation-summary-extra-prompt",
-        default=None,
+        default=argparse.SUPPRESS,
         help="Additional prompt applied to summary translation",
     )
     run_task.add_argument(
         "--translation-context-extra-prompt",
-        default=None,
+        default=argparse.SUPPRESS,
         help="Additional prompt applied to translation context generation",
     )
     run_task.add_argument(
         "--translation-segment-extra-prompt",
-        default=None,
+        default=argparse.SUPPRESS,
         help="Additional prompt applied to segment translation",
     )
     run_task.add_argument(
         "--translation-correction-prompt",
-        default=None,
+        default=argparse.SUPPRESS,
         help="Prompt for glossary, ASR correction, and special translation fixes",
     )
     run_task.add_argument(
         "--tts-model",
-        default=os.getenv("YOUDUB_TTS_MODEL", os.getenv("VOXCPM_MODEL", DEFAULT_TTS_MODEL)),
+        default=argparse.SUPPRESS,
         help="VoxCPM2 Hugging Face model id for TTS",
     )
     run_task.add_argument(
         "--tts-model-dir",
         type=Path,
-        default=_optional_path_env("YOUDUB_TTS_MODEL_DIR") or _optional_path_env("VOXCPM_MODEL_DIR"),
+        default=argparse.SUPPRESS,
         help="Optional local VoxCPM2 model directory; bypasses Hugging Face download when set",
     )
     run_task.add_argument(
         "--tts-load-denoiser",
         action="store_true",
-        default=_bool_env("YOUDUB_TTS_LOAD_DENOISER", _bool_env("VOXCPM_LOAD_DENOISER", DEFAULT_TTS_LOAD_DENOISER)),
+        default=argparse.SUPPRESS,
         help="Load VoxCPM2 denoiser during TTS",
     )
     run_task.add_argument(
         "--tts-cfg-value",
         type=float,
-        default=float(os.getenv("YOUDUB_TTS_CFG_VALUE", os.getenv("VOXCPM_CFG_VALUE", str(DEFAULT_TTS_CFG_VALUE)))),
+        default=argparse.SUPPRESS,
         help="VoxCPM2 classifier-free guidance value",
     )
     run_task.add_argument(
         "--tts-inference-timesteps",
         type=int,
-        default=int(
-            os.getenv(
-                "YOUDUB_TTS_INFERENCE_TIMESTEPS",
-                os.getenv("VOXCPM_INFERENCE_TIMESTEPS", str(DEFAULT_TTS_INFERENCE_TIMESTEPS)),
-            )
-        ),
+        default=argparse.SUPPRESS,
         help="VoxCPM2 inference timesteps",
     )
     run_task.add_argument(
         "--tts-min-reference-ms",
         type=int,
-        default=int(
-            os.getenv(
-                "YOUDUB_TTS_MIN_REFERENCE_MS",
-                os.getenv("VOXCPM_MIN_REFERENCE_MS", str(DEFAULT_TTS_MIN_REFERENCE_MS)),
-            )
-        ),
+        default=argparse.SUPPRESS,
         help="Minimum vocal reference length before falling back to a longer reference",
     )
     run_task.add_argument(
         "--tts-start-pad-ms",
         type=int,
-        default=int(os.getenv("YOUDUB_TTS_START_PAD_MS", str(DEFAULT_TTS_START_PAD_MS))),
+        default=argparse.SUPPRESS,
         help="Milliseconds of source vocal audio to prepend to each TTS reference segment",
     )
     run_task.add_argument(
         "--tts-end-pad-ms",
         type=int,
-        default=int(os.getenv("YOUDUB_TTS_END_PAD_MS", str(DEFAULT_TTS_END_PAD_MS))),
+        default=argparse.SUPPRESS,
         help="Milliseconds of source vocal audio to append to each TTS reference segment",
     )
     run_task.add_argument(
         "--no-tts-align-audio",
         action="store_false",
         dest="tts_align_audio",
-        default=_bool_env("YOUDUB_TTS_ALIGN_AUDIO", DEFAULT_TTS_ALIGN_AUDIO),
+        default=argparse.SUPPRESS,
         help="Disable time-stretch alignment when mixing TTS segments",
     )
     run_task.add_argument(
         "--tts-cache-model",
         action="store_true",
-        default=_bool_env("YOUDUB_TTS_CACHE_MODEL", DEFAULT_TTS_CACHE_MODEL),
+        default=argparse.SUPPRESS,
         help="Keep VoxCPM2 loaded after TTS for faster subsequent runs",
     )
     run_task.add_argument(
         "--tts-stretch-base-min",
         type=float,
-        default=float(os.getenv("YOUDUB_TTS_STRETCH_BASE_MIN", str(DEFAULT_TTS_STRETCH_BASE_MIN))),
+        default=argparse.SUPPRESS,
         help="Minimum global TTS stretch ratio",
     )
     run_task.add_argument(
         "--tts-stretch-base-max",
         type=float,
-        default=float(os.getenv("YOUDUB_TTS_STRETCH_BASE_MAX", str(DEFAULT_TTS_STRETCH_BASE_MAX))),
+        default=argparse.SUPPRESS,
         help="Maximum global TTS stretch ratio",
     )
     run_task.add_argument(
         "--tts-stretch-local-min",
         type=float,
-        default=float(os.getenv("YOUDUB_TTS_STRETCH_LOCAL_MIN", str(DEFAULT_TTS_STRETCH_LOCAL_MIN))),
+        default=argparse.SUPPRESS,
         help="Minimum per-segment TTS stretch correction",
     )
     run_task.add_argument(
         "--tts-stretch-local-max",
         type=float,
-        default=float(os.getenv("YOUDUB_TTS_STRETCH_LOCAL_MAX", str(DEFAULT_TTS_STRETCH_LOCAL_MAX))),
+        default=argparse.SUPPRESS,
         help="Maximum per-segment TTS stretch correction",
     )
     run_task.add_argument(
         "--tts-quality-include-review",
         action="store_true",
-        default=_bool_env("YOUDUB_TTS_QUALITY_INCLUDE_REVIEW", False),
+        default=argparse.SUPPRESS,
         help="Include review-severity TTS quality segments in the redub plan",
     )
     run_task.add_argument(
         "--tts-quality-max-segments-per-round",
         type=int,
-        default=int(os.getenv("YOUDUB_TTS_QUALITY_MAX_SEGMENTS_PER_ROUND", "50")),
+        default=argparse.SUPPRESS,
         help="Maximum TTS segments to redub in one round",
     )
     run_task.add_argument(
         "--tts-quality-max-task-hard-ratio",
         type=float,
-        default=float(os.getenv("YOUDUB_TTS_QUALITY_MAX_TASK_HARD_RATIO", "0.20")),
+        default=argparse.SUPPRESS,
         help="Hard-fail ratio above which the report flags the task for review",
     )
     run_task.add_argument(
         "--tts-redub-round",
         type=int,
-        default=int(os.getenv("YOUDUB_TTS_REDUB_ROUND", "1")),
+        default=argparse.SUPPRESS,
         help="Current TTS redub round",
     )
     run_task.add_argument(
         "--tts-redub-max-rounds",
         type=int,
-        default=int(os.getenv("YOUDUB_TTS_REDUB_MAX_ROUNDS", "1")),
+        default=argparse.SUPPRESS,
         help="Maximum TTS redub rounds",
     )
     run_task.add_argument(
         "--no-burn-subtitles",
         action="store_false",
         dest="burn_subtitles",
-        default=_bool_env("YOUDUB_BURN_SUBTITLES", True),
+        default=argparse.SUPPRESS,
         help="Do not burn subtitles into the synthesized video",
     )
     run_task.add_argument(
         "--synthesis-tts-volume",
         type=float,
-        default=float(os.getenv("YOUDUB_SYNTHESIS_TTS_VOLUME", "1.0")),
+        default=argparse.SUPPRESS,
         help="TTS voice volume used during final audio mix",
     )
     run_task.add_argument(
         "--synthesis-instruments-volume",
         type=float,
-        default=float(os.getenv("YOUDUB_SYNTHESIS_INSTRUMENTS_VOLUME", "0.30")),
+        default=argparse.SUPPRESS,
         help="Background/instrument audio volume used during final audio mix",
     )
     run_task.add_argument(
         "--synthesis-preset",
-        default=os.getenv("YOUDUB_SYNTHESIS_PRESET", "fast"),
+        default=argparse.SUPPRESS,
         help="libx264 preset used for final video rendering",
     )
     run_task.add_argument(
         "--synthesis-crf",
         type=int,
-        default=int(os.getenv("YOUDUB_SYNTHESIS_CRF", "23")),
+        default=argparse.SUPPRESS,
         help="libx264 CRF used for final video rendering",
     )
     run_task.add_argument(
         "--subtitle-language",
-        default=os.getenv("YOUDUB_SUBTITLE_LANGUAGE", "zh"),
+        default=argparse.SUPPRESS,
         help="Subtitle style language key, currently zh or en",
     )
     run_task.add_argument(
         "--subtitle-font",
-        default=_optional_str_env("YOUDUB_SUBTITLE_FONT"),
+        default=argparse.SUPPRESS,
         help="Optional font family for burned subtitles",
     )
     run_task.add_argument(
         "--publish-title-max-chars",
         type=int,
-        default=int(os.getenv("YOUDUB_PUBLISH_TITLE_MAX_CHARS", "80")),
+        default=argparse.SUPPRESS,
         help="Maximum generated publish title length",
     )
     run_task.add_argument(
         "--publish-max-tags",
         type=int,
-        default=int(os.getenv("YOUDUB_PUBLISH_MAX_TAGS", "10")),
+        default=argparse.SUPPRESS,
         help="Maximum generated publish tag count",
     )
     run_task.add_argument(
         "--publish-max-tag-chars",
         type=int,
-        default=int(os.getenv("YOUDUB_PUBLISH_MAX_TAG_CHARS", "20")),
+        default=argparse.SUPPRESS,
         help="Maximum length for each generated publish tag",
     )
     run_task.add_argument(
         "--publish-dry-run",
         action="store_true",
-        default=_bool_env("YOUDUB_PUBLISH_DRY_RUN", False),
+        default=argparse.SUPPRESS,
         help="Validate Bilibili publish metadata without uploading",
     )
     run_task.add_argument(
         "--publish-force",
         action="store_true",
-        default=_bool_env("YOUDUB_PUBLISH_FORCE", False),
+        default=argparse.SUPPRESS,
         help="Upload again even if bilibili.json already exists",
     )
     run_task.add_argument(
         "--publish-confirm",
         action="store_true",
-        default=_bool_env("YOUDUB_PUBLISH_CONFIRM", False),
+        default=argparse.SUPPRESS,
         help="Required for a real Bilibili upload",
     )
     run_task.add_argument(
         "--bilibili-tid",
         type=int,
-        default=_optional_int_env("BILI_TID") or 201,
+        default=argparse.SUPPRESS,
         help="Bilibili category id for upload",
     )
     run_task.add_argument(
         "--bilibili-original",
         action="store_true",
-        default=_bool_env("BILI_ORIGINAL", False),
+        default=argparse.SUPPRESS,
         help="Mark Bilibili submission as original",
     )
     run_task.add_argument(
         "--bilibili-source",
-        default=_optional_str_env("BILI_SOURCE"),
+        default=argparse.SUPPRESS,
         help="Optional Bilibili转载来源; defaults to source URL when not original",
     )
     run_task.add_argument(
         "--no-bilibili-watermark",
         action="store_false",
         dest="bilibili_watermark",
-        default=_bool_env("BILI_WATERMARK", True),
+        default=argparse.SUPPRESS,
         help="Disable Bilibili watermark flag",
     )
 
@@ -475,14 +448,8 @@ def cmd_create_download_task(config: AppConfig, args: argparse.Namespace) -> int
 
 def cmd_create_url_task(config: AppConfig, args: argparse.Namespace) -> int:
     config.ensure_dirs()
-    cookies_path = None if args.no_cookies else (args.cookies or config.cookies_path)
-    download_config = DownloadConfig(
-        cookies_path=cookies_path,
-        proxy=args.proxy if args.proxy is not None else config.ytdlp_proxy,
-        max_height=args.max_height if args.max_height is not None else config.download_max_height,
-        force=args.force_download,
-        use_cookies=not args.no_cookies,
-    )
+    task_config = _create_url_task_cli_overrides(config, args)
+    download_config = download_config_from_task_config(config, task_config)
     result = download_url_to_artifacts(args.url, config.root, download_config)
     task = create_task_from_download_artifacts(
         source=result.media_path,
@@ -490,6 +457,7 @@ def cmd_create_url_task(config: AppConfig, args: argparse.Namespace) -> int:
         root=config.root,
         cover_path=result.cover_path,
     )
+    task.config = task_config
     task = TaskStore(config.tasks_path).upsert(task)
     print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
     return 0
@@ -505,129 +473,19 @@ def cmd_run_task(config: AppConfig, args: argparse.Namespace) -> int:
     store = TaskStore(config.tasks_path)
     task = store.get(args.task_id)
     step = PipelineStep(args.step)
-    whisperx_config = WhisperXConfig(
-        models_dir=config.models_dir,
-        model_name=args.whisper_model,
-        device=args.whisper_device,
-        batch_size=args.whisper_batch_size,
-        diarization=args.diarization,
-        min_speakers=args.min_speakers,
-        max_speakers=args.max_speakers,
-        hf_token=config.secrets.huggingface.token,
-        language=args.whisper_language,
-        initial_prompt=args.whisper_initial_prompt,
-    )
-    translation_config = TranslationConfig(
-        api_key=config.secrets.openai.api_key,
-        base_url=config.secrets.openai.base_url,
-        model=config.secrets.openai.model,
-        target_language=args.translation_language,
-        batch_size=args.translation_batch_size,
-        max_retries=int(os.getenv("YOUDUB_TRANSLATION_MAX_RETRIES", "4")),
-        retry_backoff_seconds=float(os.getenv("YOUDUB_TRANSLATION_RETRY_BACKOFF_SECONDS", "1")),
-        retry_backoff_multiplier=float(os.getenv("YOUDUB_TRANSLATION_RETRY_BACKOFF_MULTIPLIER", "2")),
-        retry_max_backoff_seconds=float(os.getenv("YOUDUB_TRANSLATION_RETRY_MAX_BACKOFF_SECONDS", "8")),
-        force_json_output=os.getenv("YOUDUB_TRANSLATION_FORCE_JSON_OUTPUT", "1") not in {"0", "false", "False"},
-        temperature=float(os.getenv("YOUDUB_TRANSLATION_TEMPERATURE", "0")),
-        extra_prompt=_arg_or_config_prompt(
-            args.translation_extra_prompt,
-            config.translation_prompts.extra_prompt,
-            DEFAULT_TRANSLATION_EXTRA_PROMPT,
-        ),
-        summary_extra_prompt=_arg_or_config_prompt(
-            args.translation_summary_extra_prompt,
-            config.translation_prompts.summary_extra_prompt,
-            DEFAULT_SUMMARY_EXTRA_PROMPT,
-        ),
-        context_extra_prompt=_arg_or_config_prompt(
-            args.translation_context_extra_prompt,
-            config.translation_prompts.context_extra_prompt,
-            DEFAULT_CONTEXT_EXTRA_PROMPT,
-        ),
-        segment_extra_prompt=_arg_or_config_prompt(
-            args.translation_segment_extra_prompt,
-            config.translation_prompts.segment_extra_prompt,
-            DEFAULT_SEGMENT_EXTRA_PROMPT,
-        ),
-        correction_prompt=_arg_or_config_prompt(
-            args.translation_correction_prompt,
-            config.translation_prompts.correction_prompt,
-            DEFAULT_CORRECTION_PROMPT,
-        ),
-    )
-    tts_config = TTSConfig(
-        model=args.tts_model,
-        model_dir=args.tts_model_dir,
-        hf_token=config.secrets.huggingface.token,
-        load_denoiser=args.tts_load_denoiser,
-        cfg_value=args.tts_cfg_value,
-        inference_timesteps=args.tts_inference_timesteps,
-        min_reference_ms=args.tts_min_reference_ms,
-        start_pad_ms=args.tts_start_pad_ms,
-        end_pad_ms=args.tts_end_pad_ms,
-        align_audio=args.tts_align_audio,
-        stretch_base_min=args.tts_stretch_base_min,
-        stretch_base_max=args.tts_stretch_base_max,
-        stretch_local_min=args.tts_stretch_local_min,
-        stretch_local_max=args.tts_stretch_local_max,
-        cache_model=args.tts_cache_model,
-    )
-    synthesis_config = SynthesisConfig(
-        burn_subtitles=args.burn_subtitles,
-        tts_volume=args.synthesis_tts_volume,
-        instruments_volume=args.synthesis_instruments_volume,
-        video_preset=args.synthesis_preset,
-        video_crf=args.synthesis_crf,
-        subtitle_language=args.subtitle_language,
-        subtitle_font=args.subtitle_font,
-    )
-    tts_quality_defaults = TTSQualityConfig.from_env()
-    tts_quality_config = TTSQualityConfig(
-        hard_similarity_min=tts_quality_defaults.hard_similarity_min,
-        review_similarity_min=tts_quality_defaults.review_similarity_min,
-        hard_alignment_confidence_min=tts_quality_defaults.hard_alignment_confidence_min,
-        review_alignment_confidence_min=tts_quality_defaults.review_alignment_confidence_min,
-        hard_drift_seconds=tts_quality_defaults.hard_drift_seconds,
-        review_drift_seconds=tts_quality_defaults.review_drift_seconds,
-        extreme_stretch_min=tts_quality_defaults.extreme_stretch_min,
-        extreme_stretch_max=tts_quality_defaults.extreme_stretch_max,
-        min_text_chars_for_empty_asr_hard=tts_quality_defaults.min_text_chars_for_empty_asr_hard,
-        include_review=args.tts_quality_include_review,
-        max_segments_per_round=args.tts_quality_max_segments_per_round,
-        max_task_hard_ratio=args.tts_quality_max_task_hard_ratio,
-        round=args.tts_redub_round,
-        max_rounds=args.tts_redub_max_rounds,
-    )
-    redub_tts_config = RedubTTSConfig(
-        round=args.tts_redub_round,
-        max_rounds=args.tts_redub_max_rounds,
-    )
-    publish_config = PublishPackageConfig(
-        max_title_chars=args.publish_title_max_chars,
-        max_tags=args.publish_max_tags,
-        max_tag_chars=args.publish_max_tag_chars,
-    )
-    bilibili_publish_config = BilibiliPublishConfig(
-        sessdata=_optional_str_env("BILI_SESSDATA"),
-        bili_jct=_optional_str_env("BILI_BILI_JCT"),
-        tid=args.bilibili_tid,
-        original=args.bilibili_original,
-        source=args.bilibili_source,
-        watermark=args.bilibili_watermark,
-        dry_run=args.publish_dry_run,
-        force=args.publish_force,
-        confirm=args.publish_confirm,
-    )
+    cli_overrides = _run_task_cli_overrides(args)
+    runtime_config = merge_task_config_overrides(task.config, cli_overrides)
+    options = runtime_options_from_task_config(config, runtime_config)
     try:
         task = PipelineRunner(
-            whisperx_config=whisperx_config,
-            translation_config=translation_config,
-            tts_config=tts_config,
-            synthesis_config=synthesis_config,
-            publish_config=publish_config,
-            bilibili_publish_config=bilibili_publish_config,
-            tts_quality_config=tts_quality_config,
-            redub_tts_config=redub_tts_config,
+            whisperx_config=options.whisperx,
+            translation_config=options.translation,
+            tts_config=options.tts,
+            synthesis_config=options.synthesis,
+            publish_config=options.publish,
+            bilibili_publish_config=options.bilibili,
+            tts_quality_config=options.tts_quality,
+            redub_tts_config=options.redub_tts,
         ).run_step(task, step)
     finally:
         store.update(task)
@@ -635,39 +493,107 @@ def cmd_run_task(config: AppConfig, args: argparse.Namespace) -> int:
     return 0
 
 
-def _optional_int_env(name: str) -> int | None:
-    value = os.getenv(name)
-    if not value:
-        return None
-    return int(value)
+def _create_url_task_cli_overrides(config: AppConfig, args: argparse.Namespace) -> dict[str, object]:
+    effective = default_task_config(config)
+    download = effective["download"]
+    if hasattr(args, "cookies"):
+        download["use_cookies"] = True
+        download["cookies_path"] = str(args.cookies)
+    if hasattr(args, "no_cookies"):
+        download["use_cookies"] = False
+        download["cookies_path"] = ""
+    if hasattr(args, "proxy"):
+        download["proxy"] = args.proxy
+    if hasattr(args, "max_height"):
+        download["max_height"] = args.max_height
+    if hasattr(args, "force_download"):
+        download["force_download"] = True
+    return sparse_task_config(default_task_config(config), effective)
 
 
-def _optional_path_env(name: str) -> Path | None:
-    value = os.getenv(name)
-    if not value:
-        return None
-    return Path(value)
+def _run_task_cli_overrides(args: argparse.Namespace) -> dict[str, object]:
+    overrides: dict[str, object] = {}
+    _set_cli_override(overrides, args, "whisper_model", "whisperx", "model_name")
+    _set_cli_override(overrides, args, "whisper_device", "whisperx", "device")
+    _set_cli_override(overrides, args, "whisper_batch_size", "whisperx", "batch_size")
+    _set_cli_override(overrides, args, "whisper_language", "whisperx", "language")
+    _set_cli_override(overrides, args, "whisper_initial_prompt", "whisperx", "initial_prompt")
+    _set_cli_override(overrides, args, "diarization", "whisperx", "diarization")
+    _set_cli_override(overrides, args, "min_speakers", "whisperx", "min_speakers")
+    _set_cli_override(overrides, args, "max_speakers", "whisperx", "max_speakers")
+
+    _set_cli_override(overrides, args, "translation_language", "translation", "target_language")
+    _set_cli_override(overrides, args, "translation_batch_size", "translation", "batch_size")
+    _set_cli_override(overrides, args, "translation_extra_prompt", "translation", "extra_prompt")
+    _set_cli_override(overrides, args, "translation_summary_extra_prompt", "translation", "summary_extra_prompt")
+    _set_cli_override(overrides, args, "translation_context_extra_prompt", "translation", "context_extra_prompt")
+    _set_cli_override(overrides, args, "translation_segment_extra_prompt", "translation", "segment_extra_prompt")
+    _set_cli_override(overrides, args, "translation_correction_prompt", "translation", "correction_prompt")
+
+    _set_cli_override(overrides, args, "tts_model", "tts", "model")
+    _set_cli_override(overrides, args, "tts_model_dir", "tts", "model_dir", transform=_path_text)
+    _set_cli_override(overrides, args, "tts_load_denoiser", "tts", "load_denoiser")
+    _set_cli_override(overrides, args, "tts_cfg_value", "tts", "cfg_value")
+    _set_cli_override(overrides, args, "tts_inference_timesteps", "tts", "inference_timesteps")
+    _set_cli_override(overrides, args, "tts_min_reference_ms", "tts", "min_reference_ms")
+    _set_cli_override(overrides, args, "tts_start_pad_ms", "tts", "start_pad_ms")
+    _set_cli_override(overrides, args, "tts_end_pad_ms", "tts", "end_pad_ms")
+    _set_cli_override(overrides, args, "tts_align_audio", "tts", "align_audio")
+    _set_cli_override(overrides, args, "tts_cache_model", "tts", "cache_model")
+    _set_cli_override(overrides, args, "tts_stretch_base_min", "tts", "stretch_base_min")
+    _set_cli_override(overrides, args, "tts_stretch_base_max", "tts", "stretch_base_max")
+    _set_cli_override(overrides, args, "tts_stretch_local_min", "tts", "stretch_local_min")
+    _set_cli_override(overrides, args, "tts_stretch_local_max", "tts", "stretch_local_max")
+
+    _set_cli_override(overrides, args, "tts_quality_include_review", "tts_quality", "include_review")
+    _set_cli_override(overrides, args, "tts_quality_max_segments_per_round", "tts_quality", "max_segments_per_round")
+    _set_cli_override(overrides, args, "tts_quality_max_task_hard_ratio", "tts_quality", "max_task_hard_ratio")
+    _set_cli_override(overrides, args, "tts_redub_round", "tts_quality", "round")
+    _set_cli_override(overrides, args, "tts_redub_round", "redub_tts", "round")
+    _set_cli_override(overrides, args, "tts_redub_max_rounds", "workflow", "tts_redub_max_rounds")
+
+    _set_cli_override(overrides, args, "burn_subtitles", "synthesis", "burn_subtitles")
+    _set_cli_override(overrides, args, "synthesis_tts_volume", "synthesis", "tts_volume")
+    _set_cli_override(overrides, args, "synthesis_instruments_volume", "synthesis", "instruments_volume")
+    _set_cli_override(overrides, args, "synthesis_preset", "synthesis", "video_preset")
+    _set_cli_override(overrides, args, "synthesis_crf", "synthesis", "video_crf")
+    _set_cli_override(overrides, args, "subtitle_language", "synthesis", "subtitle_language")
+    _set_cli_override(overrides, args, "subtitle_font", "synthesis", "subtitle_font")
+
+    _set_cli_override(overrides, args, "publish_title_max_chars", "publish", "max_title_chars")
+    _set_cli_override(overrides, args, "publish_max_tags", "publish", "max_tags")
+    _set_cli_override(overrides, args, "publish_max_tag_chars", "publish", "max_tag_chars")
+    _set_cli_override(overrides, args, "publish_dry_run", "bilibili", "dry_run")
+    _set_cli_override(overrides, args, "publish_force", "bilibili", "force")
+    _set_cli_override(overrides, args, "publish_confirm", "bilibili", "confirm")
+    _set_cli_override(overrides, args, "bilibili_tid", "bilibili", "tid")
+    _set_cli_override(overrides, args, "bilibili_original", "bilibili", "original")
+    _set_cli_override(overrides, args, "bilibili_source", "bilibili", "source")
+    _set_cli_override(overrides, args, "bilibili_watermark", "bilibili", "watermark")
+    return overrides
 
 
-def _optional_str_env(name: str) -> str | None:
-    value = os.getenv(name)
-    if value is None:
-        return None
-    value = value.strip()
-    return value or None
+def _set_cli_override(
+    overrides: dict[str, object],
+    args: argparse.Namespace,
+    attr: str,
+    section: str,
+    field: str,
+    *,
+    transform=None,
+) -> None:
+    if not hasattr(args, attr):
+        return
+    value = getattr(args, attr)
+    if transform is not None:
+        value = transform(value)
+    section_values = overrides.setdefault(section, {})
+    if isinstance(section_values, dict):
+        section_values[field] = value
 
 
-def _bool_env(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value not in {"0", "false", "False"}
-
-
-def _arg_or_config_prompt(arg_value: str | None, config_value: str | None, default: str) -> str:
-    if arg_value is not None:
-        return arg_value
-    return config_value or default
+def _path_text(value: object) -> str:
+    return str(value) if value is not None else ""
 
 
 def _existing_nonempty_file(path: Path | None) -> bool:
