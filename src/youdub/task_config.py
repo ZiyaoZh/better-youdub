@@ -102,6 +102,10 @@ def _default_runtime_options(config: AppConfig) -> RuntimeOptions:
             stretch_local_min=_float_env("YOUDUB_TTS_STRETCH_LOCAL_MIN", tts_defaults.stretch_local_min),
             stretch_local_max=_float_env("YOUDUB_TTS_STRETCH_LOCAL_MAX", tts_defaults.stretch_local_max),
             cache_model=_bool_env("YOUDUB_TTS_CACHE_MODEL", tts_defaults.cache_model),
+            tower_path_pronunciation=os.getenv(
+                "YOUDUB_TTS_TOWER_PATH_PRONUNCIATION",
+                tts_defaults.tower_path_pronunciation,
+            ),
         ),
         synthesis=SynthesisConfig(
             burn_subtitles=_bool_env("YOUDUB_BURN_SUBTITLES", synthesis_defaults.burn_subtitles),
@@ -348,6 +352,7 @@ def runtime_options_from_task_config(config: AppConfig, overrides: Mapping[str, 
             stretch_local_max=float(values["tts"]["stretch_local_max"]),
             stretch_noop_epsilon=float(values["tts"]["stretch_noop_epsilon"]),
             cache_model=bool(values["tts"]["cache_model"]),
+            tower_path_pronunciation=str(values["tts"]["tower_path_pronunciation"]),
         ),
         tts_quality=TTSQualityConfig(
             hard_similarity_min=float(values["tts_quality"]["hard_similarity_min"]),

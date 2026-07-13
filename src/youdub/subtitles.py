@@ -17,6 +17,24 @@ SRT_OUTPUT = "subtitles.srt"
 MIN_SUBTITLE_DURATION = 0.2
 GLOBAL_ALIGNMENT_MIN_CONFIDENCE = 0.15
 SUBTITLE_TRAILING_PUNCTUATION = "。！？!?，,、；;：:…."
+_TOWER_PATH_MATCH_TOKEN = r"a-z0-9零〇一二两三四五六七八九"
+_TOWER_PATH_MATCH_PATTERN = re.compile(
+    rf"(?<![a-z0-9])([{_TOWER_PATH_MATCH_TOKEN}](?:[-杠][{_TOWER_PATH_MATCH_TOKEN}]){{2,}})(?![a-z0-9])"
+)
+_CHINESE_DIGITS_FOR_MATCH = {
+    "零": "0",
+    "〇": "0",
+    "一": "1",
+    "二": "2",
+    "两": "2",
+    "三": "3",
+    "四": "4",
+    "五": "5",
+    "六": "6",
+    "七": "7",
+    "八": "8",
+    "九": "9",
+}
 _OPENCC_CONVERTER: Any | None = None
 _OPENCC_UNAVAILABLE = False
 TRADITIONAL_TO_SIMPLIFIED = str.maketrans(
@@ -834,7 +852,16 @@ def _allocate_durations(fragments: list[str], total_duration: float) -> list[flo
 def _normalize_for_match(text: str) -> str:
     text = _to_simplified_for_match(unicodedata.normalize("NFKC", text)).lower()
     text = re.sub(r"\s+", "", text)
+    text = _canonicalize_tower_paths_for_match(text)
     return re.sub(r"[^\w\u4e00-\u9fff]", "", text)
+
+
+def _canonicalize_tower_paths_for_match(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        tokens = re.split(r"[-杠]", match.group(1))
+        return "".join(_CHINESE_DIGITS_FOR_MATCH.get(token, token) for token in tokens)
+
+    return _TOWER_PATH_MATCH_PATTERN.sub(replace, text)
 
 
 def _to_simplified_for_match(text: str) -> str:

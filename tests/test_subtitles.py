@@ -19,6 +19,11 @@ def test_text_similarity_normalizes_partial_traditional_chinese() -> None:
     assert text_similarity("气球防御游戏很简单。", "氣球防禦遊戲很簡單") == 1.0
 
 
+def test_text_similarity_normalizes_tower_path_pronunciations() -> None:
+    assert text_similarity("走 2-0-5 路线。", "走二杠零杠五路线") == 1.0
+    assert text_similarity("选择 a-b-c 分支。", "选择a杠b杠c分支") == 1.0
+
+
 def test_align_asr_to_standard_translations_merges_split_asr_segments() -> None:
     standard = [{"segment_id": 0, "translation": "你好，世界。"}]
     asr = [

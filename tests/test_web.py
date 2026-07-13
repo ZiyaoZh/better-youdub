@@ -77,6 +77,9 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert "CPU" in app_js
     assert "step-progress" in app_js
     assert "翻译代理" in app_js
+    assert "tower_path_pronunciation" in app_js
+    assert "塔路径读法" in app_js
+    assert "连读" in app_js
     assert "videoPreview" not in app_js
     styles = client.get("/assets/styles.css").text
     assert "step-progress-fill" in styles
@@ -377,6 +380,7 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert defaults.json()["config"]["tts"]["min_reference_ms"] == 1200
     assert defaults.json()["config"]["tts"]["start_pad_ms"] == 80
     assert defaults.json()["config"]["tts"]["end_pad_ms"] == 160
+    assert defaults.json()["config"]["tts"]["tower_path_pronunciation"] == "dash"
 
     task = client.post("/api/tasks/local", json={"source": str(source), "title": "Config Smoke"}).json()
     assert task["config"]["whisperx"]["model_name"] == "large-v2"
@@ -388,6 +392,7 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert task["config"]["tts"]["min_reference_ms"] == 1200
     assert task["config"]["tts"]["start_pad_ms"] == 80
     assert task["config"]["tts"]["end_pad_ms"] == 160
+    assert task["config"]["tts"]["tower_path_pronunciation"] == "dash"
     config_path = tmp_path / "tasks" / "tasks.json"
     saved_task = json.loads(config_path.read_text(encoding="utf-8"))[0]
     assert saved_task["config"] == {}
@@ -1334,6 +1339,7 @@ def test_web_run_step_uses_saved_task_config(monkeypatch, tmp_path: Path) -> Non
     config["whisperx"]["model_name"] = "medium"
     config["whisperx"]["hf_token"] = "hf-task"
     config["tts"]["cfg_value"] = 3.5
+    config["tts"]["tower_path_pronunciation"] = "compact"
     updated = client.put(f"/api/tasks/{task['id']}/config", json={"config": config})
     assert updated.status_code == 200
 
@@ -1371,6 +1377,7 @@ def test_web_run_step_uses_saved_task_config(monkeypatch, tmp_path: Path) -> Non
     assert captured["whisperx"].hf_token == "hf-task"
     assert captured["tts"].hf_token == "hf-env"
     assert captured["tts"].cfg_value == 3.5
+    assert captured["tts"].tower_path_pronunciation == "compact"
 
 
 def test_web_run_step_cleans_gpu_memory_for_gpu_steps(monkeypatch, tmp_path: Path) -> None:

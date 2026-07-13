@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,7 @@ TRANSLATION_INPUT = "translation.json"
 VOCALS_INPUT = "audio_vocals.wav"
 VOCAL_SEGMENTS_DIR = "segments/vocals"
 TTS_SEGMENTS_DIR = "segments/tts"
+TTS_MANIFEST_OUTPUT = "segments/tts.manifest.json"
 TTS_OUTPUT = "audio_tts.wav"
 TTS_TIMINGS_OUTPUT = "audio_tts.timings.json"
 
@@ -30,6 +33,14 @@ DEFAULT_TTS_STRETCH_LOCAL_MIN = 0.9
 DEFAULT_TTS_STRETCH_LOCAL_MAX = 1.1
 DEFAULT_TTS_STRETCH_NOOP_EPSILON = 0.01
 DEFAULT_TTS_CACHE_MODEL = False
+DEFAULT_TTS_TOWER_PATH_PRONUNCIATION = "dash"
+TTS_TOWER_PATH_PRONUNCIATION_MODES = {"off", "compact", "dash"}
+TTS_MANIFEST_VERSION = 1
+
+_TOWER_PATH_TOKEN = r"A-Za-z0-9零〇一二两三四五六七八九"
+_TOWER_PATH_PATTERN = re.compile(
+    rf"(?<![A-Za-z0-9/\\])([{_TOWER_PATH_TOKEN}](?:\s*-\s*[{_TOWER_PATH_TOKEN}]){{2,}})(?![A-Za-z0-9/\\])"
+)
 
 _MODEL = None
 _MODEL_KEY: tuple[str, bool, str | None] | None = None
@@ -54,6 +65,7 @@ class TTSConfig:
     stretch_local_max: float = DEFAULT_TTS_STRETCH_LOCAL_MAX
     stretch_noop_epsilon: float = DEFAULT_TTS_STRETCH_NOOP_EPSILON
     cache_model: bool = DEFAULT_TTS_CACHE_MODEL
+    tower_path_pronunciation: str = DEFAULT_TTS_TOWER_PATH_PRONUNCIATION
 
 
 def generate_tts(task_dir: Path, config: TTSConfig) -> Path:
@@ -76,22 +88,38 @@ def generate_tts(task_dir: Path, config: TTSConfig) -> Path:
     try:
         model = load_voxcpm_model(config)
         fallback = choose_fallback_reference(vocals_dir, config.min_reference_ms)
+        manifest = _load_tts_manifest(task_dir)
+        manifest_segments = _manifest_segments(manifest)
+        active_manifest_keys: set[str] = set()
 
         for index, entry in enumerate(entries, start=1):
+            manifest_key = f"{index:04d}"
+            active_manifest_keys.add(manifest_key)
             output_path = tts_dir / f"{index:04d}.wav"
-            if output_path.exists():
-                continue
             reference_path = vocals_dir / f"{index:04d}.wav"
             if not reference_path.exists() or audio_duration_ms(reference_path) < config.min_reference_ms:
                 reference_path = fallback
+            manifest_record = _tts_segment_manifest_record(index, entry, reference_path, config)
+            if output_path.exists() and _tts_manifest_record_matches(
+                manifest_segments.get(manifest_key),
+                manifest_record,
+            ):
+                continue
             wav = model.generate(
-                text=entry["translation"],
+                text=tts_synthesis_text(entry, config),
                 reference_wav_path=str(reference_path),
                 cfg_value=config.cfg_value,
                 inference_timesteps=config.inference_timesteps,
             )
             _soundfile().write(str(output_path), wav, int(model.tts_model.sample_rate))
+            manifest_segments[manifest_key] = manifest_record
+            _write_tts_manifest(task_dir, manifest)
 
+        stale_manifest_keys = set(manifest_segments) - active_manifest_keys
+        if stale_manifest_keys:
+            for key in stale_manifest_keys:
+                manifest_segments.pop(key, None)
+            _write_tts_manifest(task_dir, manifest)
         return write_tts_mix(entries, tts_dir, task_dir, config)
     finally:
         del model
@@ -128,6 +156,37 @@ def load_translation_entries(path: Path) -> list[dict[str, Any]]:
             }
         )
     return entries
+
+
+def tts_synthesis_text(entry: dict[str, Any], config: TTSConfig | None = None) -> str:
+    config = config or TTSConfig()
+    text = _clean_text(entry.get("tts_text"))
+    if not text:
+        text = _clean_text(entry.get("translation"))
+    return normalize_tower_paths_for_tts(text, config.tower_path_pronunciation)
+
+
+def normalize_tower_paths_for_tts(text: str, mode: str = DEFAULT_TTS_TOWER_PATH_PRONUNCIATION) -> str:
+    mode = _normalize_tower_path_pronunciation_mode(mode)
+    if mode == "off" or not text:
+        return text
+
+    def replace(match: re.Match[str]) -> str:
+        parts = [part.strip() for part in re.split(r"\s*-\s*", match.group(1)) if part.strip()]
+        if len(parts) < 3:
+            return match.group(0)
+        if mode == "compact":
+            return "".join(parts)
+        return "杠".join(parts)
+
+    return _TOWER_PATH_PATTERN.sub(replace, text)
+
+
+def _normalize_tower_path_pronunciation_mode(mode: str) -> str:
+    normalized = str(mode or DEFAULT_TTS_TOWER_PATH_PRONUNCIATION).strip().lower()
+    if normalized not in TTS_TOWER_PATH_PRONUNCIATION_MODES:
+        return DEFAULT_TTS_TOWER_PATH_PRONUNCIATION
+    return normalized
 
 
 def split_reference_audio(
@@ -250,6 +309,7 @@ def write_tts_mix(entries: list[dict[str, Any]], tts_dir: Path, task_dir: Path, 
                 "stretch_ratio": stretch_ratio,
                 "alignment_status": alignment_status,
                 "translation": entry["translation"],
+                "tts_text": tts_synthesis_text(entry, config),
             }
         )
 
@@ -384,6 +444,99 @@ def _read_audio(path: Path):
     np = _numpy()
     audio, sample_rate = _soundfile().read(str(path), always_2d=False, dtype="float32")
     return np.asarray(audio, dtype=np.float32), int(sample_rate)
+
+
+def update_tts_manifest_record(
+    task_dir: Path,
+    index: int,
+    entry: dict[str, Any],
+    reference_path: Path,
+    config: TTSConfig,
+) -> None:
+    manifest = _load_tts_manifest(task_dir)
+    _manifest_segments(manifest)[f"{index:04d}"] = _tts_segment_manifest_record(
+        index,
+        entry,
+        reference_path,
+        config,
+    )
+    _write_tts_manifest(task_dir, manifest)
+
+
+def _load_tts_manifest(task_dir: Path) -> dict[str, Any]:
+    path = task_dir / TTS_MANIFEST_OUTPUT
+    if not path.exists():
+        return {"version": TTS_MANIFEST_VERSION, "segments": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"version": TTS_MANIFEST_VERSION, "segments": {}}
+    if not isinstance(data, dict) or data.get("version") != TTS_MANIFEST_VERSION:
+        return {"version": TTS_MANIFEST_VERSION, "segments": {}}
+    if not isinstance(data.get("segments"), dict):
+        data["segments"] = {}
+    return data
+
+
+def _manifest_segments(manifest: dict[str, Any]) -> dict[str, Any]:
+    segments = manifest.get("segments")
+    if not isinstance(segments, dict):
+        segments = {}
+        manifest["segments"] = segments
+    return segments
+
+
+def _write_tts_manifest(task_dir: Path, manifest: dict[str, Any]) -> Path:
+    path = task_dir / TTS_MANIFEST_OUTPUT
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _tts_segment_manifest_record(
+    index: int,
+    entry: dict[str, Any],
+    reference_path: Path,
+    config: TTSConfig,
+) -> dict[str, Any]:
+    tts_text = tts_synthesis_text(entry, config)
+    payload = {
+        "index": index,
+        "translation": entry["translation"],
+        "tts_text": tts_text,
+        "model": str(config.model_dir.expanduser()) if config.model_dir else config.model,
+        "load_denoiser": config.load_denoiser,
+        "cfg_value": config.cfg_value,
+        "inference_timesteps": config.inference_timesteps,
+        "tower_path_pronunciation": _normalize_tower_path_pronunciation_mode(config.tower_path_pronunciation),
+        "reference": _audio_file_fingerprint(reference_path),
+    }
+    return {
+        **payload,
+        "fingerprint": _stable_hash(payload),
+    }
+
+
+def _tts_manifest_record_matches(existing: Any, expected: dict[str, Any]) -> bool:
+    return isinstance(existing, dict) and existing.get("fingerprint") == expected["fingerprint"]
+
+
+def _audio_file_fingerprint(path: Path) -> dict[str, Any]:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return {"path": str(path), "exists": False}
+    return {
+        "path": str(path),
+        "exists": True,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _stable_hash(value: Any) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _silence(samples: int, like):

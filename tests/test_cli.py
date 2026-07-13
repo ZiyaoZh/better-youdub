@@ -159,6 +159,8 @@ def test_run_task_uses_shared_defaults_and_cli_explicit_overrides(
             "200",
             "--tts-end-pad-ms",
             "400",
+            "--tts-tower-path-pronunciation",
+            "compact",
         ]
     ) == 0
 
@@ -168,6 +170,7 @@ def test_run_task_uses_shared_defaults_and_cli_explicit_overrides(
     assert captured["tts_config"].min_reference_ms == 1800
     assert captured["tts_config"].start_pad_ms == 200
     assert captured["tts_config"].end_pad_ms == 400
+    assert captured["tts_config"].tower_path_pronunciation == "compact"
     stored = json.loads((tmp_path / "tasks" / "tasks.json").read_text(encoding="utf-8"))[0]
     assert stored["config"] == {
         "translation": {"model": "gpt-task"},

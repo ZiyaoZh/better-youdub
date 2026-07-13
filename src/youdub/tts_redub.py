@@ -15,7 +15,9 @@ from .tts import (
     choose_fallback_reference,
     load_translation_entries,
     load_voxcpm_model,
+    tts_synthesis_text,
     unload_voxcpm_model,
+    update_tts_manifest_record,
     write_tts_mix,
 )
 from .tts_quality import REDUB_PLAN_OUTPUT
@@ -80,13 +82,14 @@ def redub_tts(
                 reference_path = fallback
             try:
                 wav = model.generate(
-                    text=entries[tts_index - 1]["translation"],
+                    text=tts_synthesis_text(entries[tts_index - 1], tts_config),
                     reference_wav_path=str(reference_path),
                     cfg_value=tts_config.cfg_value,
                     inference_timesteps=tts_config.inference_timesteps,
                 )
                 _soundfile().write(str(new_path), wav, int(model.tts_model.sample_rate))
                 replace_tts_segment(new_path, active_path)
+                update_tts_manifest_record(task_dir, tts_index, entries[tts_index - 1], reference_path, tts_config)
                 _append_history(
                     task_dir,
                     _history_record(

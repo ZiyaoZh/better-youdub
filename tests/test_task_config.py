@@ -161,10 +161,12 @@ def test_task_config_exposes_web_tts_defaults(monkeypatch, tmp_path: Path) -> No
     assert task_config["tts"]["min_reference_ms"] == 1200
     assert task_config["tts"]["start_pad_ms"] == 80
     assert task_config["tts"]["end_pad_ms"] == 160
+    assert task_config["tts"]["tower_path_pronunciation"] == "dash"
     assert options.tts.inference_timesteps == 10
     assert options.tts.min_reference_ms == 1200
     assert options.tts.start_pad_ms == 80
     assert options.tts.end_pad_ms == 160
+    assert options.tts.tower_path_pronunciation == "dash"
 
 
 def test_task_config_exposes_tts_redub_defaults(monkeypatch, tmp_path: Path) -> None:

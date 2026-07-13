@@ -7,7 +7,9 @@ from youdub.tts import (
     choose_fallback_reference,
     generate_tts,
     load_translation_entries,
+    normalize_tower_paths_for_tts,
     split_reference_audio,
+    tts_synthesis_text,
     write_tts_mix,
 )
 from youdub.tts_redub import RedubTTSConfig, redub_tts
@@ -64,6 +66,19 @@ def test_load_translation_entries_accepts_current_list_format(tmp_path: Path) ->
     ]
 
 
+def test_normalize_tower_paths_for_tts_supports_dash_and_compact_modes() -> None:
+    assert normalize_tower_paths_for_tts("走2-0-5和a-b-c路线。") == "走2杠0杠5和a杠b杠c路线。"
+    assert normalize_tower_paths_for_tts("走二-零-五路线。") == "走二杠零杠五路线。"
+    assert normalize_tower_paths_for_tts("走2 - 0 - 5路线。", "compact") == "走205路线。"
+    assert normalize_tower_paths_for_tts("gpt-4o 不应变化，2-0-5 应变化。") == "gpt-4o 不应变化，2杠0杠5 应变化。"
+
+
+def test_tts_synthesis_text_prefers_explicit_tts_text_then_normalizes() -> None:
+    entry = {"translation": "走 2-0-5 路线。", "tts_text": "走 a-b-c 路线。"}
+
+    assert tts_synthesis_text(entry, TTSConfig()) == "走 a杠b杠c 路线。"
+
+
 def test_split_reference_audio_and_fallback(tmp_path: Path) -> None:
     np, sf = _audio_modules()
     vocals = tmp_path / "audio_vocals.wav"
@@ -108,6 +123,44 @@ def test_generate_tts_writes_segments_mix_and_timings(tmp_path: Path, monkeypatc
     timings = json.loads((tmp_path / "audio_tts.timings.json").read_text(encoding="utf-8"))
     assert [item["translation"] for item in timings] == ["第一句。", "第二句。"]
     assert unloaded == [True]
+
+
+def test_generate_tts_uses_tower_path_tts_text_and_regenerates_without_matching_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    np, sf = _audio_modules()
+    (tmp_path / "translation.json").write_text(
+        json.dumps(
+            [{"segment_id": 0, "start": 0.0, "end": 0.5, "translation": "走 2-0-5 和 a-b-c 路线。"}],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    sf.write(tmp_path / "audio_vocals.wav", np.ones(16000, dtype=np.float32) * 0.05, 16000)
+    tts_dir = tmp_path / "segments" / "tts"
+    tts_dir.mkdir(parents=True)
+    sf.write(tts_dir / "0001.wav", np.zeros(800, dtype=np.float32), 16000)
+    captured_texts = []
+
+    class CapturingModel(_FakeModel):
+        def generate(self, **kwargs):
+            captured_texts.append(kwargs["text"])
+            return super().generate(**kwargs)
+
+    monkeypatch.setattr("youdub.tts.load_voxcpm_model", lambda _config: CapturingModel())
+    monkeypatch.setattr("youdub.tts.unload_voxcpm_model", lambda: None)
+
+    generate_tts(tmp_path, TTSConfig(min_reference_ms=100, align_audio=False))
+
+    assert captured_texts == ["走 2杠0杠5 和 a杠b杠c 路线。"]
+    audio, _sample_rate = sf.read(tts_dir / "0001.wav", dtype="float32")
+    assert float(audio.max()) > 0.09
+    timings = json.loads((tmp_path / "audio_tts.timings.json").read_text(encoding="utf-8"))
+    assert timings[0]["translation"] == "走 2-0-5 和 a-b-c 路线。"
+    assert timings[0]["tts_text"] == "走 2杠0杠5 和 a杠b杠c 路线。"
+    manifest = json.loads((tmp_path / "segments" / "tts.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["segments"]["0001"]["tts_text"] == "走 2杠0杠5 和 a杠b杠c 路线。"
 
 
 def test_generate_tts_can_keep_model_cached(tmp_path: Path, monkeypatch) -> None:
@@ -212,3 +265,47 @@ def test_redub_tts_replaces_segment_and_rebuilds_mix(tmp_path: Path, monkeypatch
     assert len(history) == 1
     assert json.loads(history[0])["status"] == "success"
     assert unloaded == [True]
+
+
+def test_redub_tts_uses_tower_path_tts_text(tmp_path: Path, monkeypatch) -> None:
+    np, sf = _audio_modules()
+    (tmp_path / "translation.json").write_text(
+        json.dumps(
+            [{"segment_id": 0, "start": 0.0, "end": 0.5, "translation": "走 2-0-5 路线。"}],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    vocals_dir = tmp_path / "segments" / "vocals"
+    tts_dir = tmp_path / "segments" / "tts"
+    vocals_dir.mkdir(parents=True)
+    tts_dir.mkdir(parents=True)
+    sf.write(vocals_dir / "0001.wav", np.ones(16000, dtype=np.float32) * 0.05, 16000)
+    sf.write(tts_dir / "0001.wav", np.zeros(800, dtype=np.float32), 16000)
+    (tmp_path / "tts.redub.plan.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "round": 1,
+                "max_rounds": 1,
+                "segments": [{"segment_id": 0, "tts_index": 1, "translation": "走 2-0-5 路线。"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    captured_texts = []
+
+    class CapturingModel(_FakeModel):
+        def generate(self, **kwargs):
+            captured_texts.append(kwargs["text"])
+            return super().generate(**kwargs)
+
+    monkeypatch.setattr("youdub.tts_redub.load_voxcpm_model", lambda _config: CapturingModel())
+    monkeypatch.setattr("youdub.tts_redub.unload_voxcpm_model", lambda: None)
+
+    redub_tts(tmp_path, TTSConfig(min_reference_ms=100, align_audio=False), RedubTTSConfig())
+
+    assert captured_texts == ["走 2杠0杠5 路线。"]
+    manifest = json.loads((tmp_path / "segments" / "tts.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["segments"]["0001"]["tts_text"] == "走 2杠0杠5 路线。"

@@ -81,6 +81,11 @@ const CONFIG_SECTIONS = [
       ["start_pad_ms", "参考前填充 ms", "integer", {min: 0}],
       ["end_pad_ms", "参考后填充 ms", "integer", {min: 0}],
       ["align_audio", "配音时长对齐", "boolean"],
+      ["tower_path_pronunciation", "塔路径读法", "select", {options: [
+        {value: "dash", label: "杠"},
+        {value: "compact", label: "连读"},
+        {value: "off", label: "关闭"},
+      ]}],
       ["stretch_base_min", "全局拉伸下限", "number", {step: 0.01}],
       ["stretch_base_max", "全局拉伸上限", "number", {step: 0.01}],
       ["stretch_base_safety", "全局拉伸安全系数", "number", {step: 0.01}],
@@ -697,8 +702,9 @@ function renderConfigField(section, key, labelText, type, meta, value) {
     `
   } else if (type === "select") {
     const options = (meta.options || []).map((item) => {
-      const selected = String(value || "") === item ? "selected" : ""
-      return `<option value="${escapeHtml(item)}" ${selected}>${escapeHtml(item)}</option>`
+      const option = normalizeSelectOption(item)
+      const selected = String(value || "") === option.value ? "selected" : ""
+      return `<option value="${escapeHtml(option.value)}" ${selected}>${escapeHtml(option.label)}</option>`
     }).join("")
     label.innerHTML = `
       <span>${labelText}</span>
@@ -728,6 +734,19 @@ function renderConfigField(section, key, labelText, type, meta, value) {
     setMessage("taskConfigMessage", "有未保存修改")
   })
   return label
+}
+
+function normalizeSelectOption(item) {
+  if (item && typeof item === "object") {
+    return {
+      value: String(item.value ?? ""),
+      label: String(item.label ?? item.value ?? ""),
+    }
+  }
+  return {
+    value: String(item ?? ""),
+    label: String(item ?? ""),
+  }
 }
 
 function updateTaskConfigDraftFromForm() {

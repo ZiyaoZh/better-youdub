@@ -242,6 +242,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep VoxCPM2 loaded after TTS for faster subsequent runs",
     )
     run_task.add_argument(
+        "--tts-tower-path-pronunciation",
+        choices=["dash", "compact", "off"],
+        default=argparse.SUPPRESS,
+        help="How TTS should pronounce tower path strings like 2-0-5",
+    )
+    run_task.add_argument(
         "--tts-stretch-base-min",
         type=float,
         default=argparse.SUPPRESS,
@@ -540,6 +546,7 @@ def _run_task_cli_overrides(args: argparse.Namespace) -> dict[str, object]:
     _set_cli_override(overrides, args, "tts_end_pad_ms", "tts", "end_pad_ms")
     _set_cli_override(overrides, args, "tts_align_audio", "tts", "align_audio")
     _set_cli_override(overrides, args, "tts_cache_model", "tts", "cache_model")
+    _set_cli_override(overrides, args, "tts_tower_path_pronunciation", "tts", "tower_path_pronunciation")
     _set_cli_override(overrides, args, "tts_stretch_base_min", "tts", "stretch_base_min")
     _set_cli_override(overrides, args, "tts_stretch_base_max", "tts", "stretch_base_max")
     _set_cli_override(overrides, args, "tts_stretch_local_min", "tts", "stretch_local_min")
