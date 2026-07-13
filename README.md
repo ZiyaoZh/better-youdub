@@ -266,6 +266,10 @@ JavaScript runtime；`doctor` 和 WebUI `/api/doctor` 会显示 `ytdlp_js_runtim
 - `YOUDUB_TRANSLATION_RETRY_MAX_BACKOFF_SECONDS`
 - `YOUDUB_TRANSLATION_FORCE_JSON_OUTPUT`
 - `YOUDUB_TRANSLATION_TEMPERATURE`
+- `YOUDUB_TRANSLATION_SSH_HOST`
+- `YOUDUB_TRANSLATION_SSH_LOCAL_PORT`
+- `YOUDUB_TRANSLATION_SSH_OPTIONS`
+- `YOUDUB_TRANSLATION_PROXY`
 - `YOUDUB_TRANSLATION_EXTRA_PROMPT`
 - `YOUDUB_TRANSLATION_SUMMARY_EXTRA_PROMPT`
 - `YOUDUB_TRANSLATION_CONTEXT_EXTRA_PROMPT`
@@ -568,6 +572,9 @@ YOUDUB_CONFIG_PATH=/data/config/youdub.json
     "model": "gpt-..."
   },
   "translation": {
+    "ssh_host": "",
+    "ssh_local_port": 1081,
+    "proxy": "",
     "extra_prompt": "",
     "summary_extra_prompt": "",
     "context_extra_prompt": "",
@@ -577,6 +584,17 @@ YOUDUB_CONFIG_PATH=/data/config/youdub.json
 }
 ```
 
+Docker 启动时，如果 `translation.ssh_host` 或 `YOUDUB_TRANSLATION_SSH_HOST`
+非空，入口脚本会自动执行 SSH 动态转发，并把翻译阶段代理设置为
+`socks5h://127.0.0.1:<ssh_local_port>`。默认 Compose 会把宿主机
+`${HOME}/.ssh` 只读挂载到容器 `/tmp/.ssh`，因此宿主机上能执行
+`ssh AI.census` 时，容器里也可以使用同一个 SSH alias。若 SSH 目录不在默认位置，
+设置 `YOUDUB_SSH_DIR=/path/to/.ssh`。如果密钥权限是 `0600`，确保
+`YOUDUB_UID`/`YOUDUB_GID` 与宿主机密钥 owner 匹配。
+
+`translation.proxy` 是低层覆盖项，适合非 Docker 运行或已有 HTTP/SOCKS 代理的场景；
+使用 `translation.ssh_host` 时通常不需要手动填写它。
+
 CI 或临时运行时，仍可用环境变量覆盖配置文件：
 
 ```bash
@@ -585,6 +603,7 @@ export HF_READ_TOKEN=hf_...
 export OPENAI_API_KEY=sk-...
 export OPENAI_BASE_URL=https://api.example.com/v1
 export OPENAI_MODEL=gpt-...
+export YOUDUB_TRANSLATION_SSH_HOST=AI.census
 ```
 
 支持的覆盖变量：
@@ -593,6 +612,10 @@ export OPENAI_MODEL=gpt-...
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL` 或 `OPENAI_API_BASE`
 - `OPENAI_MODEL` 或 `MODEL_NAME`
+- `YOUDUB_TRANSLATION_SSH_HOST`
+- `YOUDUB_TRANSLATION_SSH_LOCAL_PORT`
+- `YOUDUB_TRANSLATION_SSH_OPTIONS`
+- `YOUDUB_TRANSLATION_PROXY`
 - `YOUDUB_TRANSLATION_EXTRA_PROMPT`
 - `YOUDUB_TRANSLATION_SUMMARY_EXTRA_PROMPT`
 - `YOUDUB_TRANSLATION_CONTEXT_EXTRA_PROMPT`
@@ -914,6 +937,9 @@ export PYTHONPATH="$PWD/src"
 - `YOUDUB_COOKIES_PATH=/data/cookies/cookies.txt`
 - `YOUDUB_YTDLP_PROXY=`
 - `YOUDUB_DOWNLOAD_MAX_HEIGHT=0`
+- `YOUDUB_TRANSLATION_SSH_HOST=`
+- `YOUDUB_TRANSLATION_SSH_LOCAL_PORT=1081`
+- `YOUDUB_TRANSLATION_PROXY=`
 - `YOUDUB_WEB_USERNAME=`
 - `YOUDUB_WEB_PASSWORD=`
 - `HF_HOME=/cache/huggingface`

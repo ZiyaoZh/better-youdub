@@ -62,6 +62,7 @@ class HuggingFaceConfig:
 
 @dataclass(frozen=True)
 class TranslationPromptConfig:
+    proxy: str | None = None
     extra_prompt: str | None = None
     summary_extra_prompt: str | None = None
     context_extra_prompt: str | None = None
@@ -133,6 +134,8 @@ class AppConfig:
                 0,
             ),
             translation_prompts=TranslationPromptConfig(
+                proxy=_clean(os.getenv("YOUDUB_TRANSLATION_PROXY"))
+                or _clean(translation.get("proxy")),
                 extra_prompt=_clean(os.getenv("YOUDUB_TRANSLATION_EXTRA_PROMPT"))
                 or _clean(translation.get("extra_prompt")),
                 summary_extra_prompt=_clean(os.getenv("YOUDUB_TRANSLATION_SUMMARY_EXTRA_PROMPT"))

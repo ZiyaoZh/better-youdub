@@ -24,6 +24,10 @@ services:
       YOUDUB_TRANSLATION_CONTEXT_EXTRA_PROMPT: ${YOUDUB_TRANSLATION_CONTEXT_EXTRA_PROMPT:-}
       YOUDUB_TRANSLATION_SEGMENT_EXTRA_PROMPT: ${YOUDUB_TRANSLATION_SEGMENT_EXTRA_PROMPT:-}
       YOUDUB_TRANSLATION_CORRECTION_PROMPT: ${YOUDUB_TRANSLATION_CORRECTION_PROMPT:-}
+      YOUDUB_TRANSLATION_PROXY: ${YOUDUB_TRANSLATION_PROXY:-}
+      YOUDUB_TRANSLATION_SSH_HOST: ${YOUDUB_TRANSLATION_SSH_HOST:-}
+      YOUDUB_TRANSLATION_SSH_LOCAL_PORT: ${YOUDUB_TRANSLATION_SSH_LOCAL_PORT:-1081}
+      YOUDUB_TRANSLATION_SSH_OPTIONS: ${YOUDUB_TRANSLATION_SSH_OPTIONS:-}
       HOME: /tmp
       MPLCONFIGDIR: /tmp/youdub-cache/matplotlib
       XDG_CACHE_HOME: /tmp/youdub-cache/xdg
@@ -35,6 +39,7 @@ services:
       - ./data/logs:/data/logs
       - ./data/config:/data/config
       - ./data/cookies:/data/cookies
+      - ${YOUDUB_SSH_DIR:-${HOME}/.ssh}:/tmp/.ssh:ro
       - ./models:/models
       - ./data/cache/nltk:/cache/nltk
     ports:

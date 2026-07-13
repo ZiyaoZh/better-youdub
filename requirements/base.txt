@@ -1,6 +1,7 @@
 # Runtime dependencies for the current scaffold.
 # Keep this file minimal; add packages only when code imports them.
 openai>=1.30.0
+socksio>=1.0.0
 audiostretchy
 opencc-python-reimplemented>=0.1.7
 bilibili-api-python==17.4.1

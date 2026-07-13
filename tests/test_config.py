@@ -108,3 +108,24 @@ def test_app_config_download_max_height_file_and_env_precedence(tmp_path: Path, 
     config = AppConfig.from_env()
 
     assert config.download_max_height == 720
+
+
+def test_app_config_reads_translation_proxy_from_file_and_env(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config" / "youdub.json"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        json.dumps({"translation": {"proxy": "socks5h://127.0.0.1:1081"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("YOUDUB_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("YOUDUB_TRANSLATION_PROXY", raising=False)
+
+    config = AppConfig.from_env()
+
+    assert config.translation_prompts.proxy == "socks5h://127.0.0.1:1081"
+
+    monkeypatch.setenv("YOUDUB_TRANSLATION_PROXY", "http://127.0.0.1:18080")
+
+    config = AppConfig.from_env()
+
+    assert config.translation_prompts.proxy == "http://127.0.0.1:18080"

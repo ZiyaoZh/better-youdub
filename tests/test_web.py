@@ -65,7 +65,7 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert 'id="systemLine"' in index
     assert 'id="taskPager"' in index
     assert 'id="finalVideo"' not in index
-    assert "20260706-system-monitor" in index
+    assert "20260713-translation-proxy" in index
     assert "/assets/app.js?v=" in index
     assert "/assets/styles.css?v=" in index
     app_js = client.get("/assets/app.js").text
@@ -76,6 +76,7 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert "/api/system" in app_js
     assert "CPU" in app_js
     assert "step-progress" in app_js
+    assert "翻译代理" in app_js
     assert "videoPreview" not in app_js
     styles = client.get("/assets/styles.css").text
     assert "step-progress-fill" in styles
@@ -371,6 +372,7 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert "Bloons TD 6" in defaults.json()["config"]["translation"]["correction_prompt"]
     assert defaults.json()["config"]["translation"]["base_url"] == WEB_TRANSLATION_BASE_URL_DEFAULT
     assert defaults.json()["config"]["translation"]["model"] == WEB_TRANSLATION_MODEL_DEFAULT
+    assert defaults.json()["config"]["translation"]["proxy"] == ""
     assert defaults.json()["config"]["tts"]["inference_timesteps"] == 10
     assert defaults.json()["config"]["tts"]["min_reference_ms"] == 1200
     assert defaults.json()["config"]["tts"]["start_pad_ms"] == 80
@@ -381,6 +383,7 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert task["config"]["translation"]["api_key"] == ""
     assert task["config"]["translation"]["base_url"] == WEB_TRANSLATION_BASE_URL_DEFAULT
     assert task["config"]["translation"]["model"] == WEB_TRANSLATION_MODEL_DEFAULT
+    assert task["config"]["translation"]["proxy"] == ""
     assert task["config"]["tts"]["inference_timesteps"] == 10
     assert task["config"]["tts"]["min_reference_ms"] == 1200
     assert task["config"]["tts"]["start_pad_ms"] == 80
@@ -404,6 +407,7 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
                     "api_key": "sk-task",
                     "base_url": "https://example.test/v1",
                     "model": "gpt-task",
+                    "proxy": "socks5h://127.0.0.1:1081",
                     "segment_extra_prompt": "使用中文主播口吻。",
                     "correction_prompt": "把 tax shooter 视为 Tack Shooter。",
                 },
@@ -426,6 +430,7 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
             "api_key": "sk-task",
             "base_url": "https://example.test/v1",
             "model": "gpt-task",
+            "proxy": "socks5h://127.0.0.1:1081",
             "segment_extra_prompt": "使用中文主播口吻。",
             "correction_prompt": "把 tax shooter 视为 Tack Shooter。",
         },
@@ -1322,6 +1327,7 @@ def test_web_run_step_uses_saved_task_config(monkeypatch, tmp_path: Path) -> Non
     config = task["config"]
     config["translation"]["api_key"] = "sk-task"
     config["translation"]["model"] = "gpt-task"
+    config["translation"]["proxy"] = "socks5h://127.0.0.1:1081"
     config["translation"]["target_language"] = "繁體中文"
     config["translation"]["segment_extra_prompt"] = "使用台灣中文口吻。"
     config["translation"]["correction_prompt"] = "把 tax shooter 视为 Tack Shooter。"
@@ -1357,6 +1363,7 @@ def test_web_run_step_uses_saved_task_config(monkeypatch, tmp_path: Path) -> Non
 
     assert captured["translation"].api_key == "sk-task"
     assert captured["translation"].model == "gpt-task"
+    assert captured["translation"].proxy == "socks5h://127.0.0.1:1081"
     assert captured["translation"].target_language == "繁體中文"
     assert captured["translation"].segment_extra_prompt == "使用台灣中文口吻。"
     assert captured["translation"].correction_prompt == "把 tax shooter 视为 Tack Shooter。"

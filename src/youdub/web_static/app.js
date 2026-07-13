@@ -50,6 +50,7 @@ const CONFIG_SECTIONS = [
       ["api_key", "OpenAI API Key", "secret"],
       ["base_url", "OpenAI Base URL", "text"],
       ["model", "模型", "text"],
+      ["proxy", "翻译代理", "text"],
       ["target_language", "目标语言", "text"],
       ["batch_size", "批大小", "integer", {min: 1}],
       ["timeout_seconds", "超时秒数", "number", {min: 1}],

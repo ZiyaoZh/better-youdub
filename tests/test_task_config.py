@@ -113,8 +113,31 @@ def test_task_config_exposes_web_translation_defaults(monkeypatch, tmp_path: Pat
 
     assert task_config["translation"]["base_url"] == WEB_TRANSLATION_BASE_URL_DEFAULT
     assert task_config["translation"]["model"] == WEB_TRANSLATION_MODEL_DEFAULT
+    assert task_config["translation"]["proxy"] == ""
     assert options.translation.base_url == WEB_TRANSLATION_BASE_URL_DEFAULT
     assert options.translation.model == WEB_TRANSLATION_MODEL_DEFAULT
+    assert options.translation.proxy is None
+
+
+def test_task_config_exposes_translation_proxy_default_and_override(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("YOUDUB_ROOT", str(tmp_path / "videos"))
+    monkeypatch.setenv("YOUDUB_TASKS_PATH", str(tmp_path / "tasks" / "tasks.json"))
+    monkeypatch.setenv("YOUDUB_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("YOUDUB_MODELS_DIR", str(tmp_path / "models"))
+    monkeypatch.setenv("YOUDUB_CONFIG_PATH", str(tmp_path / "config" / "youdub.json"))
+    monkeypatch.setenv("YOUDUB_TRANSLATION_PROXY", "socks5h://127.0.0.1:1081")
+
+    config = AppConfig.from_env()
+    task_config = default_task_config(config)
+    options = runtime_options_from_task_config(config, task_config)
+
+    assert task_config["translation"]["proxy"] == "socks5h://127.0.0.1:1081"
+    assert options.translation.proxy == "socks5h://127.0.0.1:1081"
+
+    task_config["translation"]["proxy"] = ""
+    options = runtime_options_from_task_config(config, task_config)
+
+    assert options.translation.proxy is None
 
 
 def test_task_config_exposes_web_tts_defaults(monkeypatch, tmp_path: Path) -> None:

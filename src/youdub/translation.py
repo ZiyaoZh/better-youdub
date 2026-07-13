@@ -69,6 +69,7 @@ class TranslationConfig:
     api_key: str | None
     model: str | None
     base_url: str | None = None
+    proxy: str | None = None
     target_language: str = "简体中文"
     batch_size: int = 20
     timeout_seconds: float = 240.0
@@ -673,6 +674,14 @@ def _create_openai_client(config: TranslationConfig) -> Any:
     kwargs: dict[str, Any] = {"api_key": config.api_key}
     if config.base_url:
         kwargs["base_url"] = config.base_url
+    if config.proxy:
+        try:
+            import httpx
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "The httpx package is required to use a translation proxy."
+            ) from exc
+        kwargs["http_client"] = httpx.Client(proxy=config.proxy)
     return OpenAI(**kwargs)
 
 

@@ -8,6 +8,9 @@
     "model": ""
   },
   "translation": {
+    "ssh_host": "",
+    "ssh_local_port": 1081,
+    "proxy": "",
     "extra_prompt": "",
     "summary_extra_prompt": "",
     "context_extra_prompt": "",

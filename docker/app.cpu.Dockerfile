@@ -19,6 +19,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fontconfig \
     fonts-noto-cjk \
     gosu \
+    openssh-client \
+    passwd \
     unzip \
   && rm -rf /var/lib/apt/lists/*
 

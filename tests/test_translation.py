@@ -1,3 +1,4 @@
+import sys
 from types import SimpleNamespace
 
 from youdub.translation import (
@@ -6,6 +7,7 @@ from youdub.translation import (
     SEGMENTS_OUTPUT,
     TranslationConfig,
     _chat_json,
+    _create_openai_client,
     align_translation_parts,
     ensure_summary,
     ensure_segment_translations,
@@ -57,6 +59,36 @@ def test_split_translation_text_prefers_punctuation() -> None:
         "你好，世界。",
         "今天天气不错。",
     ]
+
+
+def test_create_openai_client_uses_translation_proxy(monkeypatch) -> None:
+    captured = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["openai"] = kwargs
+
+    class FakeHttpClient:
+        def __init__(self, **kwargs):
+            captured["http_client"] = kwargs
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(Client=FakeHttpClient))
+
+    client = _create_openai_client(
+        TranslationConfig(
+            api_key="sk-test",
+            base_url="https://api.example.test/v1",
+            model="gpt-test",
+            proxy="socks5h://127.0.0.1:1081",
+        )
+    )
+
+    assert isinstance(client, FakeOpenAI)
+    assert captured["http_client"] == {"proxy": "socks5h://127.0.0.1:1081"}
+    assert captured["openai"]["api_key"] == "sk-test"
+    assert captured["openai"]["base_url"] == "https://api.example.test/v1"
+    assert isinstance(captured["openai"]["http_client"], FakeHttpClient)
 
 
 def test_split_translation_text_does_not_emit_punctuation_only_parts() -> None:

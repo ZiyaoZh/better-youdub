@@ -26,6 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fontconfig \
     fonts-noto-cjk \
     gosu \
+    openssh-client \
+    passwd \
     git \
     build-essential \
     python3-dev \
