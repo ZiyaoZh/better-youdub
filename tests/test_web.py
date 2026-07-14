@@ -68,7 +68,7 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert 'id="systemLine"' in index
     assert 'id="taskPager"' in index
     assert 'id="finalVideo"' not in index
-    assert "20260713-translation-proxy" in index
+    assert "20260714-network-proxy" in index
     assert "/assets/app.js?v=" in index
     assert "/assets/styles.css?v=" in index
     app_js = client.get("/assets/app.js").text
@@ -78,8 +78,9 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert "已终止" in app_js
     assert "/api/system" in app_js
     assert "CPU" in app_js
+    assert "任务网络代理" in app_js
+    assert "翻译代理" not in app_js
     assert "step-progress" in app_js
-    assert "翻译代理" in app_js
     assert "tower_path_pronunciation" in app_js
     assert "塔路径读法" in app_js
     assert "连读" in app_js
@@ -378,7 +379,8 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert "Bloons TD 6" in defaults.json()["config"]["translation"]["correction_prompt"]
     assert defaults.json()["config"]["translation"]["base_url"] == WEB_TRANSLATION_BASE_URL_DEFAULT
     assert defaults.json()["config"]["translation"]["model"] == WEB_TRANSLATION_MODEL_DEFAULT
-    assert defaults.json()["config"]["translation"]["proxy"] == ""
+    assert defaults.json()["config"]["network"]["proxy"] == ""
+    assert "proxy" not in defaults.json()["config"]["translation"]
     assert defaults.json()["config"]["tts"]["inference_timesteps"] == 10
     assert defaults.json()["config"]["tts"]["min_reference_ms"] == 1200
     assert defaults.json()["config"]["tts"]["start_pad_ms"] == 80
@@ -390,7 +392,8 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert task["config"]["translation"]["api_key"] == ""
     assert task["config"]["translation"]["base_url"] == WEB_TRANSLATION_BASE_URL_DEFAULT
     assert task["config"]["translation"]["model"] == WEB_TRANSLATION_MODEL_DEFAULT
-    assert task["config"]["translation"]["proxy"] == ""
+    assert task["config"]["network"]["proxy"] == ""
+    assert "proxy" not in task["config"]["translation"]
     assert task["config"]["tts"]["inference_timesteps"] == 10
     assert task["config"]["tts"]["min_reference_ms"] == 1200
     assert task["config"]["tts"]["start_pad_ms"] == 80
@@ -403,20 +406,21 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     updated = client.put(
         f"/api/tasks/{task['id']}/config",
         json={
-            "config": {
-                **task["config"],
-                "download": {
-                    **task["config"]["download"],
-                    "proxy": "http://127.0.0.1:7890",
-                    "max_height": 720,
+                "config": {
+                    **task["config"],
+                    "network": {
+                        "proxy": "socks5h://127.0.0.1:1081",
+                    },
+                    "download": {
+                        **task["config"]["download"],
+                        "max_height": 720,
                 },
                 "translation": {
                     **task["config"]["translation"],
-                    "api_key": "sk-task",
-                    "base_url": "https://example.test/v1",
-                    "model": "gpt-task",
-                    "proxy": "socks5h://127.0.0.1:1081",
-                    "segment_extra_prompt": "使用中文主播口吻。",
+                        "api_key": "sk-task",
+                        "base_url": "https://example.test/v1",
+                        "model": "gpt-task",
+                        "segment_extra_prompt": "使用中文主播口吻。",
                     "correction_prompt": "把 tax shooter 视为 Tack Shooter。",
                 },
                 "whisperx": {
@@ -432,13 +436,13 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
 
     saved_task = json.loads(config_path.read_text(encoding="utf-8"))[0]
     assert saved_task["config"] == {
-        "download": {"proxy": "http://127.0.0.1:7890", "max_height": 720},
+        "network": {"proxy": "socks5h://127.0.0.1:1081"},
+        "download": {"max_height": 720},
         "whisperx": {"batch_size": 12},
         "translation": {
             "api_key": "sk-task",
             "base_url": "https://example.test/v1",
             "model": "gpt-task",
-            "proxy": "socks5h://127.0.0.1:1081",
             "segment_extra_prompt": "使用中文主播口吻。",
             "correction_prompt": "把 tax shooter 视为 Tack Shooter。",
         },
@@ -508,16 +512,16 @@ def test_web_url_task_uses_and_saves_download_config(monkeypatch, tmp_path: Path
     assert task["config"]["download"] == {
         "use_cookies": False,
         "cookies_path": "/tmp/custom-cookies.txt",
-        "proxy": "http://127.0.0.1:7890",
         "max_height": 720,
         "force_download": True,
     }
+    assert task["config"]["network"] == {"proxy": "http://127.0.0.1:7890"}
     saved_task = json.loads((tmp_path / "tasks" / "tasks.json").read_text(encoding="utf-8"))[0]
     assert saved_task["config"] == {
+        "network": {"proxy": "http://127.0.0.1:7890"},
         "download": {
             "use_cookies": False,
             "cookies_path": "/tmp/custom-cookies.txt",
-            "proxy": "http://127.0.0.1:7890",
             "max_height": 720,
             "force_download": True,
         }
@@ -1335,7 +1339,7 @@ def test_web_run_step_uses_saved_task_config(monkeypatch, tmp_path: Path) -> Non
     config = task["config"]
     config["translation"]["api_key"] = "sk-task"
     config["translation"]["model"] = "gpt-task"
-    config["translation"]["proxy"] = "socks5h://127.0.0.1:1081"
+    config["network"]["proxy"] = "socks5h://127.0.0.1:1081"
     config["translation"]["target_language"] = "繁體中文"
     config["translation"]["segment_extra_prompt"] = "使用台灣中文口吻。"
     config["translation"]["correction_prompt"] = "把 tax shooter 视为 Tack Shooter。"
@@ -1378,7 +1382,9 @@ def test_web_run_step_uses_saved_task_config(monkeypatch, tmp_path: Path) -> Non
     assert captured["translation"].correction_prompt == "把 tax shooter 视为 Tack Shooter。"
     assert captured["whisperx"].model_name == "medium"
     assert captured["whisperx"].hf_token == "hf-task"
+    assert captured["whisperx"].proxy == "socks5h://127.0.0.1:1081"
     assert captured["tts"].hf_token == "hf-env"
+    assert captured["tts"].proxy == "socks5h://127.0.0.1:1081"
     assert captured["tts"].cfg_value == 3.5
     assert captured["tts"].tower_path_pronunciation == "compact"
 

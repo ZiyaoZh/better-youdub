@@ -43,6 +43,8 @@ def _default_runtime_options(config: AppConfig) -> RuntimeOptions:
     tts_defaults = TTSConfig()
     synthesis_defaults = SynthesisConfig()
     publish_defaults = PublishPackageConfig()
+    bilibili_defaults = BilibiliPublishConfig.from_env()
+    network_proxy = config.network.proxy
     return RuntimeOptions(
         whisperx=WhisperXConfig(
             models_dir=config.models_dir,
@@ -57,12 +59,13 @@ def _default_runtime_options(config: AppConfig) -> RuntimeOptions:
             initial_prompt=_optional_str_env("YOUDUB_WHISPER_INITIAL_PROMPT"),
             tts_asr_language=_optional_str_env("YOUDUB_TTS_ASR_LANGUAGE") or "zh",
             tts_asr_initial_prompt=_optional_str_env("YOUDUB_TTS_ASR_INITIAL_PROMPT") or "以下是普通话的句子。",
+            proxy=network_proxy,
         ),
         translation=TranslationConfig(
             api_key=config.secrets.openai.api_key,
             base_url=config.secrets.openai.base_url,
             model=config.secrets.openai.model,
-            proxy=config.translation_prompts.proxy,
+            proxy=network_proxy,
             target_language=os.getenv("YOUDUB_TRANSLATION_LANGUAGE", "简体中文"),
             batch_size=_int_env("YOUDUB_TRANSLATION_BATCH_SIZE", 20),
             max_retries=_int_env("YOUDUB_TRANSLATION_MAX_RETRIES", 4),
@@ -106,6 +109,7 @@ def _default_runtime_options(config: AppConfig) -> RuntimeOptions:
                 "YOUDUB_TTS_TOWER_PATH_PRONUNCIATION",
                 tts_defaults.tower_path_pronunciation,
             ),
+            proxy=network_proxy,
         ),
         synthesis=SynthesisConfig(
             burn_subtitles=_bool_env("YOUDUB_BURN_SUBTITLES", synthesis_defaults.burn_subtitles),
@@ -124,7 +128,10 @@ def _default_runtime_options(config: AppConfig) -> RuntimeOptions:
             max_tags=_int_env("YOUDUB_PUBLISH_MAX_TAGS", publish_defaults.max_tags),
             max_tag_chars=_int_env("YOUDUB_PUBLISH_MAX_TAG_CHARS", publish_defaults.max_tag_chars),
         ),
-        bilibili=BilibiliPublishConfig.from_env(),
+        bilibili=replace(
+            bilibili_defaults,
+            proxy=network_proxy or bilibili_defaults.proxy,
+        ),
         tts_quality=TTSQualityConfig.from_env(),
         redub_tts=RedubTTSConfig.from_env(),
     )
@@ -134,15 +141,22 @@ def default_task_config(config: AppConfig, *, include_secrets: bool = False) -> 
     options = _default_runtime_options(config)
     whisperx = _config_dict(options.whisperx)
     whisperx.pop("models_dir", None)
+    whisperx.pop("proxy", None)
     tts = _config_dict(options.tts)
+    tts.pop("proxy", None)
     translation = _config_dict(options.translation)
+    translation.pop("proxy", None)
     translation["base_url"] = translation["base_url"] or DEFAULT_TRANSLATION_BASE_URL
     translation["model"] = translation["model"] or DEFAULT_TRANSLATION_MODEL
+    bilibili = _config_dict(options.bilibili)
+    bilibili.pop("proxy", None)
     defaults = {
+        "network": {
+            "proxy": config.network.proxy or "",
+        },
         "download": {
             "use_cookies": True,
             "cookies_path": str(config.cookies_path) if config.cookies_path is not None else "",
-            "proxy": config.ytdlp_proxy or "",
             "max_height": config.download_max_height,
             "force_download": False,
         },
@@ -153,7 +167,7 @@ def default_task_config(config: AppConfig, *, include_secrets: bool = False) -> 
         "redub_tts": _config_dict(options.redub_tts),
         "synthesis": _config_dict(options.synthesis),
         "publish": _config_dict(options.publish),
-        "bilibili": _config_dict(options.bilibili),
+        "bilibili": bilibili,
         "workflow": {
             "include_bilibili_upload": False,
             "enable_tts_redub": False,
@@ -174,7 +188,7 @@ def effective_task_config(
     include_secrets: bool = False,
 ) -> dict[str, Any]:
     defaults = default_task_config(config, include_secrets=include_secrets)
-    raw = merge_task_config(defaults, overrides or {})
+    raw = merge_task_config(defaults, _migrate_legacy_proxy_override(overrides or {}))
     if include_secrets:
         secret_defaults = default_task_config(config, include_secrets=True)
         for section, fields in SECRET_FIELDS.items():
@@ -285,19 +299,22 @@ def merge_task_config(defaults: Mapping[str, Any], overrides: Mapping[str, Any])
 
 
 def download_config_from_task_config(config: AppConfig, overrides: Mapping[str, Any] | None) -> DownloadConfig:
-    values = effective_task_config(config, overrides, include_secrets=True)["download"]
-    cookies_path = _optional_path(values.get("cookies_path"))
+    values = effective_task_config(config, overrides, include_secrets=True)
+    download = values["download"]
+    cookies_path = _optional_path(download.get("cookies_path"))
     return DownloadConfig(
-        cookies_path=cookies_path if values["use_cookies"] else None,
-        proxy=_optional_str(values.get("proxy")),
-        max_height=int(values["max_height"]),
-        force=bool(values["force_download"]),
-        use_cookies=bool(values["use_cookies"]),
+        cookies_path=cookies_path if download["use_cookies"] else None,
+        proxy=_optional_str(values["network"]["proxy"]) or config.ytdlp_proxy,
+        max_height=int(download["max_height"]),
+        force=bool(download["force_download"]),
+        use_cookies=bool(download["use_cookies"]),
     )
 
 
 def runtime_options_from_task_config(config: AppConfig, overrides: Mapping[str, Any] | None) -> RuntimeOptions:
     values = effective_task_config(config, overrides, include_secrets=True)
+    network_proxy = _optional_str(values["network"]["proxy"])
+    bilibili_default_proxy = BilibiliPublishConfig.from_env().proxy
     workflow_max_rounds = int(values["workflow"]["tts_redub_max_rounds"])
     return RuntimeOptions(
         whisperx=WhisperXConfig(
@@ -313,12 +330,13 @@ def runtime_options_from_task_config(config: AppConfig, overrides: Mapping[str, 
             initial_prompt=_optional_str(values["whisperx"]["initial_prompt"]),
             tts_asr_language=_optional_str(values["whisperx"]["tts_asr_language"]),
             tts_asr_initial_prompt=_optional_str(values["whisperx"]["tts_asr_initial_prompt"]),
+            proxy=network_proxy,
         ),
         translation=TranslationConfig(
             api_key=_optional_str(values["translation"]["api_key"]),
             base_url=_optional_str(values["translation"]["base_url"]),
             model=_optional_str(values["translation"]["model"]),
-            proxy=_optional_str(values["translation"]["proxy"]),
+            proxy=network_proxy,
             target_language=str(values["translation"]["target_language"]),
             batch_size=int(values["translation"]["batch_size"]),
             timeout_seconds=float(values["translation"]["timeout_seconds"]),
@@ -353,6 +371,7 @@ def runtime_options_from_task_config(config: AppConfig, overrides: Mapping[str, 
             stretch_noop_epsilon=float(values["tts"]["stretch_noop_epsilon"]),
             cache_model=bool(values["tts"]["cache_model"]),
             tower_path_pronunciation=str(values["tts"]["tower_path_pronunciation"]),
+            proxy=network_proxy,
         ),
         tts_quality=TTSQualityConfig(
             hard_similarity_min=float(values["tts_quality"]["hard_similarity_min"]),
@@ -396,12 +415,27 @@ def runtime_options_from_task_config(config: AppConfig, overrides: Mapping[str, 
             original=bool(values["bilibili"]["original"]),
             source=_optional_str(values["bilibili"]["source"]),
             watermark=bool(values["bilibili"]["watermark"]),
-            proxy=_optional_str(values["bilibili"].get("proxy")),
+            proxy=network_proxy or bilibili_default_proxy,
             dry_run=bool(values["bilibili"]["dry_run"]),
             force=bool(values["bilibili"]["force"]),
             confirm=bool(values["bilibili"]["confirm"]),
         ),
     )
+
+
+def _migrate_legacy_proxy_override(overrides: Mapping[str, Any]) -> Mapping[str, Any]:
+    network = overrides.get("network")
+    if isinstance(network, Mapping) and "proxy" in network:
+        return overrides
+
+    for section in ("translation", "download", "bilibili"):
+        values = overrides.get(section)
+        if not isinstance(values, Mapping) or "proxy" not in values:
+            continue
+        proxy = values["proxy"]
+        if _optional_str(proxy):
+            return merge_task_config_overrides(overrides, {"network": {"proxy": proxy}})
+    return overrides
 
 
 def dry_run_bilibili_options(options: RuntimeOptions) -> RuntimeOptions:

@@ -159,6 +159,7 @@ def create_app() -> FastAPI:
             "cookies_path": str(config.cookies_path) if config.cookies_path else None,
             "cookies_configured": _nonempty_file(config.cookies_path),
             "ytdlp_proxy_configured": bool(config.ytdlp_proxy),
+            "network_proxy_configured": bool(config.network.proxy),
             "ytdlp_js_runtimes": sorted(supported_js_runtimes()),
             "download_max_height": config.download_max_height,
             "huggingface_token_configured": config.secrets.huggingface.token is not None,
@@ -774,6 +775,7 @@ def _task_config_for_url_payload(config: AppConfig, payload: UrlTaskRequest) -> 
     defaults = default_task_config(config)
     effective = default_task_config(config)
     download = effective["download"]
+    network = effective["network"]
     fields_set = _payload_fields_set(payload)
 
     cookies_path = download["cookies_path"]
@@ -786,7 +788,7 @@ def _task_config_for_url_payload(config: AppConfig, payload: UrlTaskRequest) -> 
     if "cookies_path" in fields_set or _clean_text(payload.cookies_content):
         download["cookies_path"] = cookies_path
     if "proxy" in fields_set:
-        download["proxy"] = payload.proxy or ""
+        network["proxy"] = payload.proxy or ""
     if "max_height" in fields_set and payload.max_height is not None:
         download["max_height"] = payload.max_height
     if "force_download" in fields_set:

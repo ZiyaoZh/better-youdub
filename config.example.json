@@ -7,10 +7,12 @@
     "base_url": "",
     "model": ""
   },
-  "translation": {
+  "network": {
     "ssh_host": "",
     "ssh_local_port": 1081,
-    "proxy": "",
+    "proxy": ""
+  },
+  "translation": {
     "extra_prompt": "",
     "summary_extra_prompt": "",
     "context_extra_prompt": "",

@@ -316,9 +316,9 @@ def test_create_url_task_saves_explicit_download_overrides(monkeypatch, tmp_path
     assert captured["config"].max_height == 720
     assert captured["config"].force is True
     assert output["config"] == {
+        "network": {"proxy": "http://127.0.0.1:7890"},
         "download": {
             "use_cookies": False,
-            "proxy": "http://127.0.0.1:7890",
             "max_height": 720,
             "force_download": True,
         }

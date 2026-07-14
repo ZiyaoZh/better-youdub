@@ -15,13 +15,19 @@ const STEPS = [
 
 const CONFIG_SECTIONS = [
   {
+    key: "network",
+    label: "网络",
+    fields: [
+      ["proxy", "任务网络代理", "text"],
+    ],
+  },
+  {
     key: "download",
     label: "下载",
     fields: [
       ["use_cookies", "使用 cookies", "boolean"],
       ["cookies_path", "Cookies 文件路径", "text"],
       ["cookies_content", "Cookies 内容（可选，仅保存时写入文件）", "textarea", {transient: true}],
-      ["proxy", "yt-dlp 代理", "text"],
       ["max_height", "最大下载高度", "integer", {min: 0}],
       ["force_download", "重新下载", "boolean"],
     ],
@@ -50,7 +56,6 @@ const CONFIG_SECTIONS = [
       ["api_key", "OpenAI API Key", "secret"],
       ["base_url", "OpenAI Base URL", "text"],
       ["model", "模型", "text"],
-      ["proxy", "翻译代理", "text"],
       ["target_language", "目标语言", "text"],
       ["batch_size", "批大小", "integer", {min: 1}],
       ["timeout_seconds", "超时秒数", "number", {min: 1}],

@@ -157,6 +157,11 @@ YOUDUB_YTDLP_PROXY=
 YOUDUB_DOWNLOAD_MAX_HEIGHT=0
 YOUDUB_MODELS_DIR=/models
 YOUDUB_LOG_DIR=/data/logs
+YOUDUB_NETWORK_PROXY=
+YOUDUB_NETWORK_SSH_HOST=
+YOUDUB_NETWORK_SSH_LOCAL_PORT=1081
+PYANNOTE_CACHE=/cache/huggingface/pyannote
+HF_HUB_DISABLE_XET=1
 NLTK_DATA=/cache/nltk
 YOUDUB_WEB_USERNAME=
 YOUDUB_WEB_PASSWORD=
@@ -296,8 +301,10 @@ BILI_PROXY=
 - TTS 后识别入口：`run-task --step transcribe-tts` 已接入；对 `audio_tts.wav`
   运行 whisper + align，默认 `YOUDUB_TTS_ASR_LANGUAGE=zh` 和
   `YOUDUB_TTS_ASR_INITIAL_PROMPT=以下是普通话的句子。`，用于让 Whisper 输出简体中文。
-- WhisperX 入口会确保 `HOME`、`HF_HOME`、`TORCH_HOME`、`MPLCONFIGDIR`、
-  `XDG_CACHE_HOME` 和 `NLTK_DATA` 指向可写目录。GPU/dev Compose 默认使用
+- WhisperX 入口会确保 `HOME`、`HF_HOME`、`PYANNOTE_CACHE`、`TORCH_HOME`、
+  `MPLCONFIGDIR`、`XDG_CACHE_HOME` 和 `NLTK_DATA` 指向可写目录。GPU Compose 默认将
+  `PYANNOTE_CACHE=/cache/huggingface/pyannote` 放在持久卷，并关闭 Xet 以便模型下载
+  使用任务级 SOCKS 代理。GPU/dev Compose 默认使用
   `NLTK_DATA=/cache/nltk`，避免 NLTK 尝试写入不可写的 `/nltk_data`；裸跑 WebUI
   或缺少 home 的非 root 用户会兜底到 `/tmp/youdub-cache`，避免依赖链写入
   `/.cache`。
@@ -337,8 +344,9 @@ BILI_PROXY=
   `BILI_BILI_JCT`，通过项目内置的 Bilibili Web 上传实现提交单 P `video.mp4`、
   封面、标题、简介和标签。上传入口不再依赖 `bilibili-api-python`，只使用通用
   HTTP 运行依赖 `aiohttp==3.13.2` 和 SOCKS 代理连接器
-  `aiohttp-socks==0.11.0`。若翻译阶段 SSH 动态转发已启动，Bilibili 上传会在未设置
-  `BILI_PROXY` 时复用 `YOUDUB_TRANSLATION_PROXY`。成功后写入 `bilibili.json`。Web UI
+  `aiohttp-socks==0.11.0`。若网络 SSH 动态转发已启动，Bilibili 上传会在未设置
+  `BILI_PROXY` 时复用任务级 `network.proxy`（旧环境仍兼容
+  `YOUDUB_TRANSLATION_PROXY`）。成功后写入 `bilibili.json`。Web UI
   默认仍安全 dry-run；任务级 Bilibili 参数中关闭 `dry_run` 并开启 `confirm` 后会走
   同一真实上传逻辑。Web `run-all` 默认只到发布包，只有任务配置
   `workflow.include_bilibili_upload=true` 时才追加 Bilibili；未确认真实上传时自动 dry-run。

@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_url_task.add_argument(
         "--proxy",
         default=argparse.SUPPRESS,
-        help="Optional yt-dlp proxy URL; defaults to YOUDUB_YTDLP_PROXY",
+        help="Optional task network proxy URL; yt-dlp falls back to YOUDUB_YTDLP_PROXY",
     )
     create_url_task.add_argument(
         "--max-height",
@@ -502,6 +502,7 @@ def cmd_run_task(config: AppConfig, args: argparse.Namespace) -> int:
 def _create_url_task_cli_overrides(config: AppConfig, args: argparse.Namespace) -> dict[str, object]:
     effective = default_task_config(config)
     download = effective["download"]
+    network = effective["network"]
     if hasattr(args, "cookies"):
         download["use_cookies"] = True
         download["cookies_path"] = str(args.cookies)
@@ -509,7 +510,7 @@ def _create_url_task_cli_overrides(config: AppConfig, args: argparse.Namespace) 
         download["use_cookies"] = False
         download["cookies_path"] = ""
     if hasattr(args, "proxy"):
-        download["proxy"] = args.proxy
+        network["proxy"] = args.proxy
     if hasattr(args, "max_height"):
         download["max_height"] = args.max_height
     if hasattr(args, "force_download"):

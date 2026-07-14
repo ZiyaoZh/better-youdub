@@ -113,10 +113,12 @@ cp config.example.json data/config/youdub.json
     "base_url": "https://api.example.com/v1",
     "model": "gpt-..."
   },
-  "translation": {
+  "network": {
     "ssh_host": "",
     "ssh_local_port": 1081,
-    "proxy": "",
+    "proxy": ""
+  },
+  "translation": {
     "extra_prompt": "",
     "summary_extra_prompt": "",
     "context_extra_prompt": "",
@@ -126,9 +128,17 @@ cp config.example.json data/config/youdub.json
 }
 ```
 
-`data/` 已被 Git 忽略。不要把真实 token、API key、cookies 或平台凭证提交到仓库。
+`data/` 只跟踪目录说明和占位符，实际运行内容仍被 Git 忽略。不要把真实 token、API
+key、cookies、任务状态、媒体、模型缓存或平台凭证提交到仓库。
 
 如需说话人分离，还需要使用同一个 Hugging Face 账号接受 WhisperX 当前依赖的 pyannote 模型协议。具体模型要求以 [WhisperX 文档](https://github.com/m-bain/whisperX) 为准。不需要说话人分离时，可以在任务参数中关闭 diarization。
+
+`network.proxy` 是任务级通用代理，下载、翻译、Hugging Face 模型和 Bilibili 上传都会
+复用它。配置 `network.ssh_host` 后，容器启动时会建立 SSH 动态转发，并将本地 SOCKS
+地址作为新任务的默认代理。旧配置中的 `translation.proxy` 和
+`translation.ssh_*` 仍可兼容读取。pyannote 模型固定缓存到
+`/cache/huggingface/pyannote` 挂载目录，容器重建不会重新下载；默认关闭 Hugging Face
+Xet 客户端，以确保 SOCKS 代理能覆盖模型权重下载。
 
 ### 3. 启动 GPU 服务
 
@@ -349,14 +359,14 @@ YOUDUB_ROOT/<author>/<upload_date> <title>/
 | Web | `YOUDUB_WEB_USERNAME`、`YOUDUB_WEB_PASSWORD`、`YOUDUB_WEB_PORT` | 登录和宿主机端口 |
 | WhisperX | `YOUDUB_WHISPER_MODEL`、`YOUDUB_WHISPER_DEVICE`、`YOUDUB_WHISPER_DIARIZATION` | 识别模型、设备和说话人分离 |
 | 翻译 | `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` | OpenAI 兼容接口 |
-| 翻译网络 | `YOUDUB_TRANSLATION_PROXY`、`YOUDUB_TRANSLATION_SSH_HOST` | HTTP/SOCKS 代理或 SSH 动态转发 |
+| 任务网络 | `YOUDUB_NETWORK_PROXY`、`YOUDUB_NETWORK_SSH_HOST` | 任务级 HTTP/SOCKS 代理或 SSH 动态转发 |
 | TTS | `YOUDUB_TTS_MODEL`、`YOUDUB_TTS_MODEL_DIR`、`YOUDUB_TTS_CACHE_MODEL` | VoxCPM2 模型、离线路径和缓存策略 |
 | 合成 | `YOUDUB_BURN_SUBTITLES`、`YOUDUB_SYNTHESIS_CRF` | 字幕烧录和编码质量 |
 | 发布 | `BILI_SESSDATA`、`BILI_BILI_JCT`、`BILI_PROXY` | Bilibili 凭证和代理 |
 
 `YOUDUB_DOWNLOAD_MAX_HEIGHT=0` 表示不限制下载高度。首次调试建议先限制为 `720` 或使用短视频，以减少下载、模型运行和合成时间。
 
-Docker 启动时，如果配置了 `translation.ssh_host` 或 `YOUDUB_TRANSLATION_SSH_HOST`，入口脚本会建立 SSH 动态转发，并将翻译代理指向本地 SOCKS 端口。Compose 默认把 `${HOME}/.ssh` 以只读方式挂载到容器；非默认 SSH 目录可通过 `YOUDUB_SSH_DIR` 指定。
+Docker 启动时，如果配置了 `network.ssh_host` 或 `YOUDUB_NETWORK_SSH_HOST`，入口脚本会建立 SSH 动态转发，并将任务网络代理指向本地 SOCKS 端口。Compose 默认把 `${HOME}/.ssh` 以只读方式挂载到容器；非默认 SSH 目录可通过 `YOUDUB_SSH_DIR` 指定。旧的 `translation.ssh_host` 和 `YOUDUB_TRANSLATION_SSH_HOST` 仍可兼容读取。
 
 ## 任务执行模型
 

@@ -2,6 +2,7 @@
 # Keep this file minimal; add packages only when code imports them.
 openai>=1.30.0
 socksio>=1.0.0
+PySocks>=1.7.1
 audiostretchy
 opencc-python-reimplemented>=0.1.7
 aiohttp==3.13.2

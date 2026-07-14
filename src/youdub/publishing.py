@@ -82,6 +82,7 @@ class BilibiliPublishConfig:
             proxy=_clean_text(
                 os.getenv("BILI_PROXY")
                 or os.getenv("YOUDUB_BILIBILI_PROXY")
+                or os.getenv("YOUDUB_NETWORK_PROXY")
                 or os.getenv("YOUDUB_TRANSLATION_PROXY")
             ),
             dry_run=_bool_env("YOUDUB_PUBLISH_DRY_RUN", False),
@@ -603,6 +604,7 @@ def _bilibili_proxy(config: BilibiliPublishConfig) -> str | None:
         config.proxy
         or os.getenv("BILI_PROXY")
         or os.getenv("YOUDUB_BILIBILI_PROXY")
+        or os.getenv("YOUDUB_NETWORK_PROXY")
         or os.getenv("YOUDUB_TRANSLATION_PROXY")
     )
 

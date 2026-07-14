@@ -4,11 +4,13 @@ import json
 import os
 import inspect
 import unicodedata
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .gpu import cleanup_gpu_memory
+from .hf_runtime import huggingface_download_context, prepare_huggingface_environment
 
 
 WHISPER_OUTPUT = "transcript.whisper.json"
@@ -17,6 +19,7 @@ DIARIZE_OUTPUT = "transcript.diarized.json"
 FINAL_OUTPUT = "transcript.json"
 _TORCH_LOAD_PATCHED = False
 _HUGGINGFACE_HUB_PATCHED = False
+_DIARIZATION_LOCK = threading.Lock()
 RUNTIME_CACHE_DIR = Path("/tmp/youdub-cache")
 
 
@@ -34,6 +37,7 @@ class WhisperXConfig:
     initial_prompt: str | None = None
     tts_asr_language: str | None = None
     tts_asr_initial_prompt: str | None = None
+    proxy: str | None = None
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -85,13 +89,15 @@ def _clean_optional_text(value: str | None) -> str | None:
 
 def prepare_whisperx_runtime(config: WhisperXConfig) -> None:
     _ensure_runtime_dir_env("HOME", RUNTIME_CACHE_DIR / "home", replace_unwritable_defaults={Path("/")})
-    _ensure_runtime_dir_env("HF_HOME", RUNTIME_CACHE_DIR / "huggingface")
+    hf_home = _ensure_runtime_dir_env("HF_HOME", RUNTIME_CACHE_DIR / "huggingface")
+    _ensure_runtime_dir_env("PYANNOTE_CACHE", hf_home / "pyannote")
     _ensure_runtime_dir_env("TORCH_HOME", RUNTIME_CACHE_DIR / "torch")
     _ensure_runtime_dir_env("MPLCONFIGDIR", RUNTIME_CACHE_DIR / "matplotlib")
     _ensure_runtime_dir_env("XDG_CACHE_HOME", RUNTIME_CACHE_DIR / "xdg")
     _ensure_runtime_dir_env("NLTK_DATA", RUNTIME_CACHE_DIR / "nltk_data", replace_unwritable_defaults={Path("/nltk_data")})
     os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
     os.environ.pop("TORCH_FORCE_WEIGHTS_ONLY_LOAD", None)
+    prepare_huggingface_environment()
 
     if config.hf_token:
         _set_env_if_empty("HF_TOKEN", config.hf_token)
@@ -347,15 +353,16 @@ def run_whisper(
     model = None
     result = None
     try:
-        model = whisperx.load_model(
-            model_name,
-            **_whisperx_load_model_kwargs(
-                whisperx.load_model,
-                download_root=str(download_root),
-                device=device,
-                config=config,
-            ),
-        )
+        with huggingface_download_context(config.proxy):
+            model = whisperx.load_model(
+                model_name,
+                **_whisperx_load_model_kwargs(
+                    whisperx.load_model,
+                    download_root=str(download_root),
+                    device=device,
+                    config=config,
+                ),
+            )
         result = _transcribe_with_options(model, audio_path, config)
         if result.get("language") == "nn":
             raise RuntimeError(f"No language detected in {audio_path}")
@@ -391,10 +398,11 @@ def run_align(
     metadata = None
     aligned = None
     try:
-        align_model, metadata = whisperx.load_align_model(
-            language_code=language,
-            device=device,
-        )
+        with huggingface_download_context(config.proxy):
+            align_model, metadata = whisperx.load_align_model(
+                language_code=language,
+                device=device,
+            )
         aligned = whisperx.align(
             result["segments"],
             align_model,
@@ -433,12 +441,14 @@ def run_diarize(task_dir: Path, config: WhisperXConfig) -> Path:
                     "Hugging Face token is required for WhisperX diarization"
                 )
 
-            pipeline = DiarizationPipeline(use_auth_token=token, device=device)
-            diarize_segments = pipeline(
-                str(audio_path),
-                min_speakers=config.min_speakers,
-                max_speakers=config.max_speakers,
-            )
+            with _DIARIZATION_LOCK:
+                with huggingface_download_context(config.proxy):
+                    pipeline = DiarizationPipeline(use_auth_token=token, device=device)
+                diarize_segments = pipeline(
+                    str(audio_path),
+                    min_speakers=config.min_speakers,
+                    max_speakers=config.max_speakers,
+                )
             result = whisperx.assign_word_speakers(diarize_segments, result)
 
         return _write_json(task_dir / DIARIZE_OUTPUT, result)
@@ -498,6 +508,7 @@ def _tts_asr_config(config: WhisperXConfig) -> WhisperXConfig:
         or _clean_optional_text(
             os.getenv("YOUDUB_TTS_ASR_INITIAL_PROMPT", "以下是普通话的句子。")
         ),
+        proxy=config.proxy,
     )
 
 

@@ -78,6 +78,8 @@ from youdub.transcription import WhisperXConfig, prepare_whisperx_runtime
 prepare_whisperx_runtime(WhisperXConfig(models_dir="/models"))
 assert os.environ["NLTK_DATA"] != "/nltk_data", os.environ["NLTK_DATA"]
 assert os.access(os.environ["NLTK_DATA"].split(os.pathsep, 1)[0], os.W_OK), os.environ["NLTK_DATA"]
+assert os.access(os.environ["PYANNOTE_CACHE"], os.W_OK), os.environ["PYANNOTE_CACHE"]
+assert os.environ["HF_HUB_DISABLE_XET"] == "1", os.environ["HF_HUB_DISABLE_XET"]
 
 import whisperx
 from whisperx.diarize import DiarizationPipeline
@@ -91,6 +93,7 @@ print(f"soundfile={soundfile.__version__}")
 print(f"voxcpm={voxcpm.__file__}")
 print(f"whisperx={whisperx.__file__}")
 print(f"diarization_pipeline={DiarizationPipeline.__name__}")
+print(f"pyannote_cache={os.environ['PYANNOTE_CACHE']}")
 PY
 if command -v deno >/dev/null; then
   echo "[check-gpu] deno=$(deno --version | head -n 1)"

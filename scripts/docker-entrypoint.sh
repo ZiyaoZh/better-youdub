@@ -56,36 +56,40 @@ ensure_writable_mounts() {
   done
 }
 
-translation_config_value() {
-  local key="$1"
-  python3 - "${YOUDUB_CONFIG_PATH:-/data/config/youdub.json}" "$key" <<'PY'
+runtime_config_value() {
+  local section="$1"
+  local key="$2"
+  python3 - "${YOUDUB_CONFIG_PATH:-/data/config/youdub.json}" "$section" "$key" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
-key = sys.argv[2]
+section_name = sys.argv[2]
+key = sys.argv[3]
 try:
     data = json.loads(path.read_text(encoding="utf-8"))
 except Exception:
     data = {}
-translation = data.get("translation") if isinstance(data, dict) else {}
-value = translation.get(key) if isinstance(translation, dict) else None
+section = data.get(section_name) if isinstance(data, dict) else {}
+value = section.get(key) if isinstance(section, dict) else None
 if value is not None:
     print(str(value).strip())
 PY
 }
 
-start_translation_ssh_tunnel() {
-  local ssh_host="${YOUDUB_TRANSLATION_SSH_HOST:-}"
-  local local_port="${YOUDUB_TRANSLATION_SSH_LOCAL_PORT:-}"
+start_network_ssh_tunnel() {
+  local ssh_host="${YOUDUB_NETWORK_SSH_HOST:-${YOUDUB_TRANSLATION_SSH_HOST:-}}"
+  local local_port="${YOUDUB_NETWORK_SSH_LOCAL_PORT:-${YOUDUB_TRANSLATION_SSH_LOCAL_PORT:-}}"
   local config_path="${YOUDUB_CONFIG_PATH:-/data/config/youdub.json}"
 
   if [[ -z "$ssh_host" && -f "$config_path" ]]; then
-    ssh_host="$(translation_config_value ssh_host)"
+    ssh_host="$(runtime_config_value network ssh_host)"
+    ssh_host="${ssh_host:-$(runtime_config_value translation ssh_host)}"
   fi
   if [[ -z "$local_port" && -f "$config_path" ]]; then
-    local_port="$(translation_config_value ssh_local_port)"
+    local_port="$(runtime_config_value network ssh_local_port)"
+    local_port="${local_port:-$(runtime_config_value translation ssh_local_port)}"
   fi
   local_port="${local_port:-1081}"
 
@@ -93,7 +97,7 @@ start_translation_ssh_tunnel() {
     return
   fi
 
-  export YOUDUB_TRANSLATION_PROXY="${YOUDUB_TRANSLATION_PROXY:-socks5h://127.0.0.1:${local_port}}"
+  export YOUDUB_NETWORK_PROXY="${YOUDUB_NETWORK_PROXY:-${YOUDUB_TRANSLATION_PROXY:-socks5h://127.0.0.1:${local_port}}}"
 
   local -a ssh_command=(
     ssh
@@ -107,14 +111,15 @@ start_translation_ssh_tunnel() {
     -o BatchMode=yes
   )
 
-  if [[ -n "${YOUDUB_TRANSLATION_SSH_OPTIONS:-}" ]]; then
+  local ssh_options="${YOUDUB_NETWORK_SSH_OPTIONS:-${YOUDUB_TRANSLATION_SSH_OPTIONS:-}}"
+  if [[ -n "$ssh_options" ]]; then
     # shellcheck disable=SC2206
-    local extra_options=(${YOUDUB_TRANSLATION_SSH_OPTIONS})
+    local extra_options=(${ssh_options})
     ssh_command+=("${extra_options[@]}")
   fi
   ssh_command+=("$ssh_host")
 
-  echo "Starting translation SSH tunnel: ${ssh_host} -> 127.0.0.1:${local_port}" >&2
+  echo "Starting network SSH tunnel: ${ssh_host} -> 127.0.0.1:${local_port}" >&2
   if [[ "$(id -u)" == "0" ]]; then
     gosu "$APP_USER" "${ssh_command[@]}"
   else
@@ -125,9 +130,9 @@ start_translation_ssh_tunnel() {
 if [[ "$(id -u)" == "0" ]]; then
   ensure_app_user
   ensure_writable_mounts
-  start_translation_ssh_tunnel
+  start_network_ssh_tunnel
   exec gosu "$APP_USER" "$@"
 fi
 
-start_translation_ssh_tunnel
+start_network_ssh_tunnel
 exec "$@"

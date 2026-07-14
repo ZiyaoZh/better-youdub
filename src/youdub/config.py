@@ -61,8 +61,12 @@ class HuggingFaceConfig:
 
 
 @dataclass(frozen=True)
-class TranslationPromptConfig:
+class NetworkConfig:
     proxy: str | None = None
+
+
+@dataclass(frozen=True)
+class TranslationPromptConfig:
     extra_prompt: str | None = None
     summary_extra_prompt: str | None = None
     context_extra_prompt: str | None = None
@@ -110,6 +114,7 @@ class AppConfig:
     cookies_path: Path | None
     ytdlp_proxy: str | None
     download_max_height: int
+    network: NetworkConfig
     translation_prompts: TranslationPromptConfig
     secrets: SecretsConfig
 
@@ -119,6 +124,7 @@ class AppConfig:
         config_path = Path(os.getenv("YOUDUB_CONFIG_PATH", "/data/config/youdub.json"))
         data = _load_json_object(config_path)
         ytdlp = _section(data, "ytdlp")
+        network = _section(data, "network")
         translation = _section(data, "translation")
         cookies_value = _clean(os.getenv("YOUDUB_COOKIES_PATH"))
         return cls(
@@ -133,9 +139,14 @@ class AppConfig:
                 _clean(os.getenv("YOUDUB_DOWNLOAD_MAX_HEIGHT")) or ytdlp.get("max_height"),
                 0,
             ),
-            translation_prompts=TranslationPromptConfig(
-                proxy=_clean(os.getenv("YOUDUB_TRANSLATION_PROXY"))
+            network=NetworkConfig(
+                proxy=_clean(os.getenv("YOUDUB_NETWORK_PROXY"))
+                or _clean(network.get("proxy"))
+                # Backward compatibility for deployments that predate network.proxy.
+                or _clean(os.getenv("YOUDUB_TRANSLATION_PROXY"))
                 or _clean(translation.get("proxy")),
+            ),
+            translation_prompts=TranslationPromptConfig(
                 extra_prompt=_clean(os.getenv("YOUDUB_TRANSLATION_EXTRA_PROMPT"))
                 or _clean(translation.get("extra_prompt")),
                 summary_extra_prompt=_clean(os.getenv("YOUDUB_TRANSLATION_SUMMARY_EXTRA_PROMPT"))

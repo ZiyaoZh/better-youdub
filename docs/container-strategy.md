@@ -133,6 +133,8 @@ HTTP Basic Auth。只设置其中一个会拒绝所有请求。
 - `/data/logs`：日志
 - `/models`：TTS/Whisper/Demucs 模型文件
 - `/cache/huggingface`：HuggingFace 缓存
+- `/cache/huggingface/pyannote`：pyannote pipeline 和权重缓存；通过
+  `PYANNOTE_CACHE` 固定到持久卷，不能使用容器内临时 HOME
 - `/cache/nltk`：NLTK 数据缓存，供 WhisperX/pyannote 依赖链使用，避免写入不可写的 `/nltk_data`
 - `/cache/torch`：Torch 缓存
 
@@ -151,6 +153,9 @@ YOUDUB_COOKIES_PATH=/data/cookies/cookies.txt
 YOUDUB_YTDLP_PROXY=
 YOUDUB_DOWNLOAD_MAX_HEIGHT=0
 YOUDUB_MODELS_DIR=/models
+YOUDUB_NETWORK_PROXY=
+YOUDUB_NETWORK_SSH_HOST=
+YOUDUB_NETWORK_SSH_LOCAL_PORT=1081
 YOUDUB_WEB_USERNAME=
 YOUDUB_WEB_PASSWORD=
 YOUDUB_TRANSLATION_EXTRA_PROMPT=
@@ -166,6 +171,8 @@ YOUDUB_TTS_START_PAD_MS=80
 YOUDUB_TTS_END_PAD_MS=160
 YOUDUB_TTS_CACHE_MODEL=0
 HF_HOME=/cache/huggingface
+PYANNOTE_CACHE=/cache/huggingface/pyannote
+HF_HUB_DISABLE_XET=1
 NLTK_DATA=/cache/nltk
 TORCH_HOME=/cache/torch
 ```
