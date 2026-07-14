@@ -68,7 +68,10 @@ RUN install -d -m 0755 /etc/apt/keyrings \
   && apt-get install -y --no-install-recommends claude-code \
   && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @openai/codex
+ARG CODEX_VERSION=latest
+ARG CODEX_CACHE_BUST=0
+RUN echo "Installing Codex ${CODEX_VERSION} (cache bust: ${CODEX_CACHE_BUST})" \
+  && npm install -g "@openai/codex@${CODEX_VERSION}"
 
 RUN pip3 install --no-cache-dir beautifulsoup4 ruff pytest requests
 

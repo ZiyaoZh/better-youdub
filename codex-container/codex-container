@@ -8,6 +8,7 @@ Usage:
 
 Options:
   --agent codex|claude   Start the selected coding agent. Defaults to codex.
+  --update               Rebuild the image and install the latest Codex CLI.
   --repo PATH            Mount PATH as the workspace. Defaults to the current directory.
   --image IMAGE          Docker image to run. Defaults to codex-universal:latest.
   --name NAME            Container name. Defaults to codex-<repo-name>.
@@ -19,6 +20,7 @@ Options:
 
 Examples:
   codex-container
+  codex-container --update
   codex-container --agent claude
   codex-container bash
   codex-container --repo /path/to/repo --agent claude
@@ -34,6 +36,7 @@ MOUNT_DOCKER="${CODEX_MOUNT_DOCKER:-0}"
 MOUNT_SSH=1
 MOUNT_GITCONFIG=1
 CONTAINER_HOME="${CODEX_CONTAINER_HOME:-}"
+UPDATE_IMAGE=0
 
 command_args=()
 
@@ -43,6 +46,10 @@ while [[ "$#" -gt 0 ]]; do
       [[ "$#" -ge 2 ]] || { echo "Missing value for --agent" >&2; exit 2; }
       AGENT="$2"
       shift 2
+      ;;
+    --update)
+      UPDATE_IMAGE=1
+      shift
       ;;
     --repo)
       [[ "$#" -ge 2 ]] || { echo "Missing value for --repo" >&2; exit 2; }
@@ -91,6 +98,23 @@ while [[ "$#" -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$UPDATE_IMAGE" == "1" ]]; then
+  if [[ "${#command_args[@]}" -gt 0 ]]; then
+    echo "--update cannot be combined with a container command." >&2
+    exit 2
+  fi
+
+  SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+  BUILD_CONTEXT="$(dirname "$SCRIPT_PATH")"
+
+  echo "Updating Codex CLI in image: $IMAGE"
+  exec docker build \
+    --build-arg "CODEX_CACHE_BUST=$(date +%s)" \
+    --build-arg "CODEX_VERSION=latest" \
+    -t "$IMAGE" \
+    "$BUILD_CONTEXT"
+fi
 
 case "$AGENT" in
   codex|claude) ;;

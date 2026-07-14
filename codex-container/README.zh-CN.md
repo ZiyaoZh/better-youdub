@@ -27,6 +27,22 @@ docker build -t codex-universal:latest .
 docker build -t codex-universal:latest /path/to/codex-container
 ```
 
+## 一键更新 Codex
+
+使用一条命令更新镜像内的 Codex CLI：
+
+```bash
+codex-container --update
+```
+
+启动脚本会重新构建 `codex-universal:latest`，复用已有的系统依赖缓存，并强制安装最新版本的 `@openai/codex`。之后通过 `codex-container` 启动的容器会直接使用更新后的镜像。
+
+如果使用的是其他镜像名，可以执行：
+
+```bash
+codex-container --image my-codex:dev --update
+```
+
 ## 启动 Codex
 
 进入任意仓库：

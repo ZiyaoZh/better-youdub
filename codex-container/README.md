@@ -27,6 +27,22 @@ From any directory:
 docker build -t codex-universal:latest /path/to/codex-container
 ```
 
+## Update Codex
+
+Update the Codex CLI in the image with one command:
+
+```bash
+codex-container --update
+```
+
+The launcher rebuilds `codex-universal:latest`, reuses the cached system dependency layers, and forces the latest `@openai/codex` package to be installed. The next container started with `codex-container` uses the updated image.
+
+To update a differently named image:
+
+```bash
+codex-container --image my-codex:dev --update
+```
+
 ## Run Codex
 
 In any repository:
