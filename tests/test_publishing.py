@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import types
 from pathlib import Path
 
 import pytest
@@ -102,7 +101,11 @@ def test_publish_to_bilibili_writes_real_upload_result(tmp_path: Path, monkeypat
 
     captured = {}
 
-    async def fake_upload(task_dir: Path, package: dict[str, object], config: BilibiliPublishConfig) -> dict[str, object]:
+    async def fake_upload(
+        task_dir: Path,
+        package: dict[str, object],
+        config: BilibiliPublishConfig,
+    ) -> dict[str, object]:
         captured["task_dir"] = task_dir
         captured["package"] = package
         captured["config"] = config
@@ -140,71 +143,209 @@ def test_bilibili_headers_disable_brotli_without_dropping_other_headers() -> Non
     assert "accept-encoding" not in patched
 
 
-def test_bilibili_request_args_disable_brotli_for_keyword_headers() -> None:
-    args, kwargs = publishing._bilibili_request_args_without_brotli(
-        (),
-        {"headers": {"Accept-Encoding": "gzip, deflate, br", "User-Agent": "ua"}},
+def test_bilibili_config_reads_proxy_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("BILI_PROXY", " http://127.0.0.1:7890 ")
+    monkeypatch.setenv("YOUDUB_BILIBILI_PROXY", "http://127.0.0.1:18080")
+    monkeypatch.setenv("YOUDUB_TRANSLATION_PROXY", "socks5h://127.0.0.1:1081")
+
+    config = BilibiliPublishConfig.from_env()
+
+    assert config.proxy == "http://127.0.0.1:7890"
+
+    monkeypatch.delenv("BILI_PROXY")
+
+    config = BilibiliPublishConfig.from_env()
+
+    assert config.proxy == "http://127.0.0.1:18080"
+
+    monkeypatch.delenv("YOUDUB_BILIBILI_PROXY")
+
+    config = BilibiliPublishConfig.from_env()
+
+    assert config.proxy == "socks5h://127.0.0.1:1081"
+
+
+def test_bilibili_proxy_falls_back_to_translation_proxy(monkeypatch) -> None:
+    monkeypatch.delenv("BILI_PROXY", raising=False)
+    monkeypatch.delenv("YOUDUB_BILIBILI_PROXY", raising=False)
+    monkeypatch.setenv("YOUDUB_TRANSLATION_PROXY", "socks5h://127.0.0.1:1081")
+
+    assert publishing._bilibili_proxy(BilibiliPublishConfig()) == "socks5h://127.0.0.1:1081"
+
+
+def test_bilibili_proxy_connector_spec_normalizes_socks5h() -> None:
+    assert publishing._bilibili_proxy_connector_spec("socks5h://127.0.0.1:1081") == (
+        "socks5://127.0.0.1:1081",
+        True,
+    )
+    assert publishing._bilibili_proxy_connector_spec("socks5://127.0.0.1:1081") == (
+        "socks5://127.0.0.1:1081",
+        False,
+    )
+    assert publishing._bilibili_proxy_connector_spec("http://127.0.0.1:7890") is None
+
+
+def test_bilibili_request_json_uses_configured_proxy() -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self) -> "FakeResponse":
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            return None
+
+        async def text(self) -> str:
+            return '{"code": 0}'
+
+    class FakeSession:
+        def request(self, method: str, url: str, **kwargs: object) -> FakeResponse:
+            captured["method"] = method
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return FakeResponse()
+
+    uploader = publishing._BilibiliWebUploader(
+        BilibiliPublishConfig(proxy=" http://127.0.0.1:7890 "),
     )
 
-    assert args == ()
-    assert kwargs["headers"]["Accept-Encoding"] == "gzip, deflate"
-    assert kwargs["headers"]["User-Agent"] == "ua"
+    payload = asyncio.run(uploader._request_json(FakeSession(), "GET", "https://example.test/api"))
+
+    assert payload == {"code": 0}
+    assert captured["method"] == "GET"
+    assert captured["url"] == "https://example.test/api"
+    assert captured["kwargs"]["proxy"] == "http://127.0.0.1:7890"
 
 
-def test_bilibili_request_args_disable_brotli_for_positional_headers() -> None:
-    args, kwargs = publishing._bilibili_request_args_without_brotli(
-        ("GET", "https://api.bilibili.com", {}, {}, {}, {"Accept-Encoding": "br"}),
-        {},
+def test_bilibili_request_json_does_not_pass_proxy_when_connector_is_used() -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self) -> "FakeResponse":
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            return None
+
+        async def text(self) -> str:
+            return '{"code": 0}'
+
+    class FakeSession:
+        def request(self, method: str, url: str, **kwargs: object) -> FakeResponse:
+            captured["kwargs"] = kwargs
+            return FakeResponse()
+
+    uploader = publishing._BilibiliWebUploader(
+        BilibiliPublishConfig(proxy="socks5h://127.0.0.1:1081"),
+    )
+    uploader._proxy_uses_connector = True
+
+    payload = asyncio.run(uploader._request_json(FakeSession(), "GET", "https://example.test/api"))
+
+    assert payload == {"code": 0}
+    assert "proxy" not in captured["kwargs"]
+
+
+def test_bilibili_request_json_reports_proxy_hint_on_timeout() -> None:
+    class TimeoutSession:
+        def request(self, method: str, url: str, **kwargs: object) -> object:
+            raise TimeoutError()
+
+    uploader = publishing._BilibiliWebUploader(BilibiliPublishConfig())
+
+    with pytest.raises(RuntimeError, match="set BILI_PROXY or HTTPS_PROXY"):
+        asyncio.run(uploader._request_json(TimeoutSession(), "POST", "https://member.bilibili.com/test"))
+
+
+def test_bilibili_probe_query_prefers_upos_line() -> None:
+    query = publishing._bilibili_probe_query(
+        {
+            "OK": 1,
+            "lines": [
+                {"os": "kodo", "query": "upcdn=qn"},
+                {"os": "upos", "query": "zone=cs&upcdn=bldsa&probe_version=20221109"},
+            ],
+        }
     )
 
-    assert kwargs == {}
-    assert args[5]["Accept-Encoding"] == "gzip, deflate"
+    assert query == "zone=cs&upcdn=bldsa&probe_version=20221109"
 
 
-def test_upload_bilibili_uses_video_uploader_api(tmp_path: Path, monkeypatch) -> None:
+def test_bilibili_upload_url_uses_preupload_endpoint_and_upos_uri() -> None:
+    url = publishing._bilibili_upload_url(
+        publishing._BilibiliPreupload(
+            auth="auth",
+            biz_id=123,
+            chunk_size=1024,
+            endpoint="//upos-cs-upcdnbldsa.bilivideo.com",
+            upos_uri="upos://bucket/video.mp4",
+        )
+    )
+
+    assert url == "https://upos-cs-upcdnbldsa.bilivideo.com/bucket/video.mp4"
+
+
+def test_upload_bilibili_uses_web_upload_api(tmp_path: Path, monkeypatch) -> None:
     _write_publish_inputs(tmp_path)
     monkeypatch.setattr(publishing, "_run_command", lambda command: Path(command[-1]).write_bytes(b"jpg"))
     package = json.loads(prepare_publish_package(tmp_path).read_text(encoding="utf-8"))
-    captured: dict[str, object] = {"events": []}
+    captured: dict[str, object] = {}
 
-    class FakeCredential:
-        def __init__(self, *, sessdata: str | None, bili_jct: str | None) -> None:
-            captured["credential"] = {"sessdata": sessdata, "bili_jct": bili_jct}
+    class FakeWebUploader:
+        def __init__(self, config: BilibiliPublishConfig) -> None:
+            captured["config"] = config
 
-    class FakePage:
-        def __init__(self, *, path: str, title: str, description: str) -> None:
-            captured["page"] = {"path": path, "title": title, "description": description}
+        async def __aenter__(self) -> "FakeWebUploader":
+            captured["entered"] = True
+            return self
 
-    class FakeMeta:
-        def __init__(self, **kwargs: object) -> None:
-            captured["meta"] = kwargs
+        async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            captured["exited"] = True
 
-    class FakeUploader:
-        def __init__(self, *, pages: list[FakePage], meta: FakeMeta, credential: FakeCredential) -> None:
-            captured["uploader"] = {"pages": pages, "meta": meta, "credential": credential}
+        async def upload_cover(self, image_path: Path) -> str:
+            captured["cover_path"] = image_path
+            return "https://i0.hdslb.com/cover.jpg"
 
-        def on(self, event: str):
-            def decorator(handler: object) -> object:
-                captured["events"].append(event)
-                return handler
+        async def upload_video_file(
+            self,
+            video_path: Path,
+        ) -> tuple[publishing._BilibiliUploadedVideo, dict[str, object]]:
+            captured["video_path"] = video_path
+            return (
+                publishing._BilibiliUploadedVideo(
+                    filename_no_suffix="uploaded-video",
+                    cid=789,
+                    upload_id="upload-id",
+                    upos_uri="upos://bucket/uploaded-video.mp4",
+                ),
+                {"chunks": 1, "upload_id": "upload-id"},
+            )
 
-            return decorator
+        async def add_archive(
+            self,
+            *,
+            package: dict[str, object],
+            config: BilibiliPublishConfig,
+            source: object,
+            uploaded: publishing._BilibiliUploadedVideo,
+            cover_url: str,
+        ) -> dict[str, object]:
+            captured["archive"] = {
+                "title": package["title"],
+                "tid": config.tid,
+                "source": source,
+                "filename": uploaded.filename_no_suffix,
+                "cid": uploaded.cid,
+                "cover_url": cover_url,
+                "watermark": config.watermark,
+            }
+            return {"code": 0, "data": {"bvid": "BV1real", "aid": 456}}
 
-        async def start(self) -> dict[str, object]:
-            return {"bvid": "BV1real", "aid": 456}
-
-    import bilibili_api
-
-    monkeypatch.setattr(bilibili_api, "Credential", FakeCredential)
-    monkeypatch.setattr(
-        bilibili_api,
-        "video_uploader",
-        types.SimpleNamespace(
-            VideoUploaderPage=FakePage,
-            VideoMeta=FakeMeta,
-            VideoUploader=FakeUploader,
-        ),
-    )
+    monkeypatch.setattr(publishing, "_BilibiliWebUploader", FakeWebUploader)
 
     result = asyncio.run(
         publishing._upload_bilibili(
@@ -214,14 +355,21 @@ def test_upload_bilibili_uses_video_uploader_api(tmp_path: Path, monkeypatch) ->
         )
     )
 
-    assert captured["credential"] == {"sessdata": "sess", "bili_jct": "jct"}
-    assert captured["page"]["path"].endswith("video.mp4")
-    assert captured["page"]["title"] == "译后标题 - 作者A"
-    assert captured["meta"]["tid"] == 171
-    assert captured["meta"]["title"] == "译后标题 - 作者A"
-    assert captured["meta"]["source"] == "https://example.test/watch?v=1"
-    assert captured["meta"]["watermark"] is False
-    assert captured["events"] == ["start", "progress", "completed"]
+    assert captured["entered"] is True
+    assert captured["exited"] is True
+    assert str(captured["video_path"]).endswith("video.mp4")
+    assert str(captured["cover_path"]).endswith("cover.jpg")
+    assert captured["archive"] == {
+        "title": "译后标题 - 作者A",
+        "tid": 171,
+        "source": "https://example.test/watch?v=1",
+        "filename": "uploaded-video",
+        "cid": 789,
+        "cover_url": "https://i0.hdslb.com/cover.jpg",
+        "watermark": False,
+    }
     assert result["status"] == "uploaded"
     assert result["platform"] == "bilibili"
     assert result["bvid"] == "BV1real"
+    assert result["aid"] == 456
+    assert result["video"]["chunks"] == 1

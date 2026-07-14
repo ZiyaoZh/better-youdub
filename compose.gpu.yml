@@ -8,6 +8,8 @@ services:
     image: youdub-linux:gpu
     working_dir: /app
     gpus: all
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       PYTHONPATH: /app/src
       YOUDUB_UID: ${YOUDUB_UID:-1064}
@@ -109,6 +111,14 @@ services:
       BILI_ORIGINAL: ${BILI_ORIGINAL:-0}
       BILI_SOURCE: ${BILI_SOURCE:-}
       BILI_WATERMARK: ${BILI_WATERMARK:-1}
+      BILI_PROXY: ${BILI_PROXY:-}
+      YOUDUB_BILIBILI_PROXY: ${YOUDUB_BILIBILI_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      no_proxy: ${no_proxy:-}
       BILI_SESSDATA: ${BILI_SESSDATA:-}
       BILI_BILI_JCT: ${BILI_BILI_JCT:-}
     volumes:

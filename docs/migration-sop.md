@@ -173,6 +173,7 @@ YOUDUB_TTS_END_PAD_MS=160
 YOUDUB_TTS_CACHE_MODEL=0
 BILI_SESSDATA=
 BILI_BILI_JCT=
+BILI_PROXY=
 ```
 
 `.env.example` 只放占位符，不放真实值。
@@ -333,10 +334,11 @@ BILI_BILI_JCT=
 - Bilibili 发布入口：`run-task --step publish-bilibili` 已接入；默认要求
   `--publish-dry-run` 或 `--publish-confirm`。dry-run 不触发真实上传，输出
   `bilibili.dry-run.json`；真实上传需要通过环境变量提供 `BILI_SESSDATA` 和
-  `BILI_BILI_JCT`，通过 Nemo2011/bilibili-api 对应的 pip 包
-  `bilibili-api-python==17.4.1` 提交单 P `video.mp4`、封面、标题、简介和标签。
-  上传依赖显式锁定 `aiohttp==3.13.2`，并在项目入口禁用 `br` 响应压缩，避免新版
-  `aiohttp` 与 `Brotli` 解压接口不兼容。成功后写入 `bilibili.json`。Web UI
+  `BILI_BILI_JCT`，通过项目内置的 Bilibili Web 上传实现提交单 P `video.mp4`、
+  封面、标题、简介和标签。上传入口不再依赖 `bilibili-api-python`，只使用通用
+  HTTP 运行依赖 `aiohttp==3.13.2` 和 SOCKS 代理连接器
+  `aiohttp-socks==0.11.0`。若翻译阶段 SSH 动态转发已启动，Bilibili 上传会在未设置
+  `BILI_PROXY` 时复用 `YOUDUB_TRANSLATION_PROXY`。成功后写入 `bilibili.json`。Web UI
   默认仍安全 dry-run；任务级 Bilibili 参数中关闭 `dry_run` 并开启 `confirm` 后会走
   同一真实上传逻辑。Web `run-all` 默认只到发布包，只有任务配置
   `workflow.include_bilibili_upload=true` 时才追加 Bilibili；未确认真实上传时自动 dry-run。

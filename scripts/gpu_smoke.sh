@@ -143,6 +143,15 @@ docker compose -f "$COMPOSE_FILE" run "${RUN_FLAGS[@]}" \
   -e BILI_ORIGINAL="${BILI_ORIGINAL:-0}" \
   -e BILI_SOURCE="${BILI_SOURCE:-}" \
   -e BILI_WATERMARK="${BILI_WATERMARK:-1}" \
+  -e BILI_PROXY="${BILI_PROXY:-}" \
+  -e YOUDUB_BILIBILI_PROXY="${YOUDUB_BILIBILI_PROXY:-}" \
+  -e YOUDUB_TRANSLATION_PROXY="${YOUDUB_TRANSLATION_PROXY:-}" \
+  -e HTTP_PROXY="${HTTP_PROXY:-}" \
+  -e HTTPS_PROXY="${HTTPS_PROXY:-}" \
+  -e NO_PROXY="${NO_PROXY:-}" \
+  -e http_proxy="${http_proxy:-}" \
+  -e https_proxy="${https_proxy:-}" \
+  -e no_proxy="${no_proxy:-}" \
   -e BILI_SESSDATA="${BILI_SESSDATA:-}" \
   -e BILI_BILI_JCT="${BILI_BILI_JCT:-}" \
   -e HF_READ_TOKEN="${HF_READ_TOKEN:-}" \

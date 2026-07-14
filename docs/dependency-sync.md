@@ -120,13 +120,10 @@ WMI==1.5.1; platform_system == "Windows"
 
 - `yt-dlp`：基础运行依赖，用于 `create-url-task` 下载用户显式提供的单个视频 URL。
   GPU 依赖文件不再重复声明它。
-- `bilibili-api-python==17.4.1`：用于可选的 Bilibili 发布适配器；这里指
-  Nemo2011/bilibili-api 对应的 pip 包，不替换为其他相似 Bilibili SDK。真实上传仍需
+- `aiohttp==3.13.2`：用于项目内置的 Bilibili Web 上传适配器。真实上传仍需
   环境变量提供账号凭证，并要求显式确认。
-- `aiohttp==3.13.2`：Nemo2011 `bilibili-api-python` 的 AioHTTP 上传客户端需要
-  显式运行依赖。锁定到旧项目验证过的版本，并在项目上传入口禁用 `br` 响应压缩，
-  避免新版 `aiohttp` 与 `Brotli` 解压接口不兼容时报
-  `Can not decode content-encoding: br`。
+- `aiohttp-socks==0.11.0`：用于 Bilibili Web 上传复用翻译阶段 SSH 动态转发
+  `socks5h://...` 代理；不引入 Bilibili SDK。
 - `deno`：提供 yt-dlp EJS 可用的 JavaScript runtime。YouTube n challenge
   solving 需要支持的 JS runtime；镜像固定安装 Deno 2.5.6，并通过
   `remote_components=["ejs:github"]` 使用 yt-dlp EJS solver 分发。
@@ -180,7 +177,7 @@ python -c "import torch; print(torch.__version__); print(torch.cuda.is_available
 ffmpeg -version
 ffprobe -version
 python -c "import yt_dlp, openai, librosa, soundfile, audiostretchy"
-python -c "import bilibili_api, aiohttp; print(aiohttp.__version__)"
+python -c "import aiohttp, aiohttp_socks; print(aiohttp.__version__); print(aiohttp_socks.__file__)"
 python -c "import whisperx"
 python -c "import demucs"
 python -c "import os; path=os.environ.get('NLTK_DATA', '/cache/nltk').split(os.pathsep, 1)[0]; os.makedirs(path, exist_ok=True); assert os.access(path, os.W_OK), path"

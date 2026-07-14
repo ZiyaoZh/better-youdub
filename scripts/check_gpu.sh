@@ -71,7 +71,7 @@ import os
 import soundfile
 import yt_dlp
 import aiohttp
-import bilibili_api
+import aiohttp_socks
 import voxcpm
 from youdub.transcription import WhisperXConfig, prepare_whisperx_runtime
 
@@ -85,7 +85,7 @@ from whisperx.diarize import DiarizationPipeline
 print(f"openai={openai.__version__}")
 print(f"yt_dlp={yt_dlp.version.__version__}")
 print(f"aiohttp={aiohttp.__version__}")
-print(f"bilibili_api={bilibili_api.__file__}")
+print(f"aiohttp_socks={aiohttp_socks.__file__}")
 print(f"librosa={librosa.__version__}")
 print(f"soundfile={soundfile.__version__}")
 print(f"voxcpm={voxcpm.__file__}")

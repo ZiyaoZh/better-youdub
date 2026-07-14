@@ -469,11 +469,10 @@ export YOUDUB_SUBTITLE_FONT=
 截取一帧。
 
 `publish-bilibili` 默认不会无确认上传。使用 `--publish-dry-run` 只校验发布包和
-文件路径，写出 `bilibili.dry-run.json`；真实上传会通过 `bilibili-api-python`
-提交 `video.mp4`、`cover.jpg`、标题、简介和标签，成功后写出 `bilibili.json`。
-这里使用的是 Nemo2011/bilibili-api 对应的 pip 包 `bilibili-api-python==17.4.1`，
-并显式锁定 `aiohttp==3.13.2`，同时上传入口会禁用 `br` 响应压缩，避免新版
-`aiohttp` 与 `Brotli` 解压接口不兼容导致 `Can not decode content-encoding: br`。
+文件路径，写出 `bilibili.dry-run.json`；真实上传会通过项目内置的 Bilibili Web
+上传实现提交 `video.mp4`、`cover.jpg`、标题、简介和标签，成功后写出
+`bilibili.json`。上传入口不再依赖 `bilibili-api-python`，只使用通用 HTTP
+运行依赖 `aiohttp==3.13.2` 和 SOCKS 代理连接器 `aiohttp-socks==0.11.0`。
 真实上传需要设置 Bilibili 凭证，并显式传入 `--publish-confirm`：
 
 ```bash
@@ -488,8 +487,16 @@ export BILI_TID=201
 export BILI_ORIGINAL=0
 export BILI_SOURCE=
 export BILI_WATERMARK=1
+export BILI_PROXY=
 export YOUDUB_PUBLISH_CONFIRM=0
 ```
+
+如果容器无法直连 `member.bilibili.com` 或 UPOS 上传域名，可设置
+`BILI_PROXY=http://host.docker.internal:7890`，也可以使用标准
+`HTTP_PROXY` / `HTTPS_PROXY` 环境变量；上传客户端会让 `aiohttp` 读取这些代理
+环境变量。若翻译阶段已通过 `translation.ssh_host` 启动 SSH 动态转发，且没有单独
+设置 `BILI_PROXY`，Bilibili 上传会复用 `YOUDUB_TRANSLATION_PROXY`
+（通常是 `socks5h://127.0.0.1:1081`）。
 
 真实凭证只能通过本地环境变量或本地配置注入，不要提交到仓库。平台发布前需要确认
 内容授权、账号授权和平台规则。

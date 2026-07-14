@@ -140,6 +140,27 @@ def test_task_config_exposes_translation_proxy_default_and_override(monkeypatch,
     assert options.translation.proxy is None
 
 
+def test_task_config_exposes_bilibili_proxy_default_and_override(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("YOUDUB_ROOT", str(tmp_path / "videos"))
+    monkeypatch.setenv("YOUDUB_TASKS_PATH", str(tmp_path / "tasks" / "tasks.json"))
+    monkeypatch.setenv("YOUDUB_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("YOUDUB_MODELS_DIR", str(tmp_path / "models"))
+    monkeypatch.setenv("YOUDUB_CONFIG_PATH", str(tmp_path / "config" / "youdub.json"))
+    monkeypatch.setenv("BILI_PROXY", "http://127.0.0.1:7890")
+
+    config = AppConfig.from_env()
+    task_config = default_task_config(config)
+    options = runtime_options_from_task_config(config, task_config)
+
+    assert task_config["bilibili"]["proxy"] == "http://127.0.0.1:7890"
+    assert options.bilibili.proxy == "http://127.0.0.1:7890"
+
+    task_config["bilibili"]["proxy"] = ""
+    options = runtime_options_from_task_config(config, task_config)
+
+    assert options.bilibili.proxy is None
+
+
 def test_task_config_exposes_web_tts_defaults(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("YOUDUB_ROOT", str(tmp_path / "videos"))
     monkeypatch.setenv("YOUDUB_TASKS_PATH", str(tmp_path / "tasks" / "tasks.json"))
