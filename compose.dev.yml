@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: docker/app.cpu.Dockerfile
-    image: youdub-linux:dev
+    image: better-youdub:dev
     working_dir: /app
     environment:
       PYTHONPATH: /app/src

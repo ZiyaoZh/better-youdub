@@ -1,572 +1,107 @@
-# YouDub Linux
+# better-youdub
 
-这是一个面向视频本地化流水线的 Linux/容器原生重写项目。
+better-youdub 是一个面向视频本地化的 Linux/容器原生流水线。它可以从视频 URL 或本地媒体创建任务，完成音频分离、语音识别、字幕翻译、中文配音、字幕生成、视频合成和发布包准备，并通过 Web UI 或 CLI 管理整个过程。
 
-旧 Windows 项目 `/tmp/YouDub2026` 只作为迁移参考。新项目优先保证
-Linux 行为清晰、依赖可复现、运行路径显式、适合容器部署，不要求保留旧项目
-的代码组织方式。
+> [!IMPORTANT]
+> 本项目仍处于从原 Windows 工作流迁移到 Linux + Docker 的阶段。核心链路已经可用，但任务数据格式、配置项和部署方式在迁移完成前仍可能调整。
 
-参考项目：
-
-- `https://github.com/liuzhao1225/YouDub-webui`：可作为 WebUI、任务交互和界面
-  组织方式的参考；当前迁移仍以 Linux/容器原生流水线为主，不直接继承其实现。
-
-## 当前范围
-
-当前已实现：
-
-- 基于环境变量和通用配置文件的配置管理
-- 从本地媒体文件创建任务目录
-- 基于本地媒体、下载产物或单个 URL 创建可复用的稳定任务目录
-- 使用 `yt-dlp` 下载单个视频 URL，支持用户提供的 Netscape 格式 cookies 文件和代理
-- 使用 JSON 任务文件保存状态，并采用原子写入
-- CLI：运行环境检查、创建任务、查看任务、执行单个流水线步骤
-- 使用 FFmpeg 从导入视频中提取音频
-- 使用 Demucs 做人声/伴奏分离，并显式检查运行依赖
-- 使用 WhisperX 做语音识别，并拆分为 whisper、align、diarize 三个阶段
-- 翻译视频信息和语音识别结果，产出 `summary.json`、`translation.context.json`、`translation.segments.json`、`translation.json`
-- 使用 VoxCPM2 从 Hugging Face 下载模型并合成配音，产出 `segments/tts/*.wav`、`audio_tts.wav`、`audio_tts.timings.json`
-- 对 TTS 合成音频再次执行 WhisperX 识别，并按标准译文修正字幕文本，产出 `audio_tts.transcript.json`、`subtitles.segments.json`、`subtitles.srt`
-- 使用 FFmpeg 混合 TTS 与伴奏、烧录字幕并生成最终 `video.mp4`
-- 生成发布包，产出 `publish.json`、`publish.md`、`cover.jpg`
-- Bilibili 上传适配器入口，支持 `--publish-dry-run` 校验和显式确认后的真实上传
-- FastAPI Web UI：创建 URL/本地/上传任务、查看任务状态、按任务配置下载/识别/翻译/TTS/合成/发布参数、运行单步或完整链路、下载产物
-- Docker 和依赖文件布局，为后续 CPU/GPU 镜像扩展做准备
-
-当前未实现：
-
-- 自动网页抓取或 cookie 刷新
-- Web UI 里的人工发布审核和真实上传确认工作流
-- 将 Demucs/GPU 运行依赖完整打包进基础开发环境
-
-## 固定测试视频标识
+## 功能概览
 
 ```text
-https://www.youtube.com/watch?v=6o68Fg2-bhM
+URL / 本地视频
+       |
+       v
+yt-dlp / 本地导入
+       |
+       v
+FFmpeg -> Demucs -> WhisperX -> OpenAI 兼容翻译接口
+                                  |
+                                  v
+                             VoxCPM2 配音
+                                  |
+                                  v
+                 TTS 复听与字幕对齐 -> FFmpeg 合成
+                                  |
+                                  v
+                       发布包 / Bilibili 上传
 ```
 
-自动测试和本地运行应使用已经合法准备好的本地媒体文件，例如：
+- 支持 URL、本地文件和浏览器上传三种任务来源
+- 使用 `yt-dlp` 下载单个视频，支持 Netscape `cookies.txt`、代理和清晰度限制
+- 使用 Demucs 分离人声与伴奏
+- 使用 WhisperX 完成转写、词级对齐和说话人分离
+- 通过 OpenAI 兼容接口生成视频摘要、术语上下文和分段译文
+- 使用 VoxCPM2 按原说话人参考音频生成中文配音
+- 对配音再次执行 ASR，按标准译文生成时间对齐字幕
+- 支持配音质量检查和问题片段局部重配
+- 使用 FFmpeg 混合音轨、烧录字幕并输出最终视频
+- 生成标题、简介、标签、封面等发布材料
+- 提供 Bilibili dry-run 和需要显式确认的真实上传入口
+- 使用原子 JSON 任务存储、步骤级状态和任务目录锁支持失败恢复
+- 提供 FastAPI Web UI、命令行工具以及 CPU/GPU Docker 镜像
 
-```text
-data/samples/6o68Fg2-bhM.mp4
-```
+## 迁移状态
 
-本工作区默认测试素材路径就是上面这个位置。`data/` 是运行时数据目录，已被
-Git 忽略。
+| 模块 | 状态 | 说明 |
+| --- | --- | --- |
+| Linux 路径与配置 | 可用 | 运行目录、密钥和模型路径均可配置 |
+| 任务存储与 CLI | 可用 | 支持任务创建、查询和单步执行 |
+| Web UI | 可用 | 支持任务管理、参数配置、完整链路和产物下载 |
+| 视频下载 | 可用 | 单 URL 下载、本地 cookies、代理和 Deno EJS runtime |
+| 音频分离与识别 | 可用 | Demucs、WhisperX 和可恢复的识别子步骤 |
+| 翻译、TTS 与字幕 | 可用 | OpenAI 兼容接口、VoxCPM2、TTS 复听和局部重配 |
+| 视频合成与发布包 | 可用 | 混音、字幕烧录、封面和发布元数据 |
+| Bilibili 发布 | 可用 | 默认 dry-run，真实上传必须提供凭证并显式确认 |
+| 容器部署 | 可用 | 提供 CPU 开发镜像和 NVIDIA GPU 完整运行镜像 |
+| 多实例调度 | 未支持 | 当前任务存储和写入模型面向单 Web 实例 |
+| Cookie 自动获取或刷新 | 未支持 | cookies 只能由用户通过本地文件显式提供 |
 
-除视频本体外，`data/samples/` 还包含后续下载阶段要保留的样本产物：
+迁移以 Linux 行为、可复现依赖和容器部署为优先目标。Windows 版本只作为功能基线，本项目不保留其目录组织、双虚拟环境或隐式路径约定。
 
-- `download.info.json`
-- `download.webp`
+## 运行要求
 
-它们分别代表视频元信息和封面图。`create-download-task` 会把这两个文件导入任务
-目录，后续翻译、发布包和封面处理会依赖它们。
+完整流水线推荐使用 GPU 容器。宿主机需要：
 
-## 本地用法
+- Linux x86_64
+- Docker Engine 和 Docker Compose v2
+- NVIDIA GPU、可用的 NVIDIA 驱动和 NVIDIA Container Toolkit
+- 足够存放模型缓存、中间音频和最终视频的磁盘空间
+- 可访问模型仓库、视频来源和翻译服务的网络环境
+- 一个 OpenAI 兼容接口，用于翻译阶段
+- Hugging Face read token，用于启用 WhisperX 说话人分离
+
+GPU 镜像默认基于 `pytorch/pytorch:2.8.0-cuda12.6-cudnn9-runtime`，并固定 `torch==2.8.0`、`torchaudio==2.8.0` 和 `torchvision==0.23.0`。宿主机不需要单独安装 CUDA Toolkit，但 NVIDIA 驱动必须能支持镜像使用的 CUDA runtime。
+
+CPU 开发镜像可以运行 Web UI、下载、任务管理、翻译、字幕处理、FFmpeg 合成和发布相关步骤，但不包含 Demucs、WhisperX 和 VoxCPM2 的完整 GPU 依赖，因此不能独立完成默认全链路。
+
+## 快速开始
+
+### 1. 获取代码
 
 ```bash
-python3 -m youdub.cli doctor
-python3 -m youdub.cli create-task --source data/samples/6o68Fg2-bhM.mp4 --title 6o68Fg2-bhM
-python3 -m youdub.cli create-download-task \
-  --source data/samples/6o68Fg2-bhM.mp4 \
-  --info data/samples/download.info.json \
-  --cover data/samples/download.webp
-python3 -m youdub.cli create-url-task \
-  --url "https://www.youtube.com/watch?v=6o68Fg2-bhM" \
-  --cookies data/cookies/cookies.txt
-python3 -m youdub.cli run-task <task-id> --step extract-audio
-python3 -m youdub.cli run-task <task-id> --step separate-audio
-python3 -m youdub.cli run-task <task-id> --step transcribe
-python3 -m youdub.cli run-task <task-id> --step translate
-python3 -m youdub.cli run-task <task-id> --step tts
-python3 -m youdub.cli run-task <task-id> --step transcribe-tts
-python3 -m youdub.cli run-task <task-id> --step subtitle
-python3 -m youdub.cli run-task <task-id> --step synthesize
-python3 -m youdub.cli run-task <task-id> --step prepare-publish
-python3 -m youdub.cli run-task <task-id> --step publish-bilibili --publish-dry-run
-python3 -m youdub.cli show-task <task-id>
+git clone https://github.com/ZiyaoZh/better-youdub.git
+cd better-youdub
 ```
 
-语音识别也可以按可恢复的子步骤单独执行：
+### 2. 初始化运行目录
 
 ```bash
-python3 -m youdub.cli run-task <task-id> --step transcribe-whisper
-python3 -m youdub.cli run-task <task-id> --step transcribe-align
-python3 -m youdub.cli run-task <task-id> --step transcribe-diarize
-```
-
-Web UI 使用同一套任务文件和运行时路径。源码方式运行时：
-
-```bash
-export PYTHONPATH="$PWD/src"
-export YOUDUB_ROOT="$PWD/data/videos"
-export YOUDUB_TASKS_PATH="$PWD/data/tasks/tasks.json"
-export YOUDUB_LOG_DIR="$PWD/data/logs"
-export YOUDUB_CONFIG_PATH="$PWD/data/config/youdub.json"
-export YOUDUB_COOKIES_PATH="$PWD/data/cookies/cookies.txt"
-export YOUDUB_WEB_USERNAME=
-export YOUDUB_WEB_PASSWORD=
-python3 -m youdub.web
-```
-
-然后打开：
-
-```text
-http://127.0.0.1:49173
-```
-
-Web UI 不会回显 cookies、OpenAI key 或 Bilibili 凭证。`publish-bilibili` 在 Web
-中默认按 dry-run 执行；如需真实上传，必须在该任务的 Bilibili 参数里提供凭证，
-关闭 `dry_run` 并开启 `confirm`。CLI 真实上传仍使用 `--publish-confirm` 显式确认入口。
-Web 中的“运行完整链路”会按当前运行环境依次执行音频提取、人声分离、识别、翻译、
-TTS、字幕、合成和发布包步骤，因此 GPU/TTS/OpenAI/Hugging Face 等依赖仍需要按
-对应阶段配置好。完整链路默认不包含 Bilibili；只有在任务参数的“流程”里开启
-`include_bilibili_upload` 后才会追加 `publish-bilibili`。若任务未同时确认真实上传，
-该步骤仍会自动降级为 dry-run。完整链路会跳过已经完成的步骤，但完成判定同时要求
-步骤状态为 `success` 且对应产物存在；如果状态成功但产物缺失，会重新执行该步骤。
-单步运行和下载按钮在步骤已完成时会先确认是否重新运行，确认后会清理该步骤及后续
-步骤的派生产物再启动，避免旧结果混入新链路。
-
-Web UI 的参数配置是任务级的。任务列表里的“新建”会先生成一个 URL 占位任务，不会
-立即下载。选中任务后，可以在任务详情里保存下载、WhisperX、翻译、TTS、合成、发布
-包和 Bilibili 参数，然后在下载步骤卡片点击“下载”。下载完成后，后端会保留原任务
-ID 和已保存参数，并把标题、作者、来源 key、稳定任务目录和下载产物回填到该任务。
-Web UI 新任务的配音参数来自同一套内部默认配置，可在任务参数的“配音”页覆盖。
-下载参数抽屉里可填写 cookies 文件路径，也可一次性粘贴 Netscape 格式 cookies 内容；
-cookies 内容只会写入任务下载配置指向的本地文件，不会保存到任务 JSON 或在接口响应中
-回显。下载完成后不会自动运行完整链路，需要手动点击“运行完整链路”或运行单个步骤。
-任务创建后，步骤卡片上的设置入口会打开“任务参数”抽屉。翻译参数中可以配置额外提示词、摘要提示词、上下文提示词、
-分段翻译提示词和纠错/术语提示词；这些提示词会随任务配置保存，修改后会让相关翻译
-缓存失效并重新请求模型。空的密钥字段会继续回退到环境变量或运行时配置文件；为单个任务
-填写密钥时，接口响应只返回 `********`，后续保存该掩码会保留原值。
-
-Web UI 的任务列表使用分页摘要接口，不再一次性返回完整任务配置、产物和步骤完成度。
-页面会按当前任务面板高度估算每页数量，并提供上一页/下一页翻页；选中任务后才单独
-请求完整详情。产物区只提供下载链接，最终 `video.mp4` 不再内嵌到页面播放器中，避免
-远程低带宽访问时误触发大文件流式传输。
-
-设置 `YOUDUB_WEB_USERNAME` 和 `YOUDUB_WEB_PASSWORD` 后，Web UI 会启用 HTTP Basic
-Auth，所有静态页面、API 和产物下载都需要认证。只设置其中一个会拒绝所有请求，
-避免误以为认证已正确启用。Docker Compose 默认只把 Web 端口绑定到
-`127.0.0.1`，不会监听公网网卡；远程访问时使用 SSH 隧道：
-
-```bash
-ssh -L 49173:127.0.0.1:49173 <user>@<server>
-```
-
-`extract-audio` 需要 `ffmpeg`。`separate-audio` 需要 `PATH` 上存在
-`demucs` 可执行程序；当前基础开发环境不一定包含它，需要通过项目依赖文件和
-GPU Docker 镜像安装运行依赖。
-
-同一任务目录内的 URL 下载和 `run-task` 步骤使用 `.task.lock` 做非阻塞互斥。
-如果同一任务已经在下载、运行单步或运行完整链路，再次启动同一任务会失败；Web API
-返回 `409 Task is already running`。Web 后台执行器按步骤分流：非 GPU worker 使用
-`max_workers=5` 并发运行下载、翻译、字幕、合成和发布包等步骤；GPU worker 使用
-`max_workers=3` 并发运行 `separate-audio`、`transcribe*`、`transcribe-tts` 等
-非配音独占步骤；`tts` 和 `redub-tts` 使用单 worker 配音队列串行运行，避免共享
-配音模型并发。`run-all` 保持同一任务内的步骤顺序，遇到 GPU 或配音生成步骤时按
-单步骤进入对应队列等待完成；`tasks.json` 仍保持进程内单写入，适合当前单实例部署。
-
-`create-url-task` 会用 `yt-dlp` 下载单个视频 URL，并在任务目录写出：
-
-- `download.mp4`
-- `download.info.json`
-- `download.webp`、`download.jpg`、`download.jpeg` 或 `download.png`
-
-cookies 是可选的本地 Netscape 格式文件。也可以通过环境变量配置默认路径。
-`YOUDUB_DOWNLOAD_MAX_HEIGHT=0` 表示不限制下载高度；需要限制时可设置为 `1080`、
-`720` 等具体高度：
-
-```bash
-export YOUDUB_COOKIES_PATH="$PWD/data/cookies/cookies.txt"
-export YOUDUB_YTDLP_PROXY=
-export YOUDUB_DOWNLOAD_MAX_HEIGHT=0
-python3 -m youdub.cli create-url-task --url "https://www.youtube.com/watch?v=6o68Fg2-bhM"
-```
-
-如果不想使用默认 cookies，可显式传入 `--no-cookies`。本项目不会自动读取浏览器
-cookies、不会自动登录、不会自动刷新 cookies，也不会在 CLI 或 API 输出中回显
-cookies 内容。请只处理你有权下载、转换和发布的视频内容。
-
-下载格式会优先尝试接近旧项目的 mp4/m4a 组合：
-
-```text
-bestvideo[ext=mp4][height<=目标高度]+bestaudio[ext=m4a]/best[ext=mp4][height<=目标高度]/best[height<=目标高度]/best
-```
-
-如果目标视频没有对应格式，会逐步放宽到任意容器、`best[ext=mp4]/best`，最后不传
-`format` 让 `yt-dlp` 使用默认选择。下载参数还会设置 `remote_components=["ejs:github"]`
-和 `youtube:player_js_variant=main`，与旧项目的 YouTube 解析兼容参数保持一致。
-YouTube n challenge 依赖 yt-dlp EJS solver，应用镜像内固定安装 Deno 作为
-JavaScript runtime；`doctor` 和 WebUI `/api/doctor` 会显示 `ytdlp_js_runtimes`。
-
-`transcribe` 需要 GPU 依赖集中的 `whisperx` Python 包。该步骤读取任务目录中
-的 `audio_vocals.wav`，并写出分阶段产物：
-
-- `transcript.whisper.json`
-- `transcript.aligned.json`
-- `transcript.diarized.json`
-- `transcript.json`
-- `SPEAKER/*.wav`
-
-其中：
-
-- `transcript.diarized.json` 保留 WhisperX 对齐后的词级时间和说话人信息
-- `transcript.json` 是按整句合并后的时间列表，适合作为翻译输入
-- `SPEAKER/*.wav` 是按说话人切出的参考音频
-
-下一阶段的翻译会以 `transcript.json` 作为整句语义单元。翻译阶段不再把译文切成
-短句，`translation.json` 会保留完整译文句子，供 TTS 合成更连贯的整句语音。
-
-`translate` 依赖运行时配置里的 OpenAI 兼容接口，读取：
-
-- `download.info.json`
-- `transcript.json`
-
-并写出：
-
-- `summary.json`
-- `translation.context.json`
-- `translation.segments.json`
-- `translation.json`
-
-其中 `translation.context.json` 会基于视频元信息和完整转录文本生成字幕翻译上下
-文，包括目标语言摘要、术语表和高置信度 ASR 纠错。`translation.segments.json`
-是带缓存元数据的句级翻译缓存，会记录目标语言、提示词版本和上下文 hash；当上下
-文、模型、提示词版本或任务级提示词 hash 变化时会重新翻译句级缓存。最终
-`translation.json` 由本地切分和
-句级翻译缓存生成，每条记录保留完整译文句子，`part_id` 固定为 0，不需要再次调用
-模型。
-
-翻译阶段支持以下任务级提示词参数，Web UI 的翻译参数抽屉可直接编辑：
-
-- `extra_prompt`：附加到摘要、上下文和分段翻译的全局提示词。
-- `summary_extra_prompt`：只影响 `summary.json` 的标题、摘要和标签生成。
-- `context_extra_prompt`：只影响 `translation.context.json` 的全文摘要、术语表和 ASR 纠错提取。
-- `segment_extra_prompt`：只影响句级字幕翻译。
-- `correction_prompt`：表达术语、ASR 错听和译后特殊修正策略。
-
-默认 `correction_prompt` 已迁入旧项目里用于气球塔防 6 的核心术语、英雄/塔名称、
-常见错听和观众称呼过滤策略。新项目不会把这些规则做成硬编码 `replace` 表；它们会
-作为大模型提示词参与上下文生成和句级翻译。需要处理其他领域时，直接覆盖任务级提示词
-即可。
-
-翻译请求默认会优先尝试结构化 JSON 输出：
-
-1. `response_format=json_schema`
-2. 不支持时回退到 `response_format=json_object`
-3. 再不支持时回退到纯文本 JSON 提示 + 本地 JSON 解析
-
-对于非 JSON、空 JSON、字段不完整、批次缺项、纯标点译文等情况，翻译步骤会自动
-重试。相关运行时参数可通过环境变量调整：
-
-- `YOUDUB_TRANSLATION_MAX_RETRIES`
-- `YOUDUB_TRANSLATION_RETRY_BACKOFF_SECONDS`
-- `YOUDUB_TRANSLATION_RETRY_BACKOFF_MULTIPLIER`
-- `YOUDUB_TRANSLATION_RETRY_MAX_BACKOFF_SECONDS`
-- `YOUDUB_TRANSLATION_FORCE_JSON_OUTPUT`
-- `YOUDUB_TRANSLATION_TEMPERATURE`
-- `YOUDUB_TRANSLATION_SSH_HOST`
-- `YOUDUB_TRANSLATION_SSH_LOCAL_PORT`
-- `YOUDUB_TRANSLATION_SSH_OPTIONS`
-- `YOUDUB_TRANSLATION_PROXY`
-- `YOUDUB_TRANSLATION_EXTRA_PROMPT`
-- `YOUDUB_TRANSLATION_SUMMARY_EXTRA_PROMPT`
-- `YOUDUB_TRANSLATION_CONTEXT_EXTRA_PROMPT`
-- `YOUDUB_TRANSLATION_SEGMENT_EXTRA_PROMPT`
-- `YOUDUB_TRANSLATION_CORRECTION_PROMPT`
-
-`tts` 依赖 GPU 依赖集中的 `voxcpm` Python 包，默认使用 Hugging Face 模型
-`openbmb/VoxCPM2`。首次运行会下载大模型，缓存位置由 `HF_HOME` 控制；GPU 容器
-默认挂载到 `/cache/huggingface`。该步骤读取：
-
-- `translation.json`
-- `audio_vocals.wav`
-
-并写出：
-
-- `segments/vocals/*.wav`
-- `segments/tts/*.wav`
-- `audio_tts.wav`
-- `audio_tts.timings.json`
-
-每个 TTS 片段会优先使用对应时间段的人声作为参考音频；如果参考片段短于
-`YOUDUB_TTS_MIN_REFERENCE_MS`，会回退到任务中可用的较长参考片段。混音时默认会
-根据 `translation.json` 的目标时间窗对 TTS 片段做轻量 time-stretch，并在
-`audio_tts.timings.json` 中记录每段的目标时长、原始时长、调整后时长、实际起止时间、
-漂移量、拉伸比例和对齐状态。VoxCPM2 与对齐参数可以通过 CLI 参数或环境变量设置：
-
-```bash
-python3 -m youdub.cli run-task <task-id> --step tts \
-  --tts-model openbmb/VoxCPM2 \
-  --tts-cfg-value 2.0 \
-  --tts-inference-timesteps 10 \
-  --tts-min-reference-ms 1200 \
-  --tts-start-pad-ms 80 \
-  --tts-end-pad-ms 160 \
-  --tts-stretch-base-min 0.8 \
-  --tts-stretch-base-max 1.2 \
-  --tts-stretch-local-min 0.9 \
-  --tts-stretch-local-max 1.1
-```
-
-```bash
-export YOUDUB_TTS_MODEL=openbmb/VoxCPM2
-export YOUDUB_TTS_MODEL_DIR=
-export YOUDUB_TTS_LOAD_DENOISER=0
-export YOUDUB_TTS_CFG_VALUE=2.0
-export YOUDUB_TTS_INFERENCE_TIMESTEPS=10
-export YOUDUB_TTS_MIN_REFERENCE_MS=1200
-export YOUDUB_TTS_START_PAD_MS=80
-export YOUDUB_TTS_END_PAD_MS=160
-export YOUDUB_TTS_ALIGN_AUDIO=1
-export YOUDUB_TTS_CACHE_MODEL=0
-export YOUDUB_TTS_STRETCH_BASE_MIN=0.8
-export YOUDUB_TTS_STRETCH_BASE_MAX=1.2
-export YOUDUB_TTS_STRETCH_LOCAL_MIN=0.9
-export YOUDUB_TTS_STRETCH_LOCAL_MAX=1.1
-```
-
-使用 `--no-tts-align-audio` 或 `YOUDUB_TTS_ALIGN_AUDIO=0` 可以关闭分段时长对齐，
-回退到直接按时间线拼接 TTS 片段。
-
-默认 `YOUDUB_TTS_CACHE_MODEL=0`，TTS 步骤结束后会卸载 VoxCPM2 并清理 CUDA
-缓存，避免 Web 服务空闲时继续占用显存。连续批量处理且希望减少模型加载时间时，
-可以设置 `YOUDUB_TTS_CACHE_MODEL=1` 保留模型。
-
-如需完全离线运行，可以先把模型放到本地目录，再设置 `YOUDUB_TTS_MODEL_DIR`。
-
-`transcribe-tts` 会对 `audio_tts.wav` 再执行一次 WhisperX whisper + align，写出：
-
-- `audio_tts.transcript.whisper.json`
-- `audio_tts.transcript.aligned.json`
-- `audio_tts.transcript.json`
-
-TTS-ASR 默认使用下面两个参数让 Whisper 输出简体中文，减少繁体字造成的字幕对齐
-fallback：
-
-```bash
-export YOUDUB_TTS_ASR_LANGUAGE=zh
-export YOUDUB_TTS_ASR_INITIAL_PROMPT=以下是普通话的句子。
-```
-
-`subtitle` 读取 `translation.json`、`audio_tts.transcript.json`，并在存在时读取
-`audio_tts.timings.json`，写出：
-
-- `subtitles.segments.json`
-- `subtitles.srt`
-
-字幕文本始终以 `translation.json` 中的标准译文为准；TTS-ASR 只提供合成语音的实
-际时间。字幕步骤会把标准译文和 ASR words 展开成全局无标点字符流，做 NFKC、
-简繁归一化和单调字符映射，再把标准译文短句投影到 WhisperX align 的词级
-`start`/`end`。ASR segment 边界和标点不再作为硬边界，因此一个无标点 ASR 长段可
-以映射多个标准译文句子。`subtitles.segments.json` 会记录 `timing_source`、
-`alignment_confidence` 和 fallback 原因；正常主路径是 `global_asr_words`，缺口
-才会降级为 `neighbor_interpolated_words`、`tts_timing_proportional` 或最终的
-`proportional_fallback`。最终输出的字幕文本会去掉每条字幕末尾的标点符号，
-`standard_translation` 仍保留完整标准译文用于追踪。
-
-`inspect-tts` 会复用 `translation.json`、`audio_tts.timings.json`、
-`audio_tts.transcript.json` 和 `subtitles.segments.json`，按译文片段聚合 TTS-ASR
-内容匹配、字幕 fallback、词级对齐置信度、漂移和拉伸状态，写出：
-
-- `tts.quality.json`
-- `tts.redub.plan.json`
-
-默认只有 `hard` 严重失败片段进入重配计划；短文本空 ASR 会先标记为 `review`，避免
-把“好吧”“嗯”等口头语无条件送入 GPU 重配。可以通过 CLI 或环境变量调节阈值：
-
-```bash
-python3 -m youdub.cli run-task <task-id> --step inspect-tts \
-  --tts-quality-max-segments-per-round 50 \
-  --tts-quality-max-task-hard-ratio 0.20
-```
-
-```bash
-export YOUDUB_TTS_QUALITY_HARD_SIMILARITY_MIN=0.45
-export YOUDUB_TTS_QUALITY_REVIEW_SIMILARITY_MIN=0.60
-export YOUDUB_TTS_QUALITY_HARD_ALIGNMENT_CONFIDENCE_MIN=0.35
-export YOUDUB_TTS_QUALITY_REVIEW_ALIGNMENT_CONFIDENCE_MIN=0.50
-export YOUDUB_TTS_QUALITY_HARD_DRIFT_SECONDS=2.0
-export YOUDUB_TTS_QUALITY_REVIEW_DRIFT_SECONDS=1.2
-export YOUDUB_TTS_QUALITY_EXTREME_STRETCH_MIN=0.75
-export YOUDUB_TTS_QUALITY_EXTREME_STRETCH_MAX=1.25
-export YOUDUB_TTS_QUALITY_MIN_TEXT_CHARS_FOR_EMPTY_ASR_HARD=6
-export YOUDUB_TTS_QUALITY_INCLUDE_REVIEW=0
-export YOUDUB_TTS_QUALITY_MAX_SEGMENTS_PER_ROUND=50
-export YOUDUB_TTS_QUALITY_MAX_TASK_HARD_RATIO=0.20
-```
-
-`redub-tts` 读取 `tts.redub.plan.json`，只重新生成计划里的 `segments/tts/*.wav`。
-旧片段会备份到 `segments/tts_versions/round-001/*.previous.wav`，新片段会写入同目录的
-`*.new.wav` 后替换当前 `segments/tts/0001.wav` 这类生效文件。重配后会重新构建
-`audio_tts.wav` 和 `audio_tts.timings.json`，并追加 `tts.redub.history.jsonl`。
-重配后需要重新运行 `transcribe-tts`、`subtitle`，再运行 `synthesize` 和发布相关步骤：
-
-```bash
-python3 -m youdub.cli run-task <task-id> --step redub-tts
-python3 -m youdub.cli run-task <task-id> --step transcribe-tts
-python3 -m youdub.cli run-task <task-id> --step subtitle
-```
-
-Web `run-all` 默认不启用自动重配。任务配置中的 `workflow.enable_tts_redub=true` 后，
-完整链路会在首次 `subtitle` 后执行 `inspect-tts -> redub-tts -> transcribe-tts ->
-subtitle`，然后继续 `synthesize` 和发布包步骤。第一版固定只运行一轮，轮次参数仅在
-CLI 和内部配置中保留，不在 Web UI 暴露。
-Web UI 中可以在任务详情点击“流程参数”打开该配置；也可以点击“配音质检”或“局部重配”
-步骤卡片的齿轮调整质检阈值和单轮最多重配片段数。
-
-`synthesize` 读取：
-
-- `download.mp4`
-- `audio_tts.wav`
-- `audio_instruments.wav`
-- `subtitles.srt`
-
-并写出：
-
-- `audio_mixed.m4a`
-- `video.mp4`
-
-合成阶段默认把 TTS 音量设为 `1.0`、伴奏音量设为 `0.30`，使用 `libx264`、
-`preset=fast`、`crf=23`，并通过 FFmpeg `subtitles` filter 将字幕烧录进画面。
-GPU/CPU app 镜像会安装 `libass9`、`fontconfig` 和 `fonts-noto-cjk`，用于稳定渲染中文字幕。
-GPU 镜像会优先使用 apt 安装的 `/usr/bin/ffmpeg`，避免基础镜像里的 conda FFmpeg
-缺少字幕 filter。
-相关参数可以通过 CLI 或环境变量调整：
-
-```bash
-python3 -m youdub.cli run-task <task-id> --step synthesize \
-  --synthesis-tts-volume 1.0 \
-  --synthesis-instruments-volume 0.30 \
-  --synthesis-preset fast \
-  --synthesis-crf 23 \
-  --subtitle-language zh
-```
-
-```bash
-export YOUDUB_BURN_SUBTITLES=1
-export YOUDUB_SYNTHESIS_TTS_VOLUME=1.0
-export YOUDUB_SYNTHESIS_INSTRUMENTS_VOLUME=0.30
-export YOUDUB_SYNTHESIS_PRESET=fast
-export YOUDUB_SYNTHESIS_CRF=23
-export YOUDUB_SUBTITLE_LANGUAGE=zh
-export YOUDUB_SUBTITLE_FONT=
-```
-
-使用 `--no-burn-subtitles` 或 `YOUDUB_BURN_SUBTITLES=0` 可以生成不烧录字幕的最终视频。
-
-`prepare-publish` 读取 `video.mp4`、`summary.json`、`download.info.json` 和下载
-封面，写出：
-
-- `publish.json`
-- `publish.md`
-- `cover.jpg`
-
-`publish.json` 包含最终视频路径、封面路径、标题、简介、标签、源链接和原始标题，
-用于人工审核或后续平台上传。封面优先从 `download.webp`、`download.jpg`、
-`download.jpeg`、`download.png` 转为 `cover.jpg`；没有下载封面时从 `video.mp4`
-截取一帧。
-
-`publish-bilibili` 默认不会无确认上传。使用 `--publish-dry-run` 只校验发布包和
-文件路径，写出 `bilibili.dry-run.json`；真实上传会通过项目内置的 Bilibili Web
-上传实现提交 `video.mp4`、`cover.jpg`、标题、简介和标签，成功后写出
-`bilibili.json`。上传入口不再依赖 `bilibili-api-python`，只使用通用 HTTP
-运行依赖 `aiohttp==3.13.2` 和 SOCKS 代理连接器 `aiohttp-socks==0.11.0`。
-真实上传需要设置 Bilibili 凭证，并显式传入 `--publish-confirm`：
-
-```bash
-python3 -m youdub.cli run-task <task-id> --step publish-bilibili --publish-dry-run
-python3 -m youdub.cli run-task <task-id> --step publish-bilibili --publish-confirm
-```
-
-```bash
-export BILI_SESSDATA=
-export BILI_BILI_JCT=
-export BILI_TID=201
-export BILI_ORIGINAL=0
-export BILI_SOURCE=
-export BILI_WATERMARK=1
-export BILI_PROXY=
-export YOUDUB_PUBLISH_CONFIRM=0
-```
-
-如果容器无法直连 `member.bilibili.com` 或 UPOS 上传域名，可设置
-`BILI_PROXY=http://host.docker.internal:7890`，也可以使用标准
-`HTTP_PROXY` / `HTTPS_PROXY` 环境变量；上传客户端会让 `aiohttp` 读取这些代理
-环境变量。若翻译阶段已通过 `translation.ssh_host` 启动 SSH 动态转发，且没有单独
-设置 `BILI_PROXY`，Bilibili 上传会复用 `YOUDUB_TRANSLATION_PROXY`
-（通常是 `socks5h://127.0.0.1:1081`）。
-
-真实凭证只能通过本地环境变量或本地配置注入，不要提交到仓库。平台发布前需要确认
-内容授权、账号授权和平台规则。
-
-默认 Demucs 模型是 `htdemucs_ft`。默认 Demucs segment 长度是 6 秒，低于
-`htdemucs_ft` 的 7.8 秒上限。
-
-默认 WhisperX 模型是 `large-v2`。通过 CLI 执行识别时，WhisperX 模型会下载
-到：
-
-```text
-YOUDUB_MODELS_DIR/ASR/whisper
-```
-
-WhisperX 运行参数可以通过 CLI 参数或环境变量设置：
-
-```bash
-python3 -m youdub.cli run-task <task-id> --step transcribe \
-  --whisper-model large-v2 \
-  --whisper-device auto \
-  --whisper-batch-size 32 \
-  --whisper-language zh \
-  --whisper-initial-prompt "以下是普通话的句子。" \
-  --min-speakers 1 \
-  --max-speakers 3
-```
-
-```bash
-export YOUDUB_WHISPER_MODEL=large-v2
-export YOUDUB_WHISPER_DEVICE=auto
-export YOUDUB_WHISPER_BATCH_SIZE=32
-export YOUDUB_WHISPER_LANGUAGE=
-export YOUDUB_WHISPER_INITIAL_PROMPT=
-export YOUDUB_WHISPER_DIARIZATION=1
-export YOUDUB_WHISPER_MIN_SPEAKERS=
-export YOUDUB_WHISPER_MAX_SPEAKERS=
-```
-
-使用 `--no-diarization` 或 `YOUDUB_WHISPER_DIARIZATION=0` 可以跳过说话人分离。
-跳过时，最终 transcript 会统一使用 `SPEAKER_00`。
-
-稳定任务目录会优先按视频身份复用。对于带 `download.info.json` 的任务，目录形
-式为：
-
-```text
-YOUDUB_ROOT/<author>/<upload_date> <title>/
-```
-
-同一视频再次执行 `create-download-task` 或 `create-url-task` 时，会复用同一个任务
-目录和 task id，避免重复下载和重复消耗翻译 token。详细设计见
-[docs/translation-design.md](./docs/translation-design.md)。
-
-## 通用配置文件
-
-密钥和模型服务配置应放在运行时配置文件里，不要写进已提交的源码文件。先复制
-模板，再编辑本地运行时副本：
-
-```bash
-mkdir -p data/config
+cp .env.example .env
+mkdir -p \
+  data/videos \
+  data/tasks \
+  data/logs \
+  data/config \
+  data/cookies \
+  data/samples \
+  data/cache/huggingface \
+  data/cache/nltk \
+  data/cache/torch \
+  models
 cp config.example.json data/config/youdub.json
 ```
 
-`data/` 已被 Git 忽略，因此 `data/config/youdub.json` 适合保存本地 token 和
-API key。容器中的默认路径是：
-
-```text
-YOUDUB_CONFIG_PATH=/data/config/youdub.json
-```
-
-配置文件格式：
+将翻译服务和 Hugging Face 凭证写入 `data/config/youdub.json`：
 
 ```json
 {
@@ -591,374 +126,351 @@ YOUDUB_CONFIG_PATH=/data/config/youdub.json
 }
 ```
 
-Docker 启动时，如果 `translation.ssh_host` 或 `YOUDUB_TRANSLATION_SSH_HOST`
-非空，入口脚本会自动执行 SSH 动态转发，并把翻译阶段代理设置为
-`socks5h://127.0.0.1:<ssh_local_port>`。默认 Compose 会把宿主机
-`${HOME}/.ssh` 只读挂载到容器 `/tmp/.ssh`，因此宿主机上能执行
-`ssh AI.census` 时，容器里也可以使用同一个 SSH alias。若 SSH 目录不在默认位置，
-设置 `YOUDUB_SSH_DIR=/path/to/.ssh`。如果密钥权限是 `0600`，确保
-`YOUDUB_UID`/`YOUDUB_GID` 与宿主机密钥 owner 匹配。
+`data/` 已被 Git 忽略。不要把真实 token、API key、cookies 或平台凭证提交到仓库。
 
-`translation.proxy` 是低层覆盖项，适合非 Docker 运行或已有 HTTP/SOCKS 代理的场景；
-使用 `translation.ssh_host` 时通常不需要手动填写它。
+如需说话人分离，还需要使用同一个 Hugging Face 账号接受 WhisperX 当前依赖的 pyannote 模型协议。具体模型要求以 [WhisperX 文档](https://github.com/m-bain/whisperX) 为准。不需要说话人分离时，可以在任务参数中关闭 diarization。
 
-CI 或临时运行时，仍可用环境变量覆盖配置文件：
+### 3. 启动 GPU 服务
 
 ```bash
-export YOUDUB_CONFIG_PATH="$PWD/data/config/youdub.json"
-export HF_READ_TOKEN=hf_...
-export OPENAI_API_KEY=sk-...
-export OPENAI_BASE_URL=https://api.example.com/v1
-export OPENAI_MODEL=gpt-...
-export YOUDUB_TRANSLATION_SSH_HOST=AI.census
+export YOUDUB_UID="$(id -u)"
+export YOUDUB_GID="$(id -g)"
+docker compose -f compose.gpu.yml up --build -d
 ```
 
-支持的覆盖变量：
-
-- `HF_READ_TOKEN` 或 `HF_TOKEN`
-- `OPENAI_API_KEY`
-- `OPENAI_BASE_URL` 或 `OPENAI_API_BASE`
-- `OPENAI_MODEL` 或 `MODEL_NAME`
-- `YOUDUB_TRANSLATION_SSH_HOST`
-- `YOUDUB_TRANSLATION_SSH_LOCAL_PORT`
-- `YOUDUB_TRANSLATION_SSH_OPTIONS`
-- `YOUDUB_TRANSLATION_PROXY`
-- `YOUDUB_TRANSLATION_EXTRA_PROMPT`
-- `YOUDUB_TRANSLATION_SUMMARY_EXTRA_PROMPT`
-- `YOUDUB_TRANSLATION_CONTEXT_EXTRA_PROMPT`
-- `YOUDUB_TRANSLATION_SEGMENT_EXTRA_PROMPT`
-- `YOUDUB_TRANSLATION_CORRECTION_PROMPT`
-
-`doctor` 命令只会显示这些密钥是否已配置，不会打印真实密钥内容。
-
-## GPU 与 Demucs/WhisperX 验证
-
-Demucs 在 GPU app 镜像中从上游仓库固定 commit 安装：
+首次构建和首次运行会下载较大的 Python 依赖及模型。启动完成后打开：
 
 ```text
-https://github.com/facebookresearch/demucs/tree/ef66d254cd6d558e207eeff2c4b8d053db2e77dd
+http://127.0.0.1:49173
 ```
 
-GPU 镜像使用适合 Ada GPU，例如 RTX 4090，的 CUDA 12 栈，并以 WhisperX 当前
-依赖为主线：
-
-- `pytorch/pytorch:2.8.0-cuda12.6-cudnn9-runtime`
-- `torch==2.8.0`
-- `torchaudio==2.8.0`
-- `torchvision==0.23.0`
-- `requirements/gpu.txt` 中的 Demucs 运行依赖
-- `requirements/gpu.txt` 中的 WhisperX 运行依赖
-- `requirements/torch-constraints.txt` 锁住 PyTorch 三件套，防止 pip resolver
-  在安装 WhisperX 或 Demucs 依赖时静默升级/降级 torch 栈
-- Demucs 本体从固定上游 commit 以 `--no-deps` 安装，避免它旧的
-  torchaudio 元数据把 CUDA 12 的 PyTorch 栈降级
-- GPU compose 和镜像默认设置 `NVIDIA_DRIVER_CAPABILITIES=compute,utility`，
-  由 NVIDIA Container Toolkit 在运行时暴露 CUDA compute 能力、NVML 和
-  `nvidia-smi`；镜像不内置宿主机驱动包，避免驱动版本不匹配。
-
-默认基础镜像可通过 `PYTORCH_BASE_IMAGE` 覆盖。若宿主机到 Docker Hub 的
-`auth.docker.io` 不稳定，可以先从可访问的镜像仓库拉取同一 PyTorch 镜像并重打本地
-tag，或直接把 `PYTORCH_BASE_IMAGE` 指向内部 registry / pull-through cache：
+查看服务日志或停止服务：
 
 ```bash
-PYTORCH_BASE_IMAGE=registry.example.com/pytorch/pytorch:2.8.0-cuda12.6-cudnn9-runtime \
-  docker compose -f compose.gpu.yml build --no-cache
+docker compose -f compose.gpu.yml logs -f youdub-gpu
+docker compose -f compose.gpu.yml down
 ```
 
-这只替换 Dockerfile 的 `FROM` 镜像；镜像内的 torch、torchaudio、torchvision 版本
-仍由基础镜像和 `requirements/torch-constraints.txt` 约束。
-
-WhisperX 从 `requirements/gpu.txt` 中固定的上游 commit 安装：
-
-```text
-https://github.com/m-bain/whisperX
-```
-
-它使用 faster-whisper/CTranslate2 做转写，使用 WhisperX alignment model 做词级
-时间对齐，并使用基于 pyannote 的 diarization 做说话人分离。
-
-说话人分离需要 Hugging Face read token。先在下面页面创建 token：
-
-```text
-https://huggingface.co/settings/tokens
-```
-
-然后用同一个 Hugging Face 账号接受 WhisperX 当前版本所需的 pyannote 模型使用
-协议。WhisperX README 会记录当前需求；旧版本可能需要
-`pyannote/speaker-diarization-3.1` 和 `pyannote/segmentation-3.0`，新版本可能
-需要 `pyannote/speaker-diarization-community-1`。把 token 写入
-`data/config/youdub.json` 的 `huggingface.token` 字段，不要提交真实 token。
-
-构建和检查 GPU 镜像：
+通过以下命令确认容器能够访问 GPU 和完整运行依赖：
 
 ```bash
-docker compose -f compose.gpu.yml config
-docker compose -f compose.gpu.yml build
 docker compose -f compose.gpu.yml run --rm youdub-gpu scripts/check_gpu.sh
 ```
 
-`scripts/check_gpu.sh` 会检查 `nvidia-smi`。如果宿主机有 GPU 但容器内找不到
-`nvidia-smi`，先确认宿主机安装了 NVIDIA Container Toolkit，且没有覆盖
-`NVIDIA_DRIVER_CAPABILITIES=compute,utility`。
+### CPU 开发模式
 
-WebUI 顶部系统监控的显存显示会优先使用 `nvidia-smi`；如果容器内没有该命令，
-会继续尝试 Python NVML 包和 `torch.cuda.mem_get_info()`，因此只要 PyTorch 能看到
-CUDA，显存通常仍能显示。
-
-启动 Web UI：
+只需要查看 Web UI 或开发非 GPU 功能时，可以启动较小的 CPU 镜像：
 
 ```bash
-docker compose -f compose.dev.yml up --build
+export YOUDUB_UID="$(id -u)"
+export YOUDUB_GID="$(id -g)"
+docker compose -f compose.dev.yml up --build -d
 ```
 
-GPU 环境中启动 Web UI：
+CPU 和 GPU Compose 默认都只监听宿主机的 `127.0.0.1`。可以通过 `YOUDUB_WEB_PORT` 修改端口：
 
 ```bash
-docker compose -f compose.gpu.yml up --build
+YOUDUB_WEB_PORT=8080 docker compose -f compose.gpu.yml up --build -d
 ```
 
-Docker 默认宿主机端口是 `49173`，容器内仍监听 `8000`，宿主机只监听
-`127.0.0.1`。可以通过 `YOUDUB_WEB_PORT` 修改宿主机映射：
+## 使用 Web UI
 
-```bash
-YOUDUB_WEB_PORT=8080 docker compose -f compose.dev.yml up --build
-```
+Web UI 是推荐的任务入口。一个典型工作流如下：
 
-如需启用 Web 登录：
+1. 新建 URL 任务，或从本地路径、上传文件创建任务。
+2. 在任务参数中配置下载、WhisperX、翻译、TTS、合成和发布选项。
+3. 对 URL 草稿任务执行下载，确认元信息和封面已经写入任务目录。
+4. 运行单个步骤，或点击“运行完整链路”。
+5. 检查步骤状态和日志，从产物区下载视频、字幕或发布材料。
+6. 如需发布到 Bilibili，先执行 dry-run；确认发布材料后再单独启用真实上传。
 
-```bash
-YOUDUB_WEB_USERNAME=<user> YOUDUB_WEB_PASSWORD=<long-random-password> \
-  docker compose -f compose.gpu.yml up --build
-```
-
-完整重建时使用：
-
-```bash
-docker compose -f compose.gpu.yml build --no-cache
-```
-
-构建并验证 GPU 运行环境：
-
-```bash
-scripts/gpu_smoke.sh
-```
-
-默认 GPU smoke test 会验证镜像导入、运行时依赖检查、占位下载任务创建、音频提
-取和 Demucs。若还要运行 WhisperX 识别，并且启用了说话人分离，请先在
-`data/config/youdub.json` 中配置 Hugging Face token，然后执行：
-
-```bash
-YOUDUB_SMOKE_TRANSCRIBE=1 scripts/gpu_smoke.sh
-```
-
-如果只想验证 whisper 和 align，不跑 pyannote diarization：
-
-```bash
-YOUDUB_SMOKE_TRANSCRIBE=1 YOUDUB_WHISPER_DIARIZATION=0 scripts/gpu_smoke.sh
-```
-
-如果还要验证翻译步骤，请在运行时配置文件或环境变量中提供 OpenAI 兼容接口配置，
-并同时开启识别和翻译：
-
-```bash
-YOUDUB_SMOKE_TRANSCRIBE=1 \
-YOUDUB_SMOKE_TRANSLATE=1 \
-OPENAI_API_KEY=sk-... \
-OPENAI_MODEL=gpt-... \
-scripts/gpu_smoke.sh
-```
-
-如果还要验证 VoxCPM2 TTS、TTS 后 ASR 和字幕生成，请同时开启识别、翻译、TTS、
-TTS 后识别和字幕；首次运行会从 Hugging Face 下载 `openbmb/VoxCPM2`：
-
-```bash
-YOUDUB_SMOKE_TRANSCRIBE=1 \
-YOUDUB_SMOKE_TRANSLATE=1 \
-YOUDUB_SMOKE_TTS=1 \
-YOUDUB_SMOKE_TRANSCRIBE_TTS=1 \
-YOUDUB_SMOKE_SUBTITLE=1 \
-YOUDUB_SMOKE_INSPECT_TTS=1 \
-OPENAI_API_KEY=sk-... \
-OPENAI_MODEL=gpt-... \
-scripts/gpu_smoke.sh
-```
-
-如果还要验证局部重配闭环，开启 `YOUDUB_SMOKE_REDUB_TTS=1`。脚本会在重配后重新运行
-`transcribe-tts` 和 `subtitle`：
-
-```bash
-YOUDUB_SMOKE_TRANSCRIBE=1 \
-YOUDUB_SMOKE_TRANSLATE=1 \
-YOUDUB_SMOKE_TTS=1 \
-YOUDUB_SMOKE_TRANSCRIBE_TTS=1 \
-YOUDUB_SMOKE_SUBTITLE=1 \
-YOUDUB_SMOKE_INSPECT_TTS=1 \
-YOUDUB_SMOKE_REDUB_TTS=1 \
-OPENAI_API_KEY=sk-... \
-OPENAI_MODEL=gpt-... \
-scripts/gpu_smoke.sh
-```
-
-如果还要验证最终合成、发布包和 Bilibili dry-run：
-
-```bash
-YOUDUB_SMOKE_TRANSCRIBE=1 \
-YOUDUB_SMOKE_TRANSLATE=1 \
-YOUDUB_SMOKE_TTS=1 \
-YOUDUB_SMOKE_TRANSCRIBE_TTS=1 \
-YOUDUB_SMOKE_SUBTITLE=1 \
-YOUDUB_SMOKE_SYNTHESIZE=1 \
-YOUDUB_SMOKE_PREPARE_PUBLISH=1 \
-YOUDUB_SMOKE_PUBLISH_BILIBILI=1 \
-OPENAI_API_KEY=sk-... \
-OPENAI_MODEL=gpt-... \
-scripts/gpu_smoke.sh
-```
-
-`gpu_smoke.sh` 会优先使用 sample 目录里的 `download.info.json` 和 `download.webp`，
-从而走 `create-download-task`，验证稳定任务目录复用和翻译所需输入。若要切换其
-他样本，也可以显式传入：
-
-```bash
-scripts/gpu_smoke.sh /data/samples/demo.mp4 /data/samples/download.info.json /data/samples/download.webp
-```
-
-若要在 GPU 容器中验证真实 URL 下载，可以把 cookies 放到 `data/cookies/cookies.txt`
-后传入 URL。该命令会访问网络，不属于默认自动化 smoke：
-
-```bash
-scripts/gpu_smoke.sh "https://www.youtube.com/watch?v=6o68Fg2-bhM" /data/cookies/cookies.txt
-```
-
-如果需要在容器内逐步调试任务：
-
-```bash
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub doctor
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub create-download-task --source /data/samples/6o68Fg2-bhM.mp4 --info /data/samples/download.info.json --cover /data/samples/download.webp
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub create-url-task --url "https://www.youtube.com/watch?v=6o68Fg2-bhM" --cookies /data/cookies/cookies.txt
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step extract-audio
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step separate-audio
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step transcribe
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step translate
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step tts
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step transcribe-tts
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step subtitle
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step inspect-tts
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step redub-tts
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step synthesize
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step prepare-publish
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub run-task <task-id> --step publish-bilibili --publish-dry-run
-docker compose -f compose.gpu.yml run --rm youdub-gpu youdub show-task <task-id>
-```
-
-清理临时容器和网络：
-
-```bash
-docker compose -f compose.gpu.yml down --remove-orphans
-```
-
-### WhisperX 运行故障说明
-
-如果语音识别时报错：
+“运行完整链路”默认依次执行：
 
 ```text
-Weights only load failed
-PyTorch 2.6 changed the default value of the weights_only argument
-Unsupported global: GLOBAL omegaconf.listconfig.ListConfig
+extract-audio
+  -> separate-audio
+  -> transcribe
+  -> translate
+  -> tts
+  -> transcribe-tts
+  -> subtitle
+  -> synthesize
+  -> prepare-publish
 ```
 
-这是 WhisperX/pyannote 旧 checkpoint 与新版 PyTorch `torch.load` 默认行为不兼容。
-项目已在 WhisperX 入口处做兼容处理：调用 WhisperX 前会把 `torch.load` 默认
-恢复为 `weights_only=False`，并设置 `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1`。该
-处理只用于本项目加载受信任的 WhisperX/pyannote 模型文件。请通过
-`python3 -m youdub.cli run-task ... --step transcribe` 或
-`youdub.transcription.prepare_whisperx_runtime()` 进入 WhisperX；如果只是在交互
-命令里直接 `import whisperx`，不会自动应用项目里的 `torch.load` 兼容 patch。
+启用 `workflow.enable_tts_redub` 后，系统会在首次生成字幕后增加一轮 `inspect-tts -> redub-tts -> transcribe-tts -> subtitle`。Bilibili 上传不在默认链路中，只有启用 `workflow.include_bilibili_upload` 后才会追加；未同时确认真实上传时，该步骤仍会降级为 dry-run。
 
-如果同时看到类似下面的 `torchvision` ABI 警告：
+完整链路会跳过状态为成功且产物仍然存在的步骤。重新运行某一步时，系统会清理该步骤及其下游派生产物，避免新旧结果混用。
 
-```text
-torchvision/image.so: undefined symbol
+### 访问控制
+
+在 `.env` 中同时设置以下变量即可启用 HTTP Basic Auth：
+
+```dotenv
+YOUDUB_WEB_USERNAME=youdub
+YOUDUB_WEB_PASSWORD=<long-random-password>
 ```
 
-说明镜像里的 `torch`、`torchaudio`、`torchvision` 版本可能被依赖安装过程改乱。
-`requirements/torch-constraints.txt` 已显式锁住这三个包的版本。修改后需要重建
-GPU 镜像：
+只设置其中一项会拒绝所有请求。Web UI 不会回显 cookies、OpenAI key 或 Bilibili 凭证，任务级密钥在接口响应中只显示为 `********`。
+
+远程访问建议保留本地监听，并通过 SSH 隧道连接：
 
 ```bash
-docker compose -f compose.gpu.yml build --no-cache
+ssh -N -L 49173:127.0.0.1:49173 <user>@<server>
 ```
 
-`mkdir -p failed for path /.config/matplotlib`、`/tmp/matplotlib is not a
-writable directory` 或 `[Errno 13] Permission denied: '/.cache'` 是非 root 用户
-没有可写 home/cache 目录导致的警告或错误。
-GPU 镜像和 compose 已设置 `HOME=/tmp`、
-`MPLCONFIGDIR=/tmp/youdub-cache/matplotlib`、
-`XDG_CACHE_HOME=/tmp/youdub-cache/xdg`，并在镜像里对 `/tmp/youdub-cache` 设置
-了可写权限。WhisperX 运行入口还会在这些变量缺失或指向不可写路径时，把 `HOME`、
-`HF_HOME`、`TORCH_HOME`、`MPLCONFIGDIR`、`XDG_CACHE_HOME` 和 `NLTK_DATA` 兜底到
-`/tmp/youdub-cache` 下的可写目录。重建镜像后应消失。
+## 使用 CLI
 
-`[Errno 13] Permission denied: '/nltk_data'` 是 WhisperX/pyannote 依赖链中的 NLTK
-尝试写入不可写全局目录导致的。GPU 和 dev Compose 默认设置
-`NLTK_DATA=/cache/nltk` 并挂载到 `data/cache/nltk`；代码入口也会在进入 WhisperX
-前把不可写的 `/nltk_data` 纠正到 `/tmp/youdub-cache/nltk_data`。修改后需要重建并
-重启应用容器。
-
-如果 diarization 阶段报错：
-
-```text
-hf_hub_download() got an unexpected keyword argument 'use_auth_token'
-```
-
-这是 pyannote/speechbrain 旧调用参数与新版 `huggingface_hub` API 不兼容。
-`requirements/gpu.txt` 已将 `huggingface-hub` 限制在 `<1.0`，项目运行时也会把
-旧参数 `use_auth_token` 转换为新参数 `token` 作为兜底。修改后需要重建 GPU
-镜像。
-
-宿主机需要可用的 NVIDIA 驱动、Docker 和 NVIDIA Container Toolkit。当前 Codex
-开发容器不一定直接暴露 Docker 或 GPU 设备。
-
-Compose 默认可通过 `YOUDUB_UID`/`YOUDUB_GID` 指定容器用户，避免 bind mount 的
-运行时文件变成 root 所有。应用容器启动时会先修正 `/data/videos`、`/data/tasks`、
-`/data/logs`、`/data/config`、`/data/cookies`、`/models` 和缓存目录归属，然后降权
-为 `YOUDUB_UID:YOUDUB_GID` 运行 Web UI。`scripts/gpu_smoke.sh` 会自动使用当前项目
-目录 owner；手动执行 `docker compose` 时，如果宿主机工作区 owner 不同，可以显式
-设置这两个变量。
-
-不安装包、直接从源码运行时，需要设置：
+服务运行后，可以在 GPU 容器中调用 `youdub`：
 
 ```bash
-export PYTHONPATH="$PWD/src"
+docker compose -f compose.gpu.yml exec youdub-gpu youdub doctor
 ```
 
-## 运行时路径
+### 从 URL 创建任务
 
-容器默认路径：
+把可选的 Netscape 格式 cookies 文件放到 `data/cookies/cookies.txt`，然后执行：
 
-- `YOUDUB_ROOT=/data/videos`
-- `YOUDUB_TASKS_PATH=/data/tasks/tasks.json`
-- `YOUDUB_LOG_DIR=/data/logs`
-- `YOUDUB_MODELS_DIR=/models`
-- `YOUDUB_CONFIG_PATH=/data/config/youdub.json`
-- `YOUDUB_COOKIES_PATH=/data/cookies/cookies.txt`
-- `YOUDUB_YTDLP_PROXY=`
-- `YOUDUB_DOWNLOAD_MAX_HEIGHT=0`
-- `YOUDUB_TRANSLATION_SSH_HOST=`
-- `YOUDUB_TRANSLATION_SSH_LOCAL_PORT=1081`
-- `YOUDUB_TRANSLATION_PROXY=`
-- `YOUDUB_WEB_USERNAME=`
-- `YOUDUB_WEB_PASSWORD=`
-- `HF_HOME=/cache/huggingface`
-- `NLTK_DATA=/cache/nltk`
-- `TORCH_HOME=/cache/torch`
+```bash
+docker compose -f compose.gpu.yml exec youdub-gpu \
+  youdub create-url-task \
+  --url "https://www.youtube.com/watch?v=6o68Fg2-bhM" \
+  --cookies /data/cookies/cookies.txt
+```
 
-本地开发时可以改成工作区路径：
+不使用 cookies 时可以传入 `--no-cookies`。`--proxy`、`--max-height` 和 `--force-download` 可用于覆盖当前任务的下载行为。
+
+better-youdub 只处理用户显式提供的单个 URL，不会读取浏览器 cookies、自动登录或刷新 cookies。
+
+### 从本地视频创建任务
+
+将媒体放到 `data/samples/` 后执行：
+
+```bash
+docker compose -f compose.gpu.yml exec youdub-gpu \
+  youdub create-task \
+  --source /data/samples/input.mp4 \
+  --title "Example video"
+```
+
+如果已有 yt-dlp 元信息和封面，可以保留完整的下载上下文：
+
+```bash
+docker compose -f compose.gpu.yml exec youdub-gpu \
+  youdub create-download-task \
+  --source /data/samples/input.mp4 \
+  --info /data/samples/download.info.json \
+  --cover /data/samples/download.webp
+```
+
+### 执行流水线步骤
+
+创建任务后，从命令输出中取得 `id`：
+
+```bash
+docker compose -f compose.gpu.yml exec youdub-gpu \
+  youdub run-task <task-id> --step extract-audio
+
+docker compose -f compose.gpu.yml exec youdub-gpu \
+  youdub run-task <task-id> --step separate-audio
+
+docker compose -f compose.gpu.yml exec youdub-gpu \
+  youdub run-task <task-id> --step transcribe
+```
+
+其余主链路步骤为 `translate`、`tts`、`transcribe-tts`、`subtitle`、`synthesize` 和 `prepare-publish`。识别阶段也可以拆为 `transcribe-whisper`、`transcribe-align` 和 `transcribe-diarize`，用于失败后从中间产物继续执行。
+
+查看任务状态：
+
+```bash
+docker compose -f compose.gpu.yml exec youdub-gpu \
+  youdub show-task <task-id>
+```
+
+### Bilibili 发布
+
+先使用 dry-run 校验发布包和文件路径：
+
+```bash
+docker compose -f compose.gpu.yml exec youdub-gpu \
+  youdub run-task <task-id> --step publish-bilibili --publish-dry-run
+```
+
+真实上传需要在容器启动前配置 `BILI_SESSDATA`、`BILI_BILI_JCT` 等参数，并显式确认：
+
+```bash
+docker compose -f compose.gpu.yml exec youdub-gpu \
+  youdub run-task <task-id> --step publish-bilibili --publish-confirm
+```
+
+## 流水线与产物
+
+每个任务都有独立目录。主要步骤和产物如下：
+
+| 步骤 | 主要输入 | 主要产物 |
+| --- | --- | --- |
+| 下载或导入 | URL / 本地媒体 | `download.mp4`、`download.info.json`、`download.<image>` |
+| `extract-audio` | `download.mp4` | `audio.wav` |
+| `separate-audio` | `audio.wav` | `audio_vocals.wav`、`audio_instruments.wav` |
+| `transcribe` | `audio_vocals.wav` | `transcript.whisper.json`、`transcript.aligned.json`、`transcript.diarized.json`、`transcript.json` |
+| `translate` | 视频元信息、`transcript.json` | `summary.json`、`translation.context.json`、`translation.segments.json`、`translation.json` |
+| `tts` | 译文、人声参考 | `segments/tts/`、`audio_tts.wav`、`audio_tts.timings.json` |
+| `transcribe-tts` | `audio_tts.wav` | `audio_tts.transcript.json` 及阶段产物 |
+| `subtitle` | 标准译文、TTS 转写 | `subtitles.segments.json`、`subtitles.srt` |
+| `inspect-tts` | TTS、转写和字幕信息 | `tts.quality.json`、`tts.redub.plan.json` |
+| `redub-tts` | 重配计划 | 更新后的 TTS 片段、`tts.redub.history.jsonl` |
+| `synthesize` | 原视频、配音、伴奏、字幕 | `audio_mixed.m4a`、`video.mp4` |
+| `prepare-publish` | 最终视频、摘要、下载元信息 | `publish.json`、`publish.md`、`cover.jpg` |
+| `publish-bilibili` | 发布包、平台凭证 | `bilibili.dry-run.json` 或 `bilibili.json` |
+
+带有下载元信息的任务会按视频身份复用稳定目录，默认形式为：
+
+```text
+YOUDUB_ROOT/<author>/<upload_date> <title>/
+```
+
+重复导入或下载同一视频时会复用已有任务和产物，减少重复下载、模型计算和翻译请求。
+
+## 配置
+
+项目有三层主要配置来源：
+
+1. `data/config/youdub.json` 保存服务地址、密钥和全局翻译提示词。
+2. 环境变量覆盖运行路径和全局默认值。
+3. Web UI 或 CLI 参数覆盖单个任务的实际运行参数。
+
+常用环境变量如下。容器运行时的主要默认值见 [`.env.example`](./.env.example)，其余任务级参数可以在 Web UI 中查看和覆盖。
+
+| 类别 | 环境变量 | 用途 |
+| --- | --- | --- |
+| 运行目录 | `YOUDUB_ROOT`、`YOUDUB_TASKS_PATH`、`YOUDUB_LOG_DIR` | 任务产物、状态和日志路径 |
+| 模型与配置 | `YOUDUB_MODELS_DIR`、`YOUDUB_CONFIG_PATH` | 模型目录和 JSON 配置文件 |
+| 下载 | `YOUDUB_COOKIES_PATH`、`YOUDUB_YTDLP_PROXY`、`YOUDUB_DOWNLOAD_MAX_HEIGHT` | cookies、代理和默认清晰度 |
+| Web | `YOUDUB_WEB_USERNAME`、`YOUDUB_WEB_PASSWORD`、`YOUDUB_WEB_PORT` | 登录和宿主机端口 |
+| WhisperX | `YOUDUB_WHISPER_MODEL`、`YOUDUB_WHISPER_DEVICE`、`YOUDUB_WHISPER_DIARIZATION` | 识别模型、设备和说话人分离 |
+| 翻译 | `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` | OpenAI 兼容接口 |
+| 翻译网络 | `YOUDUB_TRANSLATION_PROXY`、`YOUDUB_TRANSLATION_SSH_HOST` | HTTP/SOCKS 代理或 SSH 动态转发 |
+| TTS | `YOUDUB_TTS_MODEL`、`YOUDUB_TTS_MODEL_DIR`、`YOUDUB_TTS_CACHE_MODEL` | VoxCPM2 模型、离线路径和缓存策略 |
+| 合成 | `YOUDUB_BURN_SUBTITLES`、`YOUDUB_SYNTHESIS_CRF` | 字幕烧录和编码质量 |
+| 发布 | `BILI_SESSDATA`、`BILI_BILI_JCT`、`BILI_PROXY` | Bilibili 凭证和代理 |
+
+`YOUDUB_DOWNLOAD_MAX_HEIGHT=0` 表示不限制下载高度。首次调试建议先限制为 `720` 或使用短视频，以减少下载、模型运行和合成时间。
+
+Docker 启动时，如果配置了 `translation.ssh_host` 或 `YOUDUB_TRANSLATION_SSH_HOST`，入口脚本会建立 SSH 动态转发，并将翻译代理指向本地 SOCKS 端口。Compose 默认把 `${HOME}/.ssh` 以只读方式挂载到容器；非默认 SSH 目录可通过 `YOUDUB_SSH_DIR` 指定。
+
+## 任务执行模型
+
+- `tasks.json` 使用原子替换写入，避免进程中断留下半写文件。
+- 每个任务目录使用 `.task.lock` 做非阻塞互斥，同一任务不能同时下载或运行多个步骤。
+- Web 后台将普通步骤、GPU 步骤和 TTS 步骤分配到不同执行器。
+- TTS 和局部重配使用单 worker 串行执行，避免共享模型并发占用显存。
+- GPU 识别与分离步骤最多并发 3 个，普通步骤最多并发 5 个。
+- 当前存储锁和写入串行化只保证单 Web 进程内的一致性，不支持多个 Web 实例共享同一个 `tasks.json`。
+
+远程低带宽场景下，任务列表只读取分页摘要，任务详情按需加载；产物区提供下载链接，但不会自动内嵌播放最终视频。
+
+## 本地开发
+
+基础功能要求 Python 3.10 或更高版本。推荐使用虚拟环境：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
+设置本地运行路径：
 
 ```bash
 export YOUDUB_ROOT="$PWD/data/videos"
 export YOUDUB_TASKS_PATH="$PWD/data/tasks/tasks.json"
 export YOUDUB_LOG_DIR="$PWD/data/logs"
+export YOUDUB_MODELS_DIR="$PWD/models"
 export YOUDUB_CONFIG_PATH="$PWD/data/config/youdub.json"
 export YOUDUB_COOKIES_PATH="$PWD/data/cookies/cookies.txt"
 ```
+
+运行 CLI 或 Web UI：
+
+```bash
+youdub doctor
+youdub-web
+```
+
+源码运行的 Web UI 默认监听 `0.0.0.0:8000`。基础 Python 依赖不包含 GPU 栈；开发 Demucs、WhisperX 或 VoxCPM2 相关功能时，应使用 GPU 镜像保持 PyTorch/CUDA 版本一致。
+
+### 测试
+
+```bash
+PYTHONPATH="$PWD/src" python3 -m pytest -q
+bash -n scripts/*.sh
+docker compose -f compose.dev.yml config
+docker compose -f compose.gpu.yml config
+```
+
+使用自行准备的本地短视频运行基础 smoke test：
+
+```bash
+scripts/smoke.sh /path/to/input.mp4
+```
+
+GPU 环境检查和分层 smoke test：
+
+```bash
+docker compose -f compose.gpu.yml run --rm youdub-gpu scripts/check_gpu.sh
+scripts/gpu_smoke.sh /data/samples/input.mp4
+```
+
+`gpu_smoke.sh` 默认验证容器依赖、任务创建、音频提取和 Demucs。可以通过 `YOUDUB_SMOKE_TRANSCRIBE=1`、`YOUDUB_SMOKE_TRANSLATE=1`、`YOUDUB_SMOKE_TTS=1` 等开关逐层扩展验证范围，避免每次测试都下载模型或消耗翻译 token。
+
+提交修改时，请同步更新受影响的 README、专题文档、依赖清单和 smoke 命令，并确保没有把运行数据或凭证加入 Git。
+
+## 参与贡献
+
+提交 issue 时，请提供可复现步骤、预期行为、实际错误和运行环境；涉及 GPU 问题时，同时附上 GPU 型号、驱动版本以及 `scripts/check_gpu.sh` 的相关输出。
+
+提交 pull request 前请：
+
+1. 将修改限制在一个清晰的问题或能力范围内。
+2. 为行为变化补充或更新测试。
+3. 同步更新受影响的配置示例、README 和专题文档。
+4. 运行基础测试，并在 PR 中注明未能执行的 Docker、GPU 或外部服务验证。
+
+## 已知限制
+
+- 项目仍在迁移期，暂不保证任务 JSON 和内部 API 向后兼容。
+- 当前部署模型是单 Web 实例，不提供分布式队列或数据库事务。
+- GPU 镜像体积较大，模型首次下载和首次推理需要较长时间。
+- 自动 cookie 获取、浏览器登录和 cookie 刷新不在当前实现范围内。
+- Web UI 不提供视频内嵌预览，产物需要按需下载。
+- 平台上传依赖第三方平台接口，接口变化可能导致上传失败。
+
+## 安全与内容合规
+
+- 只处理你有权下载、翻译、配音和发布的内容。
+- 不要把 Web UI 直接暴露到公网；使用 Basic Auth、SSH 隧道或受控反向代理。
+- cookies、API key、Hugging Face token 和 Bilibili 凭证只能通过本地配置或环境变量注入。
+- 真实上传必须先检查 `publish.json`、封面和最终视频，并使用显式确认入口。
+- 日志和任务产物可能包含视频标题、源链接和转写文本，备份或共享前应按敏感数据处理。
+
+## 文档
+
+- [迁移与改造 SOP](./docs/migration-sop.md)
+- [容器部署策略](./docs/container-strategy.md)
+- [依赖与 Dockerfile 同步规范](./docs/dependency-sync.md)
+- [翻译阶段设计](./docs/translation-design.md)
+- [任务并发与发布审计](./docs/task-concurrency-and-publish-audit.md)
+- [TTS 质检与局部重配设计](./docs/tts-redub-plan.md)
+
+## 参考项目
+
+- [YouDub-webui](https://github.com/liuzhao1225/YouDub-webui)：Web UI、任务交互和界面组织方式参考
+- [WhisperX](https://github.com/m-bain/whisperX)：语音识别、对齐和说话人分离
+- [Demucs](https://github.com/facebookresearch/demucs)：人声与伴奏分离
+- [VoxCPM](https://github.com/OpenBMB/VoxCPM)：语音生成模型与运行实现
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp)：媒体下载与元信息提取
+
+## 许可证
+
+仓库当前未包含独立的 `LICENSE` 文件。在项目明确发布许可证之前，代码使用和再分发遵循默认版权规则。第三方依赖和模型仍分别受其自身许可证与模型条款约束。

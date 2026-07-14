@@ -2,13 +2,13 @@
 
 ## 结论
 
-当前容器只建议作为“迁移规划和代码开发容器”，不建议作为最终项目运行容器。最终项目应再构建一个独立的 YouDub app 容器。
+当前容器只建议作为“迁移规划和代码开发容器”，不建议作为最终项目运行容器。最终项目应再构建一个独立的 better-youdub app 容器。
 
 原因：
 
 - 当前 `/workspace/Dockerfile` 是 Codex 工作环境镜像，不是应用运行镜像。
 - 当前镜像包含 Codex、Node.js、认证配置和明文密钥痕迹，运行面过大。
-- YouDub 运行时需要 CUDA、FFmpeg、PyTorch、WhisperX、Demucs、VoxCPM2 等专用依赖，应独立建镜像。
+- better-youdub 运行时需要 CUDA、FFmpeg、PyTorch、WhisperX、Demucs、VoxCPM2 等专用依赖，应独立建镜像。
 - 应用镜像需要稳定、可复现、可发布；开发容器可以保留工具和临时状态。
 
 ## 推荐容器分层

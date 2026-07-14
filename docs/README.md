@@ -1,6 +1,6 @@
-# YouDub2026 Linux Migration Docs
+# better-youdub Migration Docs
 
-本目录用于规划从 `/tmp/YouDub2026` 的 Windows 版项目迁移到 Linux + 容器部署的新项目。当前阶段只做评估和 SOP，不修改旧仓库代码。
+本目录记录 better-youdub 从 `/tmp/YouDub2026` Windows 版工作流迁移到 Linux + 容器部署的评估、设计和实施规范。旧仓库只作为迁移参考，不直接修改其代码。
 
 ## 文档索引
 

@@ -60,6 +60,9 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
         assert response.status_code == 200
 
     index = client.get("/").text
+    assert "<title>better-youdub</title>" in index
+    assert "<h1>better-youdub</h1>" in index
+    assert client.app.title == "better-youdub WebUI"
     assert 'id="workflowConfigButton"' in index
     assert 'id="terminateButton"' in index
     assert 'id="systemLine"' in index
@@ -283,7 +286,7 @@ def test_web_basic_auth_protects_static_and_api(monkeypatch, tmp_path: Path) -> 
 
     unauthenticated = client.get("/api/health")
     assert unauthenticated.status_code == 401
-    assert unauthenticated.headers["www-authenticate"] == 'Basic realm="YouDub"'
+    assert unauthenticated.headers["www-authenticate"] == 'Basic realm="better-youdub"'
     assert client.get("/", headers=_basic_auth("alice", "wrong")).status_code == 401
     assert client.get("/api/health", headers=_basic_auth("alice", "secret")).json() == {"status": "ok"}
     assert client.get("/", headers=_basic_auth("alice", "secret")).status_code == 200

@@ -137,7 +137,7 @@ class YtdlpSettingsUpdate(BaseModel):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="YouDub WebUI")
+    app = FastAPI(title="better-youdub WebUI")
     app.add_middleware(GZipMiddleware, minimum_size=1024)
     static_dir = Path(__file__).resolve().parent / "web_static"
     _install_auth_middleware(app)
@@ -500,7 +500,7 @@ def _auth_required_response() -> Response:
     return Response(
         "Authentication required",
         status_code=401,
-        headers={"WWW-Authenticate": 'Basic realm="YouDub"'},
+        headers={"WWW-Authenticate": 'Basic realm="better-youdub"'},
     )
 
 

@@ -5,7 +5,7 @@ services:
       dockerfile: docker/app.gpu.Dockerfile
       args:
         PYTORCH_BASE_IMAGE: ${PYTORCH_BASE_IMAGE:-pytorch/pytorch:2.8.0-cuda12.6-cudnn9-runtime}
-    image: youdub-linux:gpu
+    image: better-youdub:gpu
     working_dir: /app
     gpus: all
     extra_hosts:
