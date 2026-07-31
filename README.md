@@ -27,7 +27,7 @@ FFmpeg -> Demucs -> WhisperX -> OpenAI 兼容翻译接口
 ```
 
 - 支持 URL、本地文件和浏览器上传三种任务来源
-- 使用 `yt-dlp` 下载单个视频，支持 Netscape `cookies.txt`、代理和清晰度限制
+- 使用 `yt-dlp` 下载单个视频，支持 Netscape `cookies.txt`、自动网络切换和清晰度限制
 - 使用 Demucs 分离人声与伴奏
 - 使用 WhisperX 完成转写、词级对齐和说话人分离
 - 通过 OpenAI 兼容接口生成视频摘要、术语上下文和分段译文
@@ -38,7 +38,7 @@ FFmpeg -> Demucs -> WhisperX -> OpenAI 兼容翻译接口
 - 生成标题、简介、标签、封面等发布材料
 - 提供 Bilibili dry-run 和需要显式确认的真实上传入口
 - 使用原子 JSON 任务存储、步骤级状态和任务目录锁支持失败恢复
-- 提供 FastAPI Web UI、命令行工具以及 CPU/GPU Docker 镜像
+- 提供带系统网络健康页的 FastAPI Web UI、命令行工具以及 CPU/GPU Docker 镜像
 
 ## 迁移状态
 
@@ -46,8 +46,8 @@ FFmpeg -> Demucs -> WhisperX -> OpenAI 兼容翻译接口
 | --- | --- | --- |
 | Linux 路径与配置 | 可用 | 运行目录、密钥和模型路径均可配置 |
 | 任务存储与 CLI | 可用 | 支持任务创建、查询和单步执行 |
-| Web UI | 可用 | 支持任务管理、参数配置、完整链路和产物下载 |
-| 视频下载 | 可用 | 单 URL 下载、本地 cookies、代理和 Deno EJS runtime |
+| Web UI | 可用 | 支持任务管理、参数配置、网络健康监测、完整链路和产物下载 |
+| 视频下载 | 可用 | 单 URL 下载、本地 cookies、直连/代理自动切换和 Deno EJS runtime |
 | 音频分离与识别 | 可用 | Demucs、WhisperX 和可恢复的识别子步骤 |
 | 翻译、TTS 与字幕 | 可用 | OpenAI 兼容接口、VoxCPM2、TTS 复听和局部重配 |
 | 视频合成与发布包 | 可用 | 混音、字幕烧录、封面和发布元数据 |
@@ -133,10 +133,13 @@ key、cookies、任务状态、媒体、模型缓存或平台凭证提交到仓�
 
 如需说话人分离，还需要使用同一个 Hugging Face 账号接受 WhisperX 当前依赖的 pyannote 模型协议。具体模型要求以 [WhisperX 文档](https://github.com/m-bain/whisperX) 为准。不需要说话人分离时，可以在任务参数中关闭 diarization。
 
-`network.proxy` 是任务级通用代理，下载、翻译、Hugging Face 模型和 Bilibili 上传都会
-复用它。配置 `network.ssh_host` 后，容器启动时会建立 SSH 动态转发，并将本地 SOCKS
-地址作为新任务的默认代理。旧配置中的 `translation.proxy` 和
-`translation.ssh_*` 仍可兼容读取。pyannote 模型固定缓存到
+`network.proxy` 是系统级候选代理。下载、翻译、Hugging Face 模型和 Bilibili 上传默认
+先尝试直连；直连失败会立即切换到代理，代理失败则切回直连，并按服务记住最近成功的
+链路。任务配置不再保存或覆盖代理。Web UI 的“网络”页面会按需检测两条链路并显示服务
+状态、延迟和当前首选，但不会返回代理地址。配置 `network.ssh_host` 后，容器启动时会
+建立 SSH 动态转发，并把本地 SOCKS 地址设置为系统候选代理。旧系统配置中的
+`translation.proxy` 和 `translation.ssh_*` 仍可兼容读取；旧任务 JSON 中的代理字段会被
+忽略。pyannote 模型固定缓存到
 `/cache/huggingface/pyannote` 挂载目录，容器重建不会重新下载；默认关闭 Hugging Face
 Xet 客户端，以确保 SOCKS 代理能覆盖模型权重下载。WebUI 会在 Hugging Face 缓存的
 `refs/main` 指向完整 VoxCPM2 快照时，自动把该快照设为“本地模型目录”默认值，避免
@@ -251,7 +254,7 @@ docker compose -f compose.gpu.yml exec youdub-gpu \
   --cookies /data/cookies/cookies.txt
 ```
 
-不使用 cookies 时可以传入 `--no-cookies`。`--proxy`、`--max-height` 和 `--force-download` 可用于覆盖当前任务的下载行为。
+不使用 cookies 时可以传入 `--no-cookies`。`--max-height` 和 `--force-download` 可用于覆盖当前任务的下载行为；网络链路由系统自动调度，不提供任务级 `--proxy` 参数。
 
 better-youdub 只处理用户显式提供的单个 URL，不会读取浏览器 cookies、自动登录或刷新 cookies。
 
@@ -350,7 +353,7 @@ YOUDUB_ROOT/<author>/<upload_date> <title>/
 
 1. `data/config/youdub.json` 保存服务地址、密钥和全局翻译提示词。
 2. 环境变量覆盖运行路径和全局默认值。
-3. Web UI 或 CLI 参数覆盖单个任务的实际运行参数。
+3. Web UI 或 CLI 参数覆盖单个任务的实际运行参数，但不能覆盖系统网络代理。
 
 常用环境变量如下。容器运行时的主要默认值见 [`.env.example`](./.env.example)，其余任务级参数可以在 Web UI 中查看和覆盖。
 
@@ -358,18 +361,18 @@ YOUDUB_ROOT/<author>/<upload_date> <title>/
 | --- | --- | --- |
 | 运行目录 | `YOUDUB_ROOT`、`YOUDUB_TASKS_PATH`、`YOUDUB_LOG_DIR` | 任务产物、状态和日志路径 |
 | 模型与配置 | `YOUDUB_MODELS_DIR`、`YOUDUB_CONFIG_PATH` | 模型目录和 JSON 配置文件 |
-| 下载 | `YOUDUB_COOKIES_PATH`、`YOUDUB_YTDLP_PROXY`、`YOUDUB_DOWNLOAD_MAX_HEIGHT` | cookies、代理和默认清晰度 |
+| 下载 | `YOUDUB_COOKIES_PATH`、`YOUDUB_YTDLP_PROXY`、`YOUDUB_DOWNLOAD_MAX_HEIGHT` | cookies、兼容的下载候选代理和默认清晰度 |
 | Web | `YOUDUB_WEB_USERNAME`、`YOUDUB_WEB_PASSWORD`、`YOUDUB_WEB_PORT` | 登录和宿主机端口 |
 | WhisperX | `YOUDUB_WHISPER_MODEL`、`YOUDUB_WHISPER_DEVICE`、`YOUDUB_WHISPER_DIARIZATION` | 识别模型、设备和说话人分离 |
 | 翻译 | `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` | OpenAI 兼容接口 |
-| 任务网络 | `YOUDUB_NETWORK_PROXY`、`YOUDUB_NETWORK_SSH_HOST` | 任务级 HTTP/SOCKS 代理或 SSH 动态转发 |
+| 系统网络 | `YOUDUB_NETWORK_PROXY`、`YOUDUB_NETWORK_SSH_HOST` | 自动调度使用的 HTTP/SOCKS 候选代理或 SSH 动态转发 |
 | TTS | `YOUDUB_TTS_MODEL`、`YOUDUB_TTS_MODEL_DIR`、`YOUDUB_TTS_CACHE_MODEL` | VoxCPM2 模型、离线路径和缓存策略 |
 | 合成 | `YOUDUB_BURN_SUBTITLES`、`YOUDUB_SYNTHESIS_CRF` | 字幕烧录和编码质量 |
 | 发布 | `BILI_SESSDATA`、`BILI_BILI_JCT`、`BILI_PROXY` | Bilibili 凭证和代理 |
 
 `YOUDUB_DOWNLOAD_MAX_HEIGHT=0` 表示不限制下载高度。首次调试建议先限制为 `720` 或使用短视频，以减少下载、模型运行和合成时间。
 
-Docker 启动时，如果配置了 `network.ssh_host` 或 `YOUDUB_NETWORK_SSH_HOST`，入口脚本会建立 SSH 动态转发，并将任务网络代理指向本地 SOCKS 端口。Compose 默认把 `${HOME}/.ssh` 以只读方式挂载到容器；非默认 SSH 目录可通过 `YOUDUB_SSH_DIR` 指定。旧的 `translation.ssh_host` 和 `YOUDUB_TRANSLATION_SSH_HOST` 仍可兼容读取。
+Docker 启动时，如果配置了 `network.ssh_host` 或 `YOUDUB_NETWORK_SSH_HOST`，入口脚本会建立 SSH 动态转发，并将系统候选代理指向本地 SOCKS 端口。Compose 默认把 `${HOME}/.ssh` 以只读方式挂载到容器；非默认 SSH 目录可通过 `YOUDUB_SSH_DIR` 指定。旧的 `translation.ssh_host` 和 `YOUDUB_TRANSLATION_SSH_HOST` 仍可兼容读取。
 
 ## 任务执行模型
 
@@ -380,7 +383,7 @@ Docker 启动时，如果配置了 `network.ssh_host` 或 `YOUDUB_NETWORK_SSH_HO
 - GPU 识别与分离步骤最多并发 3 个，普通步骤最多并发 5 个。
 - 当前存储锁和写入串行化只保证单 Web 进程内的一致性，不支持多个 Web 实例共享同一个 `tasks.json`。
 
-远程低带宽场景下，任务列表只读取分页摘要，任务详情按需加载；产物区提供下载链接，但不会自动内嵌播放最终视频。
+远程低带宽场景下，任务列表只读取分页摘要，任务详情按需加载；产物区提供下载链接，但不会自动内嵌播放最终视频。网络页仅传输小型 JSON 状态，离开页面或浏览器隐藏时停止探测。
 
 ## 本地开发
 

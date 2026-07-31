@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .network import TRANSLATION_SERVICE, NetworkRoute, network_router
+
 
 SUMMARY_OUTPUT = "summary.json"
 CONTEXT_OUTPUT = "translation.context.json"
@@ -671,18 +673,55 @@ def _create_openai_client(config: TranslationConfig) -> Any:
             "The openai package is required for translation. Add it to the runtime dependencies."
         ) from exc
 
-    kwargs: dict[str, Any] = {"api_key": config.api_key}
-    if config.base_url:
-        kwargs["base_url"] = config.base_url
-    if config.proxy:
+    return _RoutedOpenAIClient(config, OpenAI)
+
+
+class _RoutedOpenAIClient:
+    def __init__(self, config: TranslationConfig, client_factory: Any) -> None:
+        self._config = config
+        self._client_factory = client_factory
+        self._clients: dict[str, Any] = {}
+        self.chat = _RoutedChat(self)
+
+    def create_completion(self, **kwargs: Any) -> Any:
+        return network_router.run(
+            TRANSLATION_SERVICE,
+            self._config.proxy,
+            lambda route: self._client_for_route(route).chat.completions.create(**kwargs),
+        )
+
+    def _client_for_route(self, route: NetworkRoute) -> Any:
+        client = self._clients.get(route.name)
+        if client is not None:
+            return client
         try:
             import httpx
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
-                "The httpx package is required to use a translation proxy."
+                "The httpx package is required for automatic translation network routing."
             ) from exc
-        kwargs["http_client"] = httpx.Client(proxy=config.proxy)
-    return OpenAI(**kwargs)
+        client_kwargs: dict[str, Any] = {
+            "api_key": self._config.api_key,
+            "http_client": httpx.Client(proxy=route.proxy, trust_env=False),
+        }
+        if self._config.base_url:
+            client_kwargs["base_url"] = self._config.base_url
+        client = self._client_factory(**client_kwargs)
+        self._clients[route.name] = client
+        return client
+
+
+class _RoutedChat:
+    def __init__(self, client: _RoutedOpenAIClient) -> None:
+        self.completions = _RoutedCompletions(client)
+
+
+class _RoutedCompletions:
+    def __init__(self, client: _RoutedOpenAIClient) -> None:
+        self._client = client
+
+    def create(self, **kwargs: Any) -> Any:
+        return self._client.create_completion(**kwargs)
 
 
 def _chat_request_kwargs(

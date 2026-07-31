@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .gpu import cleanup_gpu_memory
-from .hf_runtime import huggingface_download_context, prepare_huggingface_environment
+from .hf_runtime import prepare_huggingface_environment, run_huggingface_download
 
 
 WHISPER_OUTPUT = "transcript.whisper.json"
@@ -353,8 +353,9 @@ def run_whisper(
     model = None
     result = None
     try:
-        with huggingface_download_context(config.proxy):
-            model = whisperx.load_model(
+        model = run_huggingface_download(
+            config.proxy,
+            lambda: whisperx.load_model(
                 model_name,
                 **_whisperx_load_model_kwargs(
                     whisperx.load_model,
@@ -362,7 +363,8 @@ def run_whisper(
                     device=device,
                     config=config,
                 ),
-            )
+            ),
+        )
         result = _transcribe_with_options(model, audio_path, config)
         if result.get("language") == "nn":
             raise RuntimeError(f"No language detected in {audio_path}")
@@ -398,11 +400,13 @@ def run_align(
     metadata = None
     aligned = None
     try:
-        with huggingface_download_context(config.proxy):
-            align_model, metadata = whisperx.load_align_model(
+        align_model, metadata = run_huggingface_download(
+            config.proxy,
+            lambda: whisperx.load_align_model(
                 language_code=language,
                 device=device,
-            )
+            ),
+        )
         aligned = whisperx.align(
             result["segments"],
             align_model,
@@ -442,8 +446,10 @@ def run_diarize(task_dir: Path, config: WhisperXConfig) -> Path:
                 )
 
             with _DIARIZATION_LOCK:
-                with huggingface_download_context(config.proxy):
-                    pipeline = DiarizationPipeline(use_auth_token=token, device=device)
+                pipeline = run_huggingface_download(
+                    config.proxy,
+                    lambda: DiarizationPipeline(use_auth_token=token, device=device),
+                )
                 diarize_segments = pipeline(
                     str(audio_path),
                     min_speakers=config.min_speakers,

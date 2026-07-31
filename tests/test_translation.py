@@ -22,6 +22,7 @@ from youdub.translation import (
     build_translation_entries,
     split_translation_text,
 )
+from youdub.network import network_router
 
 
 def _response(content: str):
@@ -61,16 +62,28 @@ def test_split_translation_text_prefers_punctuation() -> None:
     ]
 
 
-def test_create_openai_client_uses_translation_proxy(monkeypatch) -> None:
-    captured = {}
+def test_create_openai_client_falls_back_from_direct_to_system_proxy(monkeypatch) -> None:
+    captured = {"http_clients": [], "openai": []}
+    proxy = "socks5h://127.0.0.1:1081"
 
     class FakeOpenAI:
         def __init__(self, **kwargs):
-            captured["openai"] = kwargs
+            captured["openai"].append(kwargs)
+            configured_proxy = kwargs["http_client"].kwargs["proxy"]
+
+            class Completions:
+                @staticmethod
+                def create(**request):
+                    if configured_proxy is None:
+                        raise RuntimeError("direct unavailable")
+                    return request
+
+            self.chat = SimpleNamespace(completions=Completions())
 
     class FakeHttpClient:
         def __init__(self, **kwargs):
-            captured["http_client"] = kwargs
+            self.kwargs = kwargs
+            captured["http_clients"].append(kwargs)
 
     monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
     monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(Client=FakeHttpClient))
@@ -80,15 +93,21 @@ def test_create_openai_client_uses_translation_proxy(monkeypatch) -> None:
             api_key="sk-test",
             base_url="https://api.example.test/v1",
             model="gpt-test",
-            proxy="socks5h://127.0.0.1:1081",
+            proxy=proxy,
         )
     )
 
-    assert isinstance(client, FakeOpenAI)
-    assert captured["http_client"] == {"proxy": "socks5h://127.0.0.1:1081"}
-    assert captured["openai"]["api_key"] == "sk-test"
-    assert captured["openai"]["base_url"] == "https://api.example.test/v1"
-    assert isinstance(captured["openai"]["http_client"], FakeHttpClient)
+    network_router.clear()
+    response = client.chat.completions.create(model="gpt-test")
+
+    assert response == {"model": "gpt-test"}
+    assert captured["http_clients"] == [
+        {"proxy": None, "trust_env": False},
+        {"proxy": proxy, "trust_env": False},
+    ]
+    assert captured["openai"][0]["api_key"] == "sk-test"
+    assert captured["openai"][0]["base_url"] == "https://api.example.test/v1"
+    assert network_router.snapshot(proxy)["services"][1]["preferred_route"] == "proxy"
 
 
 def test_split_translation_text_does_not_emit_punctuation_only_parts() -> None:

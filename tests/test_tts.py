@@ -4,6 +4,7 @@ import types
 from pathlib import Path
 
 from youdub import tts
+from youdub.network import network_router
 from youdub.tts import (
     TTSConfig,
     choose_fallback_reference,
@@ -39,7 +40,7 @@ class _FakeModel:
         return np.ones(800, dtype=np.float32) * 0.1
 
 
-def test_load_voxcpm_model_uses_task_proxy_for_model_access(monkeypatch) -> None:
+def test_load_voxcpm_model_tries_direct_before_system_proxy(monkeypatch) -> None:
     proxy = "socks5h://127.0.0.1:1081"
     captured = {}
     factories = []
@@ -63,6 +64,7 @@ def test_load_voxcpm_model_uses_task_proxy_for_model_access(monkeypatch) -> None
     )
     monkeypatch.setattr(tts, "_MODEL", None)
     monkeypatch.setattr(tts, "_MODEL_KEY", None)
+    network_router.clear()
 
     model = tts.load_voxcpm_model(TTSConfig(model="openbmb/VoxCPM2", load_denoiser=True, proxy=proxy))
 
@@ -70,7 +72,7 @@ def test_load_voxcpm_model_uses_task_proxy_for_model_access(monkeypatch) -> None
     assert captured == {
         "model_source": "openbmb/VoxCPM2",
         "load_denoiser": True,
-        "proxies": {"http": proxy, "https": proxy},
+        "proxies": {},
     }
 
 

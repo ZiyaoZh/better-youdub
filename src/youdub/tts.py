@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .gpu import cleanup_gpu_memory
-from .hf_runtime import huggingface_download_context
+from .hf_runtime import run_huggingface_download
 
 TRANSLATION_INPUT = "translation.json"
 VOCALS_INPUT = "audio_vocals.wav"
@@ -409,12 +409,14 @@ def load_voxcpm_model(config: TTSConfig):
         os.environ.setdefault("HF_TOKEN", config.hf_token)
         os.environ.setdefault("HF_READ_TOKEN", config.hf_token)
 
-    with huggingface_download_context(config.proxy):
+    def load_model():
         try:
             from voxcpm import VoxCPM
         except ImportError as exc:
             raise ImportError("The voxcpm package is required for TTS. Add it to GPU dependencies.") from exc
-        _MODEL = VoxCPM.from_pretrained(model_source, load_denoiser=config.load_denoiser)
+        return VoxCPM.from_pretrained(model_source, load_denoiser=config.load_denoiser)
+
+    _MODEL = run_huggingface_download(config.proxy, load_model)
     _MODEL_KEY = model_key
     return _MODEL
 

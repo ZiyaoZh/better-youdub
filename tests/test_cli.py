@@ -188,8 +188,6 @@ def test_create_url_task_parser_accepts_download_options() -> None:
             "https://example.test/watch?v=demo123",
             "--cookies",
             "/tmp/cookies.txt",
-            "--proxy",
-            "http://127.0.0.1:7890",
             "--max-height",
             "720",
             "--force-download",
@@ -198,7 +196,7 @@ def test_create_url_task_parser_accepts_download_options() -> None:
 
     assert args.url == "https://example.test/watch?v=demo123"
     assert args.cookies == Path("/tmp/cookies.txt")
-    assert args.proxy == "http://127.0.0.1:7890"
+    assert not hasattr(args, "proxy")
     assert args.max_height == 720
     assert args.force_download is True
 
@@ -301,8 +299,6 @@ def test_create_url_task_saves_explicit_download_overrides(monkeypatch, tmp_path
             "--url",
             "https://example.test/watch?v=demo123",
             "--no-cookies",
-            "--proxy",
-            "http://127.0.0.1:7890",
             "--max-height",
             "720",
             "--force-download",
@@ -312,11 +308,10 @@ def test_create_url_task_saves_explicit_download_overrides(monkeypatch, tmp_path
     output = json.loads(capsys.readouterr().out)
     assert captured["config"].cookies_path is None
     assert captured["config"].use_cookies is False
-    assert captured["config"].proxy == "http://127.0.0.1:7890"
+    assert captured["config"].proxy is None
     assert captured["config"].max_height == 720
     assert captured["config"].force is True
     assert output["config"] == {
-        "network": {"proxy": "http://127.0.0.1:7890"},
         "download": {
             "use_cookies": False,
             "max_height": 720,

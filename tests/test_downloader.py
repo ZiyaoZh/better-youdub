@@ -16,6 +16,7 @@ from youdub.downloader import (
     ytdlp_base_options,
 )
 from youdub.locking import TaskLock, TaskLockBusy
+from youdub.network import network_router
 
 
 class FakeYoutubeDL:
@@ -79,6 +80,7 @@ class FakeYoutubeDL:
 
 @pytest.fixture(autouse=True)
 def reset_fake_ytdl() -> None:
+    network_router.clear()
     supported_js_runtimes.cache_clear()
     FakeYoutubeDL.calls = []
     FakeYoutubeDL.download_attempts = 0
@@ -88,6 +90,26 @@ def reset_fake_ytdl() -> None:
     FakeYoutubeDL.preserved_staging_path = None
     yield
     supported_js_runtimes.cache_clear()
+
+
+def test_download_automatically_falls_back_from_direct_to_proxy(tmp_path: Path) -> None:
+    proxy = "socks5h://127.0.0.1:1081"
+
+    class RoutedYoutubeDL(FakeYoutubeDL):
+        def extract_info(self, url: str, download: bool = False) -> dict[str, Any]:
+            if self.params.get("proxy") == "":
+                raise RuntimeError("direct route unavailable")
+            return super().extract_info(url, download=download)
+
+    result = download_url_to_artifacts(
+        "https://example.test/watch?v=demo123",
+        tmp_path / "videos",
+        DownloadConfig(proxy=proxy, youtube_dl_factory=RoutedYoutubeDL),
+    )
+
+    assert result.media_path.exists()
+    assert [call.get("proxy") for call in FakeYoutubeDL.calls[:2]] == ["", proxy]
+    assert network_router.routes("video-source", proxy)[0].name == "proxy"
 
 
 def test_ytdlp_base_options_uses_nonempty_cookies_and_proxy(tmp_path: Path) -> None:

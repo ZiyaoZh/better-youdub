@@ -9,13 +9,14 @@ import math
 import mimetypes
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from .media import CommandError, require_binary
+from .network import BILIBILI_SERVICE, network_router
 
 FINAL_VIDEO = "video.mp4"
 SUMMARY = "summary.json"
@@ -220,27 +221,37 @@ async def _upload_bilibili(
     last_error: Exception | None = None
 
     for attempt in range(1, BILIBILI_UPLOAD_RETRIES + 1):
+        route = network_router.routes(BILIBILI_SERVICE, config.proxy)[0]
+        routed_config = replace(config, proxy=route.proxy or "")
         try:
-            async with _BilibiliWebUploader(config) as uploader:
+            async with _BilibiliWebUploader(routed_config) as uploader:
                 LOGGER.info("Bilibili upload started")
                 cover_url = await uploader.upload_cover(cover_path)
                 uploaded, upload_debug = await uploader.upload_video_file(video_path)
                 submit_result = await uploader.add_archive(
                     package=package,
-                    config=config,
+                    config=routed_config,
                     source=source,
                     uploaded=uploaded,
                     cover_url=cover_url,
                 )
-                return _bilibili_upload_result(
+                result = _bilibili_upload_result(
                     _bilibili_submit_result(
                         submit_result,
                         cover_url=cover_url,
                         upload_debug=upload_debug,
                     )
                 )
+                network_router.record_success(BILIBILI_SERVICE, route)
+                return result
         except Exception as exc:
             last_error = exc
+            network_router.record_failure(
+                BILIBILI_SERVICE,
+                route,
+                exc,
+                proxy_configured=bool(config.proxy),
+            )
             LOGGER.exception("Bilibili upload attempt %s/%s failed", attempt, BILIBILI_UPLOAD_RETRIES)
             if attempt < BILIBILI_UPLOAD_RETRIES:
                 await asyncio.sleep(BILIBILI_UPLOAD_RETRY_DELAY_SECONDS)
@@ -294,12 +305,12 @@ class _BilibiliWebUploader:
                 "Origin": "https://member.bilibili.com",
                 "Referer": "https://member.bilibili.com/",
             },
-            "trust_env": True,
+            "trust_env": False,
         }
         upos_session_kwargs: dict[str, Any] = {
             "timeout": timeout,
             "headers": common_headers,
-            "trust_env": True,
+            "trust_env": False,
         }
         connector_spec = _bilibili_proxy_connector_spec(_bilibili_proxy(self.config))
         if connector_spec is not None:
@@ -600,9 +611,10 @@ def _bilibili_cookie(config: BilibiliPublishConfig) -> str:
 
 
 def _bilibili_proxy(config: BilibiliPublishConfig) -> str | None:
+    if config.proxy is not None:
+        return _clean_text(config.proxy)
     return _clean_text(
-        config.proxy
-        or os.getenv("BILI_PROXY")
+        os.getenv("BILI_PROXY")
         or os.getenv("YOUDUB_BILIBILI_PROXY")
         or os.getenv("YOUDUB_NETWORK_PROXY")
         or os.getenv("YOUDUB_TRANSLATION_PROXY")

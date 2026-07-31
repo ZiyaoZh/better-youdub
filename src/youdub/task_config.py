@@ -177,9 +177,6 @@ def default_task_config(config: AppConfig, *, include_secrets: bool = False) -> 
     bilibili = _config_dict(options.bilibili)
     bilibili.pop("proxy", None)
     defaults = {
-        "network": {
-            "proxy": config.network.proxy or "",
-        },
         "download": {
             "use_cookies": True,
             "cookies_path": str(config.cookies_path) if config.cookies_path is not None else "",
@@ -214,8 +211,7 @@ def effective_task_config(
     include_secrets: bool = False,
 ) -> dict[str, Any]:
     defaults = default_task_config(config, include_secrets=include_secrets)
-    migrated = _migrate_legacy_proxy_override(overrides or {})
-    migrated = _migrate_legacy_empty_tts_model_dir(defaults, migrated)
+    migrated = _migrate_legacy_empty_tts_model_dir(defaults, overrides or {})
     raw = merge_task_config(defaults, migrated)
     if include_secrets:
         secret_defaults = default_task_config(config, include_secrets=True)
@@ -332,7 +328,7 @@ def download_config_from_task_config(config: AppConfig, overrides: Mapping[str, 
     cookies_path = _optional_path(download.get("cookies_path"))
     return DownloadConfig(
         cookies_path=cookies_path if download["use_cookies"] else None,
-        proxy=_optional_str(values["network"]["proxy"]) or config.ytdlp_proxy,
+        proxy=config.network.proxy or config.ytdlp_proxy,
         max_height=int(download["max_height"]),
         force=bool(download["force_download"]),
         use_cookies=bool(download["use_cookies"]),
@@ -341,7 +337,7 @@ def download_config_from_task_config(config: AppConfig, overrides: Mapping[str, 
 
 def runtime_options_from_task_config(config: AppConfig, overrides: Mapping[str, Any] | None) -> RuntimeOptions:
     values = effective_task_config(config, overrides, include_secrets=True)
-    network_proxy = _optional_str(values["network"]["proxy"])
+    network_proxy = config.network.proxy
     bilibili_default_proxy = BilibiliPublishConfig.from_env().proxy
     workflow_max_rounds = int(values["workflow"]["tts_redub_max_rounds"])
     return RuntimeOptions(
@@ -449,21 +445,6 @@ def runtime_options_from_task_config(config: AppConfig, overrides: Mapping[str, 
             confirm=bool(values["bilibili"]["confirm"]),
         ),
     )
-
-
-def _migrate_legacy_proxy_override(overrides: Mapping[str, Any]) -> Mapping[str, Any]:
-    network = overrides.get("network")
-    if isinstance(network, Mapping) and "proxy" in network:
-        return overrides
-
-    for section in ("translation", "download", "bilibili"):
-        values = overrides.get(section)
-        if not isinstance(values, Mapping) or "proxy" not in values:
-            continue
-        proxy = values["proxy"]
-        if _optional_str(proxy):
-            return merge_task_config_overrides(overrides, {"network": {"proxy": proxy}})
-    return overrides
 
 
 def _migrate_legacy_empty_tts_model_dir(

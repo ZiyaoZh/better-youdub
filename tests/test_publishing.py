@@ -368,6 +368,57 @@ def test_upload_bilibili_uses_web_upload_api(tmp_path: Path, monkeypatch) -> Non
         "cover_url": "https://i0.hdslb.com/cover.jpg",
         "watermark": False,
     }
+
+
+def test_upload_bilibili_switches_from_direct_to_proxy(tmp_path: Path, monkeypatch) -> None:
+    _write_publish_inputs(tmp_path)
+    monkeypatch.setattr(publishing, "_run_command", lambda command: Path(command[-1]).write_bytes(b"jpg"))
+    package = json.loads(prepare_publish_package(tmp_path).read_text(encoding="utf-8"))
+    proxy = "socks5h://127.0.0.1:1081"
+    attempts = []
+    publishing.network_router.clear()
+
+    class FakeWebUploader:
+        def __init__(self, config: BilibiliPublishConfig) -> None:
+            self.config = config
+            attempts.append(config.proxy)
+
+        async def __aenter__(self):
+            if self.config.proxy == "":
+                raise RuntimeError("direct unavailable")
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        async def upload_cover(self, image_path: Path) -> str:
+            return "https://i0.hdslb.com/cover.jpg"
+
+        async def upload_video_file(self, video_path: Path):
+            return (
+                publishing._BilibiliUploadedVideo("video", 789, "upload-id", "upos://bucket/video.mp4"),
+                {"chunks": 1},
+            )
+
+        async def add_archive(self, **kwargs):
+            return {"code": 0, "data": {"bvid": "BV1real", "aid": 456}}
+
+    async def no_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(publishing, "_BilibiliWebUploader", FakeWebUploader)
+    monkeypatch.setattr(publishing.asyncio, "sleep", no_sleep)
+
+    result = asyncio.run(
+        publishing._upload_bilibili(
+            tmp_path,
+            package,
+            BilibiliPublishConfig(sessdata="sess", bili_jct="jct", confirm=True, proxy=proxy),
+        )
+    )
+
+    assert result["status"] == "uploaded"
+    assert attempts == ["", proxy]
     assert result["status"] == "uploaded"
     assert result["platform"] == "bilibili"
     assert result["bvid"] == "BV1real"

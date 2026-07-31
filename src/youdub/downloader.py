@@ -6,11 +6,11 @@ import re
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from importlib import import_module
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol, TypeVar
 from urllib.parse import urlparse
 
 from .ingest import (
@@ -19,6 +19,7 @@ from .ingest import (
     task_folder_from_download_info,
 )
 from .locking import TaskLock
+from .network import VIDEO_SERVICE, NetworkRoute, network_router
 
 DOWNLOAD_VIDEO_NAME = "download.mp4"
 THUMBNAIL_EXTENSIONS = (".webp", ".jpg", ".jpeg", ".png")
@@ -35,6 +36,8 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+
+_T = TypeVar("_T")
 
 
 class YoutubeDLFactory(Protocol):
@@ -72,7 +75,10 @@ def download_url_to_artifacts(url: str, root: Path, config: DownloadConfig | Non
 
     download_config, cookie_snapshot = _config_with_cookie_snapshot(config)
     try:
-        info = _extract_info(url, download_config)
+        info = _run_download_network(
+            download_config,
+            lambda routed_config: _extract_info(url, routed_config),
+        )
         sanitized_info = _sanitize_info(info, download_config)
         source_key = source_key_from_download_info(sanitized_info)
         task_dir = task_folder_from_download_info(sanitized_info, root)
@@ -84,7 +90,10 @@ def download_url_to_artifacts(url: str, root: Path, config: DownloadConfig | Non
 
             media_path = task_dir / DOWNLOAD_VIDEO_NAME
             if download_config.force or not _has_nonempty_file(media_path):
-                _download_media(url, task_dir, media_path, download_config)
+                _run_download_network(
+                    download_config,
+                    lambda routed_config: _download_media(url, task_dir, media_path, routed_config),
+                )
 
             if not _has_nonempty_file(media_path):
                 raise RuntimeError(f"yt-dlp finished without producing {media_path}")
@@ -323,6 +332,19 @@ def _clean_proxy(proxy: str | None) -> str | None:
     if value:
         return value
     return ""
+
+
+def _run_download_network(config: DownloadConfig, operation: Callable[[DownloadConfig], _T]) -> _T:
+    return network_router.run(
+        VIDEO_SERVICE,
+        config.proxy,
+        lambda route: operation(_download_config_for_route(config, route)),
+    )
+
+
+def _download_config_for_route(config: DownloadConfig, route: NetworkRoute) -> DownloadConfig:
+    # yt-dlp uses an empty proxy value to bypass process-level proxy variables.
+    return replace(config, proxy=route.proxy or "")
 
 
 def _is_format_unavailable(exc: Exception) -> bool:

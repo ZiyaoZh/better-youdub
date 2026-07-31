@@ -29,6 +29,7 @@ from .gpu import cleanup_gpu_memory
 from .ingest import create_pending_url_task, create_task_from_download_artifacts, create_task_from_local_media
 from .locking import TaskLock, TaskLockBusy, task_is_locked
 from .models import PipelineStep, StepStatus, Task, TaskStatus, utc_now
+from .network import network_router
 from .pipeline import PipelineRunner
 from .storage import TaskStore
 from .synthesis import ffmpeg_has_filter
@@ -97,7 +98,6 @@ class UrlTaskRequest(BaseModel):
     use_cookies: bool = True
     cookies_path: str | None = None
     cookies_content: str | None = None
-    proxy: str | None = None
     max_height: int | None = None
     force_download: bool = False
 
@@ -171,6 +171,20 @@ def create_app() -> FastAPI:
     @app.get("/api/system")
     def system_status() -> dict[str, Any]:
         return _system_status_payload()
+
+    @app.get("/api/network/health")
+    def network_health() -> dict[str, Any]:
+        config = _config()
+        return network_router.snapshot(config.network.proxy, config.secrets.openai.base_url)
+
+    @app.post("/api/network/probe")
+    def probe_network(force: bool = Query(False)) -> dict[str, Any]:
+        config = _config()
+        return network_router.probe(
+            config.network.proxy,
+            config.secrets.openai.base_url,
+            force=force,
+        )
 
     @app.get("/api/tasks")
     def list_tasks(
@@ -775,7 +789,6 @@ def _task_config_for_url_payload(config: AppConfig, payload: UrlTaskRequest) -> 
     defaults = default_task_config(config)
     effective = default_task_config(config)
     download = effective["download"]
-    network = effective["network"]
     fields_set = _payload_fields_set(payload)
 
     cookies_path = download["cookies_path"]
@@ -787,8 +800,6 @@ def _task_config_for_url_payload(config: AppConfig, payload: UrlTaskRequest) -> 
         download["use_cookies"] = payload.use_cookies
     if "cookies_path" in fields_set or _clean_text(payload.cookies_content):
         download["cookies_path"] = cookies_path
-    if "proxy" in fields_set:
-        network["proxy"] = payload.proxy or ""
     if "max_height" in fields_set and payload.max_height is not None:
         download["max_height"] = payload.max_height
     if "force_download" in fields_set:

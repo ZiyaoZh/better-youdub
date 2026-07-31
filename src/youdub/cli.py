@@ -59,11 +59,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Ignore YOUDUB_COOKIES_PATH and do not pass cookies to yt-dlp",
     )
     create_url_task.add_argument(
-        "--proxy",
-        default=argparse.SUPPRESS,
-        help="Optional task network proxy URL; yt-dlp falls back to YOUDUB_YTDLP_PROXY",
-    )
-    create_url_task.add_argument(
         "--max-height",
         type=int,
         default=argparse.SUPPRESS,
@@ -502,15 +497,12 @@ def cmd_run_task(config: AppConfig, args: argparse.Namespace) -> int:
 def _create_url_task_cli_overrides(config: AppConfig, args: argparse.Namespace) -> dict[str, object]:
     effective = default_task_config(config)
     download = effective["download"]
-    network = effective["network"]
     if hasattr(args, "cookies"):
         download["use_cookies"] = True
         download["cookies_path"] = str(args.cookies)
     if hasattr(args, "no_cookies"):
         download["use_cookies"] = False
         download["cookies_path"] = ""
-    if hasattr(args, "proxy"):
-        network["proxy"] = args.proxy
     if hasattr(args, "max_height"):
         download["max_height"] = args.max_height
     if hasattr(args, "force_download"):

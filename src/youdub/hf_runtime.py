@@ -5,15 +5,26 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
+
+from .network import HUGGINGFACE_SERVICE, NetworkRoute, network_router
 
 
 _HUGGINGFACE_DOWNLOAD_LOCK = threading.RLock()
 _RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 504)
+_PROXY_ENVIRONMENT_VARIABLES = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
+_T = TypeVar("_T")
 
 
 def prepare_huggingface_environment() -> None:
-    # The Xet client does not reliably honor the per-task SOCKS proxy and can
+    # The Xet client does not reliably honor the selected SOCKS route and can
     # retry an unreachable CAS endpoint for hours. Regular Hub HTTP downloads
     # are resumable and use the configured requests session.
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
@@ -50,34 +61,53 @@ def cached_huggingface_snapshot(
 
 
 @contextmanager
-def huggingface_download_context(proxy: str | None) -> Iterator[None]:
+def huggingface_download_context(proxy: str | None, *, trust_env: bool = True) -> Iterator[None]:
     prepare_huggingface_environment()
     proxy = _clean_optional_text(proxy)
 
     with _HUGGINGFACE_DOWNLOAD_LOCK:
+        previous_proxy_environment = _set_proxy_environment(proxy, clear=not trust_env)
+        configure_http_backend = None
         try:
-            import huggingface_hub
-        except ModuleNotFoundError:
-            yield
-            return
+            try:
+                import huggingface_hub
+            except ModuleNotFoundError:
+                yield
+                return
 
-        _sync_xet_setting_if_already_imported(huggingface_hub)
-        configure_http_backend = getattr(huggingface_hub, "configure_http_backend", None)
-        if callable(configure_http_backend):
-            configure_http_backend(backend_factory=lambda: _requests_session(proxy))
-        try:
-            yield
-        finally:
+            _sync_xet_setting_if_already_imported(huggingface_hub)
+            configure_http_backend = getattr(huggingface_hub, "configure_http_backend", None)
             if callable(configure_http_backend):
-                configure_http_backend()
+                configure_http_backend(backend_factory=lambda: _requests_session(proxy, trust_env=trust_env))
+            try:
+                yield
+            finally:
+                if callable(configure_http_backend):
+                    configure_http_backend()
+        finally:
+            _restore_proxy_environment(previous_proxy_environment)
 
 
-def _requests_session(proxy: str | None) -> Any:
+def run_huggingface_download(proxy: str | None, operation: Callable[[], _T]) -> _T:
+    return network_router.run(
+        HUGGINGFACE_SERVICE,
+        proxy,
+        lambda route: _run_huggingface_route(route, operation),
+    )
+
+
+def _run_huggingface_route(route: NetworkRoute, operation: Callable[[], _T]) -> _T:
+    with huggingface_download_context(route.proxy, trust_env=False):
+        return operation()
+
+
+def _requests_session(proxy: str | None, *, trust_env: bool = True) -> Any:
     import requests
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
 
     session = requests.Session()
+    session.trust_env = trust_env
     adapter = HTTPAdapter(
         max_retries=Retry(
             total=4,
@@ -94,6 +124,28 @@ def _requests_session(proxy: str | None) -> Any:
     if proxy:
         session.proxies.update({"http": proxy, "https": proxy})
     return session
+
+
+def _set_proxy_environment(proxy: str | None, *, clear: bool = False) -> dict[str, str | None] | None:
+    if proxy is None and not clear:
+        return None
+    previous = {name: os.environ.get(name) for name in _PROXY_ENVIRONMENT_VARIABLES}
+    for name in _PROXY_ENVIRONMENT_VARIABLES:
+        if proxy is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = proxy
+    return previous
+
+
+def _restore_proxy_environment(previous: dict[str, str | None] | None) -> None:
+    if previous is None:
+        return
+    for name, value in previous.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
 
 def _sync_xet_setting_if_already_imported(huggingface_hub: Any) -> None:

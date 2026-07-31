@@ -15,13 +15,6 @@ const STEPS = [
 
 const CONFIG_SECTIONS = [
   {
-    key: "network",
-    label: "网络",
-    fields: [
-      ["proxy", "任务网络代理", "text"],
-    ],
-  },
-  {
     key: "download",
     label: "下载",
     fields: [
@@ -180,6 +173,7 @@ const STEP_CONFIG_SECTIONS = {
 
 const ACTIVE_POLL_INTERVAL_MS = 5000
 const IDLE_POLL_INTERVAL_MS = 15000
+const NETWORK_POLL_INTERVAL_MS = 60000
 const TASK_ROW_HEIGHT_PX = 66
 const TASK_PAGE_SIZE_MIN = 4
 const TASK_PAGE_SIZE_MAX = 50
@@ -202,9 +196,12 @@ const state = {
   configTaskId: null,
   configDraft: null,
   configDrawerOpen: false,
+  activeView: "tasks",
+  networkRefreshing: false,
 }
 
 let taskPollTimer = null
+let networkPollTimer = null
 
 const $ = (id) => document.getElementById(id)
 
@@ -321,6 +318,96 @@ async function refreshSystem() {
   } catch (error) {
     $("systemLine").textContent = `系统监控 ${error.message}`
   }
+}
+
+function networkHealthLabel(status) {
+  return {
+    healthy: "可用",
+    unhealthy: "异常",
+    unknown: "未检测",
+    unconfigured: "未配置",
+  }[status] || status || "未检测"
+}
+
+function networkRouteLabel(route) {
+  return route === "proxy" ? "代理" : "直连"
+}
+
+function networkRouteMarkup(route) {
+  const status = route?.status || "unknown"
+  const latency = Number.isFinite(route?.latency_ms) ? `${Math.round(route.latency_ms)} ms` : "-"
+  const successes = Number(route?.successes) || 0
+  const failures = Number(route?.failures) || 0
+  return `
+    <span class="network-health ${escapeHtml(status)}">${escapeHtml(networkHealthLabel(status))}</span>
+    <span class="network-route-meta">${escapeHtml(latency)} · ${successes} / ${failures}</span>
+  `
+}
+
+function renderNetworkHealth(payload) {
+  const services = Array.isArray(payload?.services) ? payload.services : []
+  const available = services.filter((service) => {
+    const routes = service?.routes || {}
+    return routes.direct?.status === "healthy" || routes.proxy?.status === "healthy"
+  }).length
+  $("networkProxyStatus").textContent = payload?.proxy_configured ? "已配置" : "未配置"
+  $("networkHealthyCount").textContent = `${available} / ${services.length}`
+  $("networkUpdated").textContent = payload?.last_probe_at
+    ? `最近检测 ${fmtTime(payload.last_probe_at)}`
+    : "尚未检测"
+
+  const body = $("networkTableBody")
+  if (!services.length) {
+    body.innerHTML = '<tr><td colspan="5">暂无网络服务</td></tr>'
+    return
+  }
+  body.innerHTML = services.map((service) => {
+    const direct = service?.routes?.direct || {}
+    const proxy = service?.routes?.proxy || {}
+    const error = direct.last_error || proxy.last_error || "-"
+    return `
+      <tr>
+        <td><strong>${escapeHtml(service.label)}</strong><span class="network-service-target">${escapeHtml(service.target)}</span></td>
+        <td><strong>${escapeHtml(networkRouteLabel(service.preferred_route))}</strong></td>
+        <td>${networkRouteMarkup(direct)}</td>
+        <td>${networkRouteMarkup(proxy)}</td>
+        <td><span class="network-error">${escapeHtml(error)}</span></td>
+      </tr>
+    `
+  }).join("")
+}
+
+async function refreshNetworkHealth({probe = false, force = false} = {}) {
+  if (state.networkRefreshing) return
+  state.networkRefreshing = true
+  $("networkProbeButton").disabled = true
+  setMessage("networkMessage", probe ? "检测中" : "")
+  try {
+    const path = probe ? `/api/network/probe?force=${force ? "true" : "false"}` : "/api/network/health"
+    const payload = await api(path, probe ? {method: "POST"} : {})
+    renderNetworkHealth(payload)
+    setMessage("networkMessage", "")
+  } catch (error) {
+    setMessage("networkMessage", error.message, true)
+  } finally {
+    state.networkRefreshing = false
+    $("networkProbeButton").disabled = false
+  }
+}
+
+function activateView(view) {
+  state.activeView = view
+  const networkActive = view === "network"
+  $("taskWorkspace").classList.toggle("hidden", networkActive)
+  $("networkWorkspace").classList.toggle("hidden", !networkActive)
+  $("tasksViewButton").classList.toggle("active", !networkActive)
+  $("networkViewButton").classList.toggle("active", networkActive)
+}
+
+async function openNetworkView() {
+  activateView("network")
+  await refreshNetworkHealth()
+  await refreshNetworkHealth({probe: true})
 }
 
 async function refreshTasks() {
@@ -943,7 +1030,16 @@ function bindEvents() {
   $("refreshButton").addEventListener("click", () => {
     refreshDoctor()
     refreshSystem()
-    refreshTasks()
+    if (state.activeView === "network") {
+      refreshNetworkHealth({probe: true, force: true})
+    } else {
+      refreshTasks()
+    }
+  })
+  $("tasksViewButton").addEventListener("click", () => activateView("tasks"))
+  $("networkViewButton").addEventListener("click", () => openNetworkView().catch(() => undefined))
+  $("networkProbeButton").addEventListener("click", () => {
+    refreshNetworkHealth({probe: true, force: true}).catch(() => undefined)
   })
   $("prevTaskPageButton").addEventListener("click", () => changeTaskPage(-1))
   $("nextTaskPageButton").addEventListener("click", () => changeTaskPage(1))
@@ -974,7 +1070,7 @@ function scheduleTaskPolling() {
   if (taskPollTimer !== null) window.clearTimeout(taskPollTimer)
   const delay = state.tasks.some(taskActive) ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS
   taskPollTimer = window.setTimeout(async () => {
-    if (!document.hidden) {
+    if (!document.hidden && state.activeView === "tasks") {
       await refreshTasks().catch(() => undefined)
       await refreshSystem().catch(() => undefined)
     }
@@ -982,16 +1078,31 @@ function scheduleTaskPolling() {
   }, delay)
 }
 
+function scheduleNetworkPolling() {
+  if (networkPollTimer !== null) window.clearTimeout(networkPollTimer)
+  networkPollTimer = window.setTimeout(async () => {
+    if (!document.hidden && state.activeView === "network") {
+      await refreshNetworkHealth({probe: true}).catch(() => undefined)
+    }
+    scheduleNetworkPolling()
+  }, NETWORK_POLL_INTERVAL_MS)
+}
+
 bindEvents()
 Promise.all([loadDefaultConfig(), refreshDoctor(), refreshSystem(), refreshTasks()]).catch((error) => {
   $("runtimeLine").textContent = error.message
 }).finally(() => {
   scheduleTaskPolling()
+  scheduleNetworkPolling()
 })
 
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
-    refreshTasks().catch(() => undefined)
     refreshSystem().catch(() => undefined)
+    if (state.activeView === "network") {
+      refreshNetworkHealth({probe: true}).catch(() => undefined)
+    } else {
+      refreshTasks().catch(() => undefined)
+    }
   }
 })

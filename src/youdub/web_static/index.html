@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>better-youdub</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=20260714-network-proxy" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20260731-network-health" />
   </head>
   <body>
     <div class="app-shell">
@@ -15,11 +15,15 @@
           <p id="systemLine" class="system-line">系统监控加载中</p>
         </div>
         <div class="topbar-actions">
+          <nav class="view-switch" aria-label="主视图">
+            <button id="tasksViewButton" class="view-button active" type="button">任务</button>
+            <button id="networkViewButton" class="view-button" type="button">网络</button>
+          </nav>
           <button id="refreshButton" class="icon-button" title="刷新" type="button">↻</button>
         </div>
       </header>
 
-      <main class="workspace">
+      <main id="taskWorkspace" class="workspace">
         <section class="panel tasks-panel">
           <div class="panel-head">
             <div class="panel-title-row">
@@ -74,6 +78,39 @@
           </div>
         </section>
       </main>
+
+      <main id="networkWorkspace" class="network-workspace hidden">
+        <section class="panel network-page">
+          <div class="network-page-head">
+            <div>
+              <h2>网络健康</h2>
+              <p id="networkUpdated">尚未检测</p>
+            </div>
+            <button id="networkProbeButton" class="button secondary compact-button" type="button">重新检测</button>
+          </div>
+          <div class="network-summary">
+            <span>系统代理</span>
+            <strong id="networkProxyStatus">-</strong>
+            <span>可用服务</span>
+            <strong id="networkHealthyCount">-</strong>
+          </div>
+          <div class="network-table-wrap">
+            <table class="network-table">
+              <thead>
+                <tr>
+                  <th>服务</th>
+                  <th>当前首选</th>
+                  <th>直连</th>
+                  <th>代理</th>
+                  <th>最近错误</th>
+                </tr>
+              </thead>
+              <tbody id="networkTableBody"></tbody>
+            </table>
+          </div>
+          <div id="networkMessage" class="message"></div>
+        </section>
+      </main>
     </div>
 
     <aside id="createDialog" class="modal" aria-hidden="true">
@@ -114,6 +151,6 @@
       </div>
     </aside>
 
-    <script src="/assets/app.js?v=20260714-network-proxy"></script>
+    <script src="/assets/app.js?v=20260731-network-health"></script>
   </body>
 </html>

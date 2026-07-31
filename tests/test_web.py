@@ -25,6 +25,7 @@ def _client(monkeypatch, tmp_path: Path) -> TestClient:
     web_module._RUNNING.clear()
     web_module._TASK_ALIASES.clear()
     web_module._TERMINATING.clear()
+    web_module.network_router.clear()
     monkeypatch.setenv("YOUDUB_ROOT", str(tmp_path / "videos"))
     monkeypatch.setenv("YOUDUB_TASKS_PATH", str(tmp_path / "tasks" / "tasks.json"))
     monkeypatch.setenv("YOUDUB_LOG_DIR", str(tmp_path / "logs"))
@@ -66,7 +67,15 @@ def _create_voxcpm_snapshot(hf_home: Path, commit: str = "abc123") -> Path:
 def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) -> None:
     client = _client(monkeypatch, tmp_path)
 
-    for path in ("/", "/assets/app.js", "/assets/styles.css", "/api/health", "/api/doctor", "/api/system"):
+    for path in (
+        "/",
+        "/assets/app.js",
+        "/assets/styles.css",
+        "/api/health",
+        "/api/doctor",
+        "/api/system",
+        "/api/network/health",
+    ):
         response = client.get(path)
         assert response.status_code == 200
 
@@ -79,7 +88,9 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert 'id="systemLine"' in index
     assert 'id="taskPager"' in index
     assert 'id="finalVideo"' not in index
-    assert "20260714-network-proxy" in index
+    assert "20260731-network-health" in index
+    assert 'id="networkWorkspace"' in index
+    assert 'id="networkViewButton"' in index
     assert "/assets/app.js?v=" in index
     assert "/assets/styles.css?v=" in index
     app_js = client.get("/assets/app.js").text
@@ -89,8 +100,10 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert "已终止" in app_js
     assert "/api/system" in app_js
     assert "CPU" in app_js
-    assert "任务网络代理" in app_js
+    assert "任务网络代理" not in app_js
     assert "翻译代理" not in app_js
+    assert "/api/network/probe" in app_js
+    assert "NETWORK_POLL_INTERVAL_MS = 60000" in app_js
     assert "step-progress" in app_js
     assert "tower_path_pronunciation" in app_js
     assert "塔路径读法" in app_js
@@ -102,6 +115,7 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert "system-line" in styles
     assert "grid-template-rows: minmax(0, 1fr)" in styles
     assert "height: 100dvh" in styles
+    assert "network-table" in styles
     assert "重配包含复核片段" in app_js
     assert "每轮最大重配片段" in app_js
     assert "质检轮次" not in app_js
@@ -110,6 +124,41 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert "最大重配轮次" not in app_js
 
     assert client.get("/api/health").json() == {"status": "ok"}
+
+
+def test_web_network_health_reports_routes_without_exposing_proxy(monkeypatch, tmp_path: Path) -> None:
+    proxy = "socks5h://user:secret@127.0.0.1:1081"
+    monkeypatch.setenv("YOUDUB_NETWORK_PROXY", proxy)
+    client = _client(monkeypatch, tmp_path)
+    direct, proxied = web_module.network_router.routes("translation", proxy)
+    web_module.network_router.record_failure("translation", direct, RuntimeError("direct timeout"))
+    web_module.network_router.record_success("translation", proxied, latency_ms=25.4)
+
+    response = client.get("/api/network/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["proxy_configured"] is True
+    translation = next(item for item in payload["services"] if item["key"] == "translation")
+    assert translation["preferred_route"] == "proxy"
+    assert translation["routes"]["direct"]["status"] == "unhealthy"
+    assert translation["routes"]["proxy"]["status"] == "healthy"
+    assert translation["routes"]["proxy"]["latency_ms"] == 25.4
+    assert proxy not in response.text
+    assert "secret" not in response.text
+
+    captured = {}
+
+    def fake_probe(configured_proxy, translation_url, *, force=False):
+        captured.update(proxy=configured_proxy, translation_url=translation_url, force=force)
+        return payload
+
+    monkeypatch.setattr(web_module.network_router, "probe", fake_probe)
+    probed = client.post("/api/network/probe?force=true")
+
+    assert probed.status_code == 200
+    assert captured == {"proxy": proxy, "translation_url": None, "force": True}
+    assert proxy not in probed.text
 
 
 def test_web_system_status_reports_compact_resource_summary(monkeypatch, tmp_path: Path) -> None:
@@ -395,7 +444,7 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert "Bloons TD 6" in defaults.json()["config"]["translation"]["correction_prompt"]
     assert defaults.json()["config"]["translation"]["base_url"] == WEB_TRANSLATION_BASE_URL_DEFAULT
     assert defaults.json()["config"]["translation"]["model"] == WEB_TRANSLATION_MODEL_DEFAULT
-    assert defaults.json()["config"]["network"]["proxy"] == ""
+    assert "network" not in defaults.json()["config"]
     assert "proxy" not in defaults.json()["config"]["translation"]
     assert defaults.json()["config"]["tts"]["inference_timesteps"] == 10
     assert defaults.json()["config"]["tts"]["min_reference_ms"] == 1200
@@ -409,7 +458,7 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert task["config"]["translation"]["api_key"] == ""
     assert task["config"]["translation"]["base_url"] == WEB_TRANSLATION_BASE_URL_DEFAULT
     assert task["config"]["translation"]["model"] == WEB_TRANSLATION_MODEL_DEFAULT
-    assert task["config"]["network"]["proxy"] == ""
+    assert "network" not in task["config"]
     assert "proxy" not in task["config"]["translation"]
     assert task["config"]["tts"]["inference_timesteps"] == 10
     assert task["config"]["tts"]["min_reference_ms"] == 1200
@@ -454,7 +503,6 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
 
     saved_task = json.loads(config_path.read_text(encoding="utf-8"))[0]
     assert saved_task["config"] == {
-        "network": {"proxy": "socks5h://127.0.0.1:1081"},
         "download": {"max_height": 720},
         "whisperx": {"batch_size": 12},
         "translation": {
@@ -523,7 +571,7 @@ def test_web_url_task_uses_and_saves_download_config(monkeypatch, tmp_path: Path
     assert captured["url"] == "https://example.test/watch?v=abc123"
     assert captured["config"].cookies_path is None
     assert captured["config"].use_cookies is False
-    assert captured["config"].proxy == "http://127.0.0.1:7890"
+    assert captured["config"].proxy is None
     assert captured["config"].max_height == 720
     assert captured["config"].force is True
     task = response.json()
@@ -533,10 +581,9 @@ def test_web_url_task_uses_and_saves_download_config(monkeypatch, tmp_path: Path
         "max_height": 720,
         "force_download": True,
     }
-    assert task["config"]["network"] == {"proxy": "http://127.0.0.1:7890"}
+    assert "network" not in task["config"]
     saved_task = json.loads((tmp_path / "tasks" / "tasks.json").read_text(encoding="utf-8"))[0]
     assert saved_task["config"] == {
-        "network": {"proxy": "http://127.0.0.1:7890"},
         "download": {
             "use_cookies": False,
             "cookies_path": "/tmp/custom-cookies.txt",
@@ -1350,6 +1397,7 @@ def test_web_run_step_uses_saved_task_config(monkeypatch, tmp_path: Path) -> Non
     monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
     monkeypatch.setenv("OPENAI_MODEL", "gpt-env")
     monkeypatch.setenv("HF_READ_TOKEN", "hf-env")
+    monkeypatch.setenv("YOUDUB_NETWORK_PROXY", "socks5h://127.0.0.1:1081")
     client = _client(monkeypatch, tmp_path)
     source = tmp_path / "sample.mp4"
     source.write_bytes(b"video")
@@ -1357,7 +1405,6 @@ def test_web_run_step_uses_saved_task_config(monkeypatch, tmp_path: Path) -> Non
     config = task["config"]
     config["translation"]["api_key"] = "sk-task"
     config["translation"]["model"] = "gpt-task"
-    config["network"]["proxy"] = "socks5h://127.0.0.1:1081"
     config["translation"]["target_language"] = "繁體中文"
     config["translation"]["segment_extra_prompt"] = "使用台灣中文口吻。"
     config["translation"]["correction_prompt"] = "把 tax shooter 视为 Tack Shooter。"
