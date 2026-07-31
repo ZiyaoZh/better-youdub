@@ -409,12 +409,11 @@ def load_voxcpm_model(config: TTSConfig):
         os.environ.setdefault("HF_TOKEN", config.hf_token)
         os.environ.setdefault("HF_READ_TOKEN", config.hf_token)
 
-    try:
-        from voxcpm import VoxCPM
-    except ImportError as exc:
-        raise ImportError("The voxcpm package is required for TTS. Add it to GPU dependencies.") from exc
-
     with huggingface_download_context(config.proxy):
+        try:
+            from voxcpm import VoxCPM
+        except ImportError as exc:
+            raise ImportError("The voxcpm package is required for TTS. Add it to GPU dependencies.") from exc
         _MODEL = VoxCPM.from_pretrained(model_source, load_denoiser=config.load_denoiser)
     _MODEL_KEY = model_key
     return _MODEL

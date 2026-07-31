@@ -52,6 +52,17 @@ def _basic_auth(username: str, password: str) -> dict[str, str]:
     return {"Authorization": f"Basic {token}"}
 
 
+def _create_voxcpm_snapshot(hf_home: Path, commit: str = "abc123") -> Path:
+    repository = hf_home / "hub" / "models--openbmb--VoxCPM2"
+    snapshot = repository / "snapshots" / commit
+    snapshot.mkdir(parents=True)
+    (repository / "refs").mkdir()
+    (repository / "refs" / "main").write_text(f"{commit}\n", encoding="utf-8")
+    for name in ("config.json", "model.safetensors", "audiovae.pth", "tokenizer.json"):
+        (snapshot / name).write_text(name, encoding="utf-8")
+    return snapshot
+
+
 def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) -> None:
     client = _client(monkeypatch, tmp_path)
 
@@ -368,6 +379,11 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     monkeypatch.delenv("OPENAI_API_BASE", raising=False)
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
     monkeypatch.delenv("MODEL_NAME", raising=False)
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "huggingface"))
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    monkeypatch.delenv("YOUDUB_TTS_MODEL_DIR", raising=False)
+    monkeypatch.delenv("VOXCPM_MODEL_DIR", raising=False)
+    voxcpm_snapshot = _create_voxcpm_snapshot(tmp_path / "huggingface")
     client = _client(monkeypatch, tmp_path)
     source = tmp_path / "sample.mp4"
     source.write_bytes(b"video")
@@ -386,6 +402,7 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert defaults.json()["config"]["tts"]["start_pad_ms"] == 80
     assert defaults.json()["config"]["tts"]["end_pad_ms"] == 160
     assert defaults.json()["config"]["tts"]["tower_path_pronunciation"] == "dash"
+    assert defaults.json()["config"]["tts"]["model_dir"] == str(voxcpm_snapshot)
 
     task = client.post("/api/tasks/local", json={"source": str(source), "title": "Config Smoke"}).json()
     assert task["config"]["whisperx"]["model_name"] == "large-v2"
@@ -399,6 +416,7 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert task["config"]["tts"]["start_pad_ms"] == 80
     assert task["config"]["tts"]["end_pad_ms"] == 160
     assert task["config"]["tts"]["tower_path_pronunciation"] == "dash"
+    assert task["config"]["tts"]["model_dir"] == str(voxcpm_snapshot)
     config_path = tmp_path / "tasks" / "tasks.json"
     saved_task = json.loads(config_path.read_text(encoding="utf-8"))[0]
     assert saved_task["config"] == {}

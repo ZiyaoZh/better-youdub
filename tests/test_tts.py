@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 from pathlib import Path
 
 from youdub import tts
@@ -35,6 +37,41 @@ class _FakeModel:
         assert kwargs["reference_wav_path"]
         assert kwargs["text"]
         return np.ones(800, dtype=np.float32) * 0.1
+
+
+def test_load_voxcpm_model_uses_task_proxy_for_model_access(monkeypatch) -> None:
+    proxy = "socks5h://127.0.0.1:1081"
+    captured = {}
+    factories = []
+
+    def configure_http_backend(backend_factory=None) -> None:
+        factories.append(backend_factory)
+
+    class FakeVoxCPM:
+        @classmethod
+        def from_pretrained(cls, model_source: str, *, load_denoiser: bool):
+            captured["model_source"] = model_source
+            captured["load_denoiser"] = load_denoiser
+            captured["proxies"] = factories[-1]().proxies
+            return object()
+
+    monkeypatch.setitem(sys.modules, "voxcpm", types.SimpleNamespace(VoxCPM=FakeVoxCPM))
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        types.SimpleNamespace(configure_http_backend=configure_http_backend),
+    )
+    monkeypatch.setattr(tts, "_MODEL", None)
+    monkeypatch.setattr(tts, "_MODEL_KEY", None)
+
+    model = tts.load_voxcpm_model(TTSConfig(model="openbmb/VoxCPM2", load_denoiser=True, proxy=proxy))
+
+    assert model is tts._MODEL
+    assert captured == {
+        "model_source": "openbmb/VoxCPM2",
+        "load_denoiser": True,
+        "proxies": {"http": proxy, "https": proxy},
+    }
 
 
 def test_load_translation_entries_accepts_current_list_format(tmp_path: Path) -> None:

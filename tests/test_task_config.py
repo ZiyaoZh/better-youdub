@@ -12,6 +12,17 @@ from youdub.task_config import (
 )
 
 
+def _create_voxcpm_snapshot(hf_home: Path, commit: str = "abc123") -> Path:
+    repository = hf_home / "hub" / "models--openbmb--VoxCPM2"
+    snapshot = repository / "snapshots" / commit
+    snapshot.mkdir(parents=True)
+    (repository / "refs").mkdir()
+    (repository / "refs" / "main").write_text(f"{commit}\n", encoding="utf-8")
+    for name in ("config.json", "model.safetensors", "audiovae.pth", "tokenizer.json"):
+        (snapshot / name).write_text(name, encoding="utf-8")
+    return snapshot
+
+
 def test_task_config_empty_secret_defaults_fall_back_to_runtime_secrets(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("YOUDUB_ROOT", str(tmp_path / "videos"))
     monkeypatch.setenv("YOUDUB_TASKS_PATH", str(tmp_path / "tasks" / "tasks.json"))
@@ -230,6 +241,39 @@ def test_task_config_exposes_web_tts_defaults(monkeypatch, tmp_path: Path) -> No
     assert options.tts.start_pad_ms == 80
     assert options.tts.end_pad_ms == 160
     assert options.tts.tower_path_pronunciation == "dash"
+
+
+def test_task_config_defaults_to_complete_cached_voxcpm_snapshot(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("YOUDUB_CONFIG_PATH", str(tmp_path / "config" / "youdub.json"))
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "huggingface"))
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    monkeypatch.delenv("YOUDUB_TTS_MODEL_DIR", raising=False)
+    monkeypatch.delenv("VOXCPM_MODEL_DIR", raising=False)
+    snapshot = _create_voxcpm_snapshot(tmp_path / "huggingface")
+    config = AppConfig.from_env()
+
+    task_config = default_task_config(config)
+    options = runtime_options_from_task_config(config, {})
+
+    assert task_config["tts"]["model_dir"] == str(snapshot)
+    assert options.tts.model_dir == snapshot
+
+
+def test_task_config_migrates_legacy_empty_tts_model_dir_to_cached_default(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("YOUDUB_CONFIG_PATH", str(tmp_path / "config" / "youdub.json"))
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "huggingface"))
+    monkeypatch.delenv("YOUDUB_TTS_MODEL_DIR", raising=False)
+    monkeypatch.delenv("VOXCPM_MODEL_DIR", raising=False)
+    snapshot = _create_voxcpm_snapshot(tmp_path / "huggingface")
+    config = AppConfig.from_env()
+    defaults = default_task_config(config)
+    legacy_tts = {**defaults["tts"], "model_dir": ""}
+
+    migrated = effective_task_config(config, {"tts": legacy_tts})
+    explicit_remote = effective_task_config(config, {"tts": {"model_dir": ""}})
+
+    assert migrated["tts"]["model_dir"] == str(snapshot)
+    assert explicit_remote["tts"]["model_dir"] == ""
 
 
 def test_task_config_exposes_tts_redub_defaults(monkeypatch, tmp_path: Path) -> None:

@@ -138,7 +138,10 @@ key、cookies、任务状态、媒体、模型缓存或平台凭证提交到仓�
 地址作为新任务的默认代理。旧配置中的 `translation.proxy` 和
 `translation.ssh_*` 仍可兼容读取。pyannote 模型固定缓存到
 `/cache/huggingface/pyannote` 挂载目录，容器重建不会重新下载；默认关闭 Hugging Face
-Xet 客户端，以确保 SOCKS 代理能覆盖模型权重下载。
+Xet 客户端，以确保 SOCKS 代理能覆盖模型权重下载。WebUI 会在 Hugging Face 缓存的
+`refs/main` 指向完整 VoxCPM2 快照时，自动把该快照设为“本地模型目录”默认值，避免
+已缓存模型在配音阶段再次查询远端 revision；显式配置 `YOUDUB_TTS_MODEL_DIR` 时优先
+使用配置值。
 
 ### 3. 启动 GPU 服务
 

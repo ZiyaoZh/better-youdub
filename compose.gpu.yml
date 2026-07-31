@@ -140,7 +140,7 @@ services:
       - ./data/cache/nltk:/cache/nltk
       - ./data/cache/torch:/cache/torch
     ports:
-      - "127.0.0.1:${YOUDUB_WEB_PORT:-49173}:8000"
+      - "0.0.0.0:${YOUDUB_WEB_PORT:-49173}:8000"
     deploy:
       resources:
         reservations:

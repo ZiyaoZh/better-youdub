@@ -70,9 +70,10 @@ COPY pyproject.toml README.md ./
 COPY src src
 COPY scripts scripts
 
-RUN chmod +x scripts/*.sh
-
-RUN pip install --no-cache-dir -e .
+RUN chmod +x scripts/*.sh \
+  && ln -sf /app/scripts/youdub.sh /usr/local/bin/youdub \
+  && ln -sf /app/scripts/youdub-web.sh /usr/local/bin/youdub-web \
+  && python -c "import youdub; from youdub.cli import main; from youdub.web import app"
 
 ENTRYPOINT ["scripts/docker-entrypoint.sh"]
 CMD ["uvicorn", "youdub.web:app", "--host", "0.0.0.0", "--port", "8000"]

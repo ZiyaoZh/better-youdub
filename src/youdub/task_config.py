@@ -8,6 +8,7 @@ from typing import Any
 
 from .config import AppConfig
 from .downloader import DownloadConfig
+from .hf_runtime import cached_huggingface_snapshot
 from .publishing import BilibiliPublishConfig, PublishPackageConfig
 from .runtime import RuntimeOptions
 from .synthesis import SynthesisConfig
@@ -37,10 +38,35 @@ DEFAULT_TRANSLATION_BASE_URL = "https://api.uiuihao.com/v1"
 DEFAULT_TRANSLATION_MODEL = "gemini-3.1-flash-lite-preview"
 WEB_TRANSLATION_BASE_URL_DEFAULT = DEFAULT_TRANSLATION_BASE_URL
 WEB_TRANSLATION_MODEL_DEFAULT = DEFAULT_TRANSLATION_MODEL
+_VOXCPM_SNAPSHOT_FILES = (
+    "config.json",
+    "model.safetensors",
+    "audiovae.pth",
+    "tokenizer.json",
+)
+_LEGACY_FULL_TTS_FIELDS = {
+    "model",
+    "model_dir",
+    "load_denoiser",
+    "cfg_value",
+    "inference_timesteps",
+    "min_reference_ms",
+    "start_pad_ms",
+    "end_pad_ms",
+    "align_audio",
+    "cache_model",
+}
 
 
 def _default_runtime_options(config: AppConfig) -> RuntimeOptions:
     tts_defaults = TTSConfig()
+    tts_model = os.getenv("YOUDUB_TTS_MODEL", os.getenv("VOXCPM_MODEL", tts_defaults.model))
+    tts_model_dir = _optional_path_env("YOUDUB_TTS_MODEL_DIR") or _optional_path_env("VOXCPM_MODEL_DIR")
+    if tts_model_dir is None:
+        tts_model_dir = cached_huggingface_snapshot(
+            tts_model,
+            required_files=_VOXCPM_SNAPSHOT_FILES,
+        )
     synthesis_defaults = SynthesisConfig()
     publish_defaults = PublishPackageConfig()
     bilibili_defaults = BilibiliPublishConfig.from_env()
@@ -81,8 +107,8 @@ def _default_runtime_options(config: AppConfig) -> RuntimeOptions:
             correction_prompt=config.translation_prompts.correction_prompt or DEFAULT_CORRECTION_PROMPT,
         ),
         tts=TTSConfig(
-            model=os.getenv("YOUDUB_TTS_MODEL", os.getenv("VOXCPM_MODEL", tts_defaults.model)),
-            model_dir=_optional_path_env("YOUDUB_TTS_MODEL_DIR") or _optional_path_env("VOXCPM_MODEL_DIR"),
+            model=tts_model,
+            model_dir=tts_model_dir,
             hf_token=config.secrets.huggingface.token,
             load_denoiser=_bool_env(
                 "YOUDUB_TTS_LOAD_DENOISER",
@@ -188,7 +214,9 @@ def effective_task_config(
     include_secrets: bool = False,
 ) -> dict[str, Any]:
     defaults = default_task_config(config, include_secrets=include_secrets)
-    raw = merge_task_config(defaults, _migrate_legacy_proxy_override(overrides or {}))
+    migrated = _migrate_legacy_proxy_override(overrides or {})
+    migrated = _migrate_legacy_empty_tts_model_dir(defaults, migrated)
+    raw = merge_task_config(defaults, migrated)
     if include_secrets:
         secret_defaults = default_task_config(config, include_secrets=True)
         for section, fields in SECRET_FIELDS.items():
@@ -436,6 +464,26 @@ def _migrate_legacy_proxy_override(overrides: Mapping[str, Any]) -> Mapping[str,
         if _optional_str(proxy):
             return merge_task_config_overrides(overrides, {"network": {"proxy": proxy}})
     return overrides
+
+
+def _migrate_legacy_empty_tts_model_dir(
+    defaults: Mapping[str, Any],
+    overrides: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    default_tts = defaults.get("tts")
+    override_tts = overrides.get("tts")
+    if not isinstance(default_tts, Mapping) or not _optional_str(default_tts.get("model_dir")):
+        return overrides
+    if not isinstance(override_tts, Mapping) or not _LEGACY_FULL_TTS_FIELDS.issubset(override_tts):
+        return overrides
+    if _optional_str(override_tts.get("model_dir")):
+        return overrides
+
+    migrated_tts = dict(override_tts)
+    migrated_tts.pop("model_dir", None)
+    migrated = dict(overrides)
+    migrated["tts"] = migrated_tts
+    return migrated
 
 
 def dry_run_bilibili_options(options: RuntimeOptions) -> RuntimeOptions:
