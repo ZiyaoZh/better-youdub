@@ -61,6 +61,8 @@ class Task:
     updated_at: str = field(default_factory=utc_now)
     error: str | None = None
     config: dict[str, Any] = field(default_factory=dict)
+    resources_cleaned_at: str | None = None
+    resources_cleaned_bytes: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +78,8 @@ class Task:
             "updated_at": self.updated_at,
             "error": self.error,
             "config": self.config,
+            "resources_cleaned_at": self.resources_cleaned_at,
+            "resources_cleaned_bytes": self.resources_cleaned_bytes,
         }
 
     @classmethod
@@ -96,6 +100,8 @@ class Task:
             updated_at=data.get("updated_at", utc_now()),
             error=data.get("error"),
             config=data.get("config") if isinstance(data.get("config"), dict) else {},
+            resources_cleaned_at=data.get("resources_cleaned_at"),
+            resources_cleaned_bytes=max(0, int(data.get("resources_cleaned_bytes") or 0)),
         )
 
     def mark_step(self, step: PipelineStep, status: StepStatus) -> None:

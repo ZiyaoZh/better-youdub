@@ -29,10 +29,18 @@ from .config import AppConfig
 from .downloader import download_url_to_artifacts, supported_js_runtimes
 from .gpu import cleanup_gpu_memory
 from .ingest import create_pending_url_task, create_task_from_download_artifacts, create_task_from_local_media
-from .locking import TaskLock, TaskLockBusy, task_is_locked
+from .locking import TASK_LOCK_NAME, TaskLock, TaskLockBusy, task_is_locked
 from .models import PipelineStep, StepStatus, Task, TaskStatus, utc_now
 from .network import network_router
 from .pipeline import PipelineRunner
+from .resource_cleanup import (
+    ResourceUsage,
+    directory_resource_usage,
+    purge_directory_contents,
+    purge_task_resources,
+    task_folder_is_managed,
+    task_resource_usage,
+)
 from .storage import TaskStore
 from .synthesis import ffmpeg_has_filter
 from .task_config import (
@@ -123,6 +131,7 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=5, thread_name_prefix="youdub-web")
 _GPU_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="youdub-gpu")
 _DUBBING_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="youdub-dubbing")
 _LOCK = threading.RLock()
+_RESOURCE_CLEANUP_LOCK = threading.Lock()
 _RUNNING: dict[str, Future[Any]] = {}
 _TASK_ALIASES: dict[str, str] = {}
 _TERMINATING: set[str] = set()
@@ -242,6 +251,14 @@ def create_app() -> FastAPI:
     def system_status() -> dict[str, Any]:
         return _system_status_payload()
 
+    @app.get("/api/storage")
+    def storage_status() -> dict[str, Any]:
+        return _storage_status_payload()
+
+    @app.post("/api/storage/cleanup")
+    def cleanup_storage() -> dict[str, Any]:
+        return _cleanup_storage_resources()
+
     @app.get("/api/network/health")
     def network_health() -> dict[str, Any]:
         config = _config()
@@ -334,15 +351,21 @@ def create_app() -> FastAPI:
         upload_dir.mkdir(parents=True, exist_ok=True)
         upload_path = upload_dir / f"{uuid.uuid4().hex}{suffix}"
         try:
-            with upload_path.open("wb") as output:
-                shutil.copyfileobj(file.file, output)
-            if upload_path.stat().st_size <= 0:
-                raise HTTPException(status_code=422, detail="Uploaded file is empty")
-            task = create_task_from_local_media(upload_path, config.root, title or Path(original_name).stem)
-            _store().add(task)
-            return _task_payload(task)
+            try:
+                with TaskLock(upload_dir, "web-upload"):
+                    with upload_path.open("wb") as output:
+                        shutil.copyfileobj(file.file, output)
+                    if upload_path.stat().st_size <= 0:
+                        raise HTTPException(status_code=422, detail="Uploaded file is empty")
+                    task = create_task_from_local_media(upload_path, config.root, title or Path(original_name).stem)
+                    task.source = f"upload:{original_name}"
+                    _store().add(task)
+                    return _task_payload(task)
+            except TaskLockBusy as exc:
+                raise HTTPException(status_code=409, detail="Upload storage is busy") from exc
         finally:
             file.file.close()
+            upload_path.unlink(missing_ok=True)
 
     @app.post("/api/tasks/{task_id}/run")
     def run_step(task_id: str, payload: RunStepRequest) -> dict[str, Any]:
@@ -406,17 +429,34 @@ def create_app() -> FastAPI:
                 _clear_running_future(task_id, future)
         return _task_payload(task)
 
+    @app.get("/api/tasks/{task_id}/resources")
+    def task_resources(task_id: str) -> dict[str, Any]:
+        task = _get_task(task_id)
+        return _task_resource_payload(task)
+
+    @app.post("/api/tasks/{task_id}/resources/cleanup")
+    def cleanup_task_resources(task_id: str) -> dict[str, Any]:
+        with _RESOURCE_CLEANUP_LOCK:
+            task = _get_task(task_id)
+            result = _cleanup_task_resource_files(task)
+        return {
+            "task": _task_payload(result["task"]),
+            "reclaimed_bytes": result["reclaimed"].bytes,
+            "removed_files": result["reclaimed"].files,
+        }
+
     @app.delete("/api/tasks/{task_id}", status_code=204)
     def delete_task(task_id: str) -> None:
-        task = _get_task(task_id)
-        future = _RUNNING.get(task_id)
-        if (
-            (future is not None and not future.done())
-            or _task_publish_scheduled(task)
-            or task_is_locked(task.folder)
-        ):
-            raise HTTPException(status_code=409, detail="Cannot delete a running task")
-        _store().delete(task.id)
+        with _LOCK:
+            task = _get_task(task_id)
+            future = _RUNNING.get(task_id)
+            if (
+                (future is not None and not future.done())
+                or _task_publish_scheduled(task)
+                or task_is_locked(task.folder)
+            ):
+                raise HTTPException(status_code=409, detail="Cannot delete a running task")
+            _store().delete(task.id)
         return None
 
     @app.get("/api/task-config/defaults")
@@ -627,6 +667,162 @@ def _system_status_payload() -> dict[str, Any]:
         "memory": _memory_usage_payload(),
         "gpu_memory": _gpu_memory_usage_payload(),
         "disk": _disk_usage_payload(config.root),
+    }
+
+
+def _storage_status_payload() -> dict[str, Any]:
+    config = _config()
+    tasks = _store().load_all()
+    total = ResourceUsage()
+    cleanable = ResourceUsage()
+    cleanable_tasks = 0
+    protected_tasks = 0
+    invalid_task_folders = 0
+    visited: set[Path] = set()
+
+    for task in tasks:
+        if not task_folder_is_managed(task.folder, config.root):
+            invalid_task_folders += 1
+            continue
+        folder = task.folder.resolve()
+        if folder in visited:
+            continue
+        visited.add(folder)
+        usage = task_resource_usage(folder)
+        total += usage
+        if usage.files <= 0:
+            continue
+        if _task_has_active_work(task):
+            protected_tasks += 1
+            continue
+        cleanable += usage
+        cleanable_tasks += 1
+
+    upload_dir = config.root / "_uploads"
+    upload_usage = directory_resource_usage(
+        upload_dir,
+        preserve=frozenset({TASK_LOCK_NAME}),
+    )
+    uploads_protected = task_is_locked(upload_dir)
+    cleanable_uploads = ResourceUsage() if uploads_protected else upload_usage
+    return {
+        "root": str(config.root),
+        "disk": _disk_usage_payload(config.root),
+        "task_records": len(tasks),
+        "task_resources": total.to_dict(),
+        "orphan_uploads": upload_usage.to_dict(),
+        "cleanable": {
+            "bytes": cleanable.bytes + cleanable_uploads.bytes,
+            "files": cleanable.files + cleanable_uploads.files,
+            "tasks": cleanable_tasks,
+        },
+        "protected_tasks": protected_tasks,
+        "uploads_protected": uploads_protected,
+        "invalid_task_folders": invalid_task_folders,
+    }
+
+
+def _task_resource_payload(task: Task) -> dict[str, Any]:
+    config = _config()
+    managed = task_folder_is_managed(task.folder, config.root)
+    usage = task_resource_usage(task.folder) if managed else ResourceUsage()
+    active = _task_has_active_work(task)
+    return {
+        "task_id": task.id,
+        "managed": managed,
+        "cleanable": managed and usage.files > 0 and not active,
+        "active": active,
+        "resources": usage.to_dict(),
+        "resources_cleaned_at": task.resources_cleaned_at,
+        "resources_cleaned_bytes": task.resources_cleaned_bytes,
+    }
+
+
+def _task_has_active_work(task: Task) -> bool:
+    with _LOCK:
+        if _unfinished_future_for_task(task.id) is not None or _task_publish_scheduled(task):
+            return True
+        return task_is_locked(task.folder)
+
+
+def _cleanup_task_resource_files(task: Task) -> dict[str, Any]:
+    config = _config()
+    if not task_folder_is_managed(task.folder, config.root):
+        raise HTTPException(status_code=409, detail="Task folder is outside the managed video root")
+
+    task_lock: TaskLock | None = None
+    with _LOCK:
+        task = _get_task(task.id)
+        if _unfinished_future_for_task(task.id) is not None or _task_publish_scheduled(task):
+            raise HTTPException(status_code=409, detail="Cannot clean resources for an active task")
+        try:
+            task_lock = TaskLock(task.folder, "resource-cleanup").acquire(blocking=False)
+        except TaskLockBusy as exc:
+            raise HTTPException(status_code=409, detail="Cannot clean resources for an active task") from exc
+
+    try:
+        reclaimed = purge_task_resources(task.folder)
+        if reclaimed.files > 0:
+            task.resources_cleaned_at = utc_now()
+            task.resources_cleaned_bytes += reclaimed.bytes
+            _store().update(task)
+        return {"task": task, "reclaimed": reclaimed}
+    finally:
+        if task_lock is not None:
+            task_lock.release()
+
+
+def _cleanup_storage_resources() -> dict[str, Any]:
+    reclaimed = ResourceUsage()
+    cleaned_tasks = 0
+    skipped_tasks = 0
+    failed_tasks = 0
+    config = _config()
+
+    with _RESOURCE_CLEANUP_LOCK:
+        for task in _store().load_all():
+            if not task_folder_is_managed(task.folder, config.root):
+                skipped_tasks += 1
+                continue
+            try:
+                result = _cleanup_task_resource_files(task)
+            except HTTPException as exc:
+                if exc.status_code == 409:
+                    skipped_tasks += 1
+                else:
+                    failed_tasks += 1
+                continue
+            except OSError:
+                failed_tasks += 1
+                continue
+            task_reclaimed = result["reclaimed"]
+            reclaimed += task_reclaimed
+            if task_reclaimed.files > 0:
+                cleaned_tasks += 1
+
+        upload_dir = config.root / "_uploads"
+        upload_reclaimed = ResourceUsage()
+        try:
+            with TaskLock(upload_dir, "resource-cleanup-uploads"):
+                upload_reclaimed = purge_directory_contents(
+                    upload_dir,
+                    preserve=frozenset({TASK_LOCK_NAME}),
+                )
+        except TaskLockBusy:
+            skipped_tasks += 1
+        except OSError:
+            failed_tasks += 1
+        reclaimed += upload_reclaimed
+
+        after = _storage_status_payload()
+
+    return {
+        "reclaimed_bytes": reclaimed.bytes,
+        "removed_files": reclaimed.files,
+        "cleaned_tasks": cleaned_tasks,
+        "skipped_tasks": skipped_tasks,
+        "failed_tasks": failed_tasks,
+        "storage": after,
     }
 
 
@@ -1414,6 +1610,8 @@ def _downloaded_task_payload(existing: Task, incoming: Task, config: dict[str, A
         created_at=existing.created_at,
         error=None,
         config=dict(config if config is not None else existing.config),
+        resources_cleaned_at=existing.resources_cleaned_at,
+        resources_cleaned_bytes=existing.resources_cleaned_bytes,
     )
     merged.mark_step(PipelineStep.INGEST, StepStatus.SUCCESS)
     return merged

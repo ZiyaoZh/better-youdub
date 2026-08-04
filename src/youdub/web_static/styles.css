@@ -96,7 +96,7 @@ textarea {
 
 .view-switch {
   display: grid;
-  grid-template-columns: repeat(2, minmax(58px, 1fr));
+  grid-template-columns: repeat(3, minmax(58px, 1fr));
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
@@ -160,14 +160,16 @@ textarea {
   overflow: auto;
 }
 
-.network-workspace {
+.network-workspace,
+.storage-workspace {
   flex: 1;
   min-height: 0;
   padding: 16px;
   overflow: hidden;
 }
 
-.network-page {
+.network-page,
+.storage-page {
   height: 100%;
   min-height: 0;
   padding: 18px;
@@ -181,6 +183,95 @@ textarea {
   gap: 16px;
   padding-bottom: 14px;
   border-bottom: 1px solid var(--border);
+}
+
+.storage-page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.storage-page-head h2,
+.storage-page-head p {
+  margin: 0;
+}
+
+.storage-page-head h2 {
+  font-size: 17px;
+}
+
+.storage-page-head p {
+  max-width: min(760px, calc(100vw - 160px));
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storage-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-bottom: 1px solid var(--border);
+}
+
+.storage-summary div {
+  min-width: 0;
+  padding: 18px 16px;
+  border-left: 1px solid var(--border);
+}
+
+.storage-summary div:first-child {
+  border-left: 0;
+}
+
+.storage-summary span,
+.storage-summary strong {
+  display: block;
+}
+
+.storage-summary span {
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.storage-summary strong {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.storage-breakdown {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.storage-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(120px, 2fr);
+  gap: 16px;
+  padding: 9px 0;
+  font-size: 13px;
+}
+
+.storage-row span {
+  color: var(--muted);
+}
+
+.storage-row strong {
+  text-align: right;
+}
+
+.storage-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-top: 16px;
 }
 
 .network-page-head h2,
@@ -918,6 +1009,12 @@ textarea:focus {
   font-size: 13px;
 }
 
+.resource-cleanup-meta {
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .message {
   min-height: 20px;
   color: var(--muted);
@@ -950,12 +1047,14 @@ textarea:focus {
     overflow: visible;
   }
 
-  .network-workspace {
+  .network-workspace,
+  .storage-workspace {
     min-height: calc(100dvh - 84px);
     overflow: visible;
   }
 
-  .network-page {
+  .network-page,
+  .storage-page {
     height: auto;
     overflow: visible;
   }
@@ -983,6 +1082,14 @@ textarea:focus {
     min-height: 64px;
     padding: 12px;
     align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .topbar-copy,
+  .topbar p {
+    width: 100%;
+    max-width: 100%;
   }
 
   .workspace {
@@ -991,23 +1098,39 @@ textarea:focus {
   }
 
   .topbar-actions {
+    width: 100%;
     align-items: stretch;
   }
 
   .view-switch {
-    grid-template-columns: repeat(2, minmax(48px, 1fr));
+    flex: 1;
+    grid-template-columns: repeat(3, minmax(46px, 1fr));
   }
 
-  .network-workspace {
+  .network-workspace,
+  .storage-workspace {
     padding: 10px;
   }
 
-  .network-page {
+  .network-page,
+  .storage-page {
     padding: 12px;
   }
 
   .network-summary {
     grid-template-columns: auto 1fr;
+  }
+
+  .storage-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .storage-summary div:nth-child(3) {
+    border-left: 0;
+  }
+
+  .storage-summary div:nth-child(n + 3) {
+    border-top: 1px solid var(--border);
   }
 
   .meta-grid {

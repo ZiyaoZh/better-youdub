@@ -199,6 +199,8 @@ const state = {
   configDrawerOpen: false,
   activeView: "tasks",
   networkRefreshing: false,
+  storageRefreshing: false,
+  storage: null,
 }
 
 let taskPollTimer = null
@@ -253,6 +255,11 @@ function fmtSize(bytes) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function fmtFileCount(files) {
+  const value = Number(files) || 0
+  return `${value} 个文件`
 }
 
 function fmtCapacity(bytes) {
@@ -426,17 +433,60 @@ async function refreshNetworkHealth({probe = false, force = false} = {}) {
 
 function activateView(view) {
   state.activeView = view
-  const networkActive = view === "network"
-  $("taskWorkspace").classList.toggle("hidden", networkActive)
-  $("networkWorkspace").classList.toggle("hidden", !networkActive)
-  $("tasksViewButton").classList.toggle("active", !networkActive)
-  $("networkViewButton").classList.toggle("active", networkActive)
+  $("taskWorkspace").classList.toggle("hidden", view !== "tasks")
+  $("networkWorkspace").classList.toggle("hidden", view !== "network")
+  $("storageWorkspace").classList.toggle("hidden", view !== "storage")
+  $("tasksViewButton").classList.toggle("active", view === "tasks")
+  $("networkViewButton").classList.toggle("active", view === "network")
+  $("storageViewButton").classList.toggle("active", view === "storage")
 }
 
 async function openNetworkView() {
   activateView("network")
   await refreshNetworkHealth()
   await refreshNetworkHealth({probe: true})
+}
+
+function renderStorage(payload) {
+  state.storage = payload
+  const taskResources = payload?.task_resources || {}
+  const orphanUploads = payload?.orphan_uploads || {}
+  const cleanable = payload?.cleanable || {}
+  $("storageRoot").textContent = payload?.root || "-"
+  $("storageTaskResources").textContent = `${fmtCapacity(taskResources.bytes)} · ${fmtFileCount(taskResources.files)}`
+  $("storageOrphanUploads").textContent = `${fmtCapacity(orphanUploads.bytes)} · ${fmtFileCount(orphanUploads.files)}`
+  $("storageCleanable").textContent = `${fmtCapacity(cleanable.bytes)} · ${fmtFileCount(cleanable.files)}`
+  $("storageTaskRecords").textContent = String(Number(payload?.task_records) || 0)
+  $("storageDiskUsage").textContent = fmtResourceUsage(payload?.disk)
+  $("storageCleanableTasks").textContent = String(Number(cleanable.tasks) || 0)
+  $("storageProtectedTasks").textContent = String(Number(payload?.protected_tasks) || 0)
+  $("cleanupStorageButton").disabled = state.storageRefreshing || !(Number(cleanable.bytes) > 0)
+}
+
+async function refreshStorage() {
+  if (state.storageRefreshing) return state.storage
+  state.storageRefreshing = true
+  $("refreshStorageButton").disabled = true
+  $("cleanupStorageButton").disabled = true
+  setMessage("storageMessage", "统计中")
+  try {
+    const payload = await api("/api/storage")
+    renderStorage(payload)
+    setMessage("storageMessage", "")
+    return payload
+  } catch (error) {
+    setMessage("storageMessage", error.message, true)
+    throw error
+  } finally {
+    state.storageRefreshing = false
+    $("refreshStorageButton").disabled = false
+    if (state.storage) renderStorage(state.storage)
+  }
+}
+
+async function openStorageView() {
+  activateView("storage")
+  await refreshStorage()
 }
 
 async function refreshTasks() {
@@ -590,7 +640,13 @@ function renderDetail(task, options = {}) {
   $("terminateButton").disabled = !taskActive(task) || task.terminating
   $("terminateButton").textContent = task.terminating ? "终止中" : "终止任务"
   $("deleteButton").disabled = taskActive(task)
+  $("cleanTaskResourcesButton").disabled = taskActive(task)
   $("saveTaskConfigButton").disabled = taskActive(task)
+  const cleanupMeta = $("resourceCleanupMeta")
+  cleanupMeta.classList.toggle("hidden", !task.resources_cleaned_at)
+  cleanupMeta.textContent = task.resources_cleaned_at
+    ? `上次清理 ${fmtTime(task.resources_cleaned_at)} · 累计释放 ${fmtCapacity(task.resources_cleaned_bytes)}`
+    : ""
   renderSteps(task)
   renderArtifacts(task)
   const editingConfig = $("taskConfigForm").contains(document.activeElement)
@@ -738,7 +794,7 @@ function renderArtifacts(task) {
   list.innerHTML = ""
   const artifacts = task.artifacts || []
   if (!artifacts.length) {
-    list.textContent = "暂无产物"
+    list.textContent = task.resources_cleaned_at ? "资源已清理" : "暂无产物"
   } else {
     for (const artifact of artifacts) {
       const link = document.createElement("a")
@@ -1029,6 +1085,63 @@ async function deleteSelected() {
   await refreshTasks()
 }
 
+async function cleanupSelectedTaskResources() {
+  if (!state.selectedId) return
+  const resources = await api(`/api/tasks/${state.selectedId}/resources`)
+  if (!resources.managed) {
+    window.alert("任务目录不在受管视频目录内，无法清理。")
+    return
+  }
+  if (resources.active) {
+    window.alert("任务正在运行或已排队，无法清理。")
+    return
+  }
+  if (!(Number(resources.resources?.bytes) > 0)) {
+    window.alert("该任务没有可清理资源。")
+    return
+  }
+  const expected = fmtCapacity(resources.resources.bytes)
+  if (!window.confirm(`清理该任务的全部视频和中间产物，预计释放 ${expected}？任务记录会保留，此操作不可恢复。`)) return
+  $("cleanTaskResourcesButton").disabled = true
+  try {
+    const result = await api(`/api/tasks/${state.selectedId}/resources/cleanup`, {method: "POST"})
+    renderDetail(result.task, {forceConfig: true})
+    window.alert(`已释放 ${fmtCapacity(result.reclaimed_bytes)}，删除 ${fmtFileCount(result.removed_files)}。`)
+    await Promise.all([refreshTasks(), refreshSystem()])
+  } finally {
+    await refreshSelectedTask().catch(() => {
+      $("cleanTaskResourcesButton").disabled = false
+    })
+  }
+}
+
+async function cleanupAllStorageResources() {
+  const storage = await refreshStorage()
+  const cleanable = storage?.cleanable || {}
+  if (!(Number(cleanable.bytes) > 0)) return
+  const expected = fmtCapacity(cleanable.bytes)
+  const tasks = Number(cleanable.tasks) || 0
+  if (!window.confirm(`清理 ${tasks} 个非活动任务的全部视频、中间产物和遗留上传，预计释放 ${expected}？任务记录会保留，此操作不可恢复。`)) return
+  state.storageRefreshing = true
+  $("cleanupStorageButton").disabled = true
+  $("refreshStorageButton").disabled = true
+  setMessage("storageMessage", "清理中")
+  try {
+    const result = await api("/api/storage/cleanup", {method: "POST"})
+    renderStorage(result.storage)
+    const skipped = result.skipped_tasks ? `，跳过 ${result.skipped_tasks} 个活动或受保护任务` : ""
+    const failed = result.failed_tasks ? `，${result.failed_tasks} 个任务清理失败` : ""
+    setMessage("storageMessage", `已释放 ${fmtCapacity(result.reclaimed_bytes)}，删除 ${fmtFileCount(result.removed_files)}${skipped}${failed}`, Boolean(result.failed_tasks))
+    await Promise.all([refreshTasks(), refreshSystem()])
+  } catch (error) {
+    setMessage("storageMessage", error.message, true)
+  } finally {
+    state.storageRefreshing = false
+    $("refreshStorageButton").disabled = false
+    if (state.storage) renderStorage(state.storage)
+  }
+}
+
 async function submitUrl(event) {
   event.preventDefault()
   setMessage("createMessage", "")
@@ -1078,15 +1191,20 @@ function bindEvents() {
     refreshSystem()
     if (state.activeView === "network") {
       refreshNetworkHealth({probe: true, force: true})
+    } else if (state.activeView === "storage") {
+      refreshStorage()
     } else {
       refreshTasks()
     }
   })
   $("tasksViewButton").addEventListener("click", () => activateView("tasks"))
   $("networkViewButton").addEventListener("click", () => openNetworkView().catch(() => undefined))
+  $("storageViewButton").addEventListener("click", () => openStorageView().catch(() => undefined))
   $("networkProbeButton").addEventListener("click", () => {
     refreshNetworkHealth({probe: true, force: true}).catch(() => undefined)
   })
+  $("refreshStorageButton").addEventListener("click", () => refreshStorage().catch(() => undefined))
+  $("cleanupStorageButton").addEventListener("click", () => cleanupAllStorageResources().catch((error) => setMessage("storageMessage", error.message, true)))
   $("prevTaskPageButton").addEventListener("click", () => changeTaskPage(-1))
   $("nextTaskPageButton").addEventListener("click", () => changeTaskPage(1))
   $("newTaskButton").addEventListener("click", openCreateDialog)
@@ -1096,6 +1214,7 @@ function bindEvents() {
   document.querySelectorAll("[data-close-config]").forEach((node) => node.addEventListener("click", closeTaskConfig))
   $("runAllButton").addEventListener("click", () => runAll().catch((error) => window.alert(error.message)))
   $("terminateButton").addEventListener("click", () => terminateSelected().catch((error) => window.alert(error.message)))
+  $("cleanTaskResourcesButton").addEventListener("click", () => cleanupSelectedTaskResources().catch((error) => window.alert(error.message)))
   $("deleteButton").addEventListener("click", () => deleteSelected().catch((error) => window.alert(error.message)))
   window.addEventListener("resize", debounce(() => {
     const previousLimit = state.taskPage.limit
@@ -1147,7 +1266,7 @@ document.addEventListener("visibilitychange", () => {
     refreshSystem().catch(() => undefined)
     if (state.activeView === "network") {
       refreshNetworkHealth({probe: true}).catch(() => undefined)
-    } else {
+    } else if (state.activeView === "tasks") {
       refreshTasks().catch(() => undefined)
     }
   }

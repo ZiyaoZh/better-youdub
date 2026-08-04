@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>better-youdub</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=20260802-scheduled-publish" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20260804-resource-cleanup" />
   </head>
   <body>
     <div class="app-shell">
@@ -18,6 +18,7 @@
           <nav class="view-switch" aria-label="主视图">
             <button id="tasksViewButton" class="view-button active" type="button">任务</button>
             <button id="networkViewButton" class="view-button" type="button">网络</button>
+            <button id="storageViewButton" class="view-button" type="button">存储</button>
           </nav>
           <button id="refreshButton" class="icon-button" title="刷新" type="button">↻</button>
         </div>
@@ -65,6 +66,7 @@
               <button id="runAllButton" class="button primary" type="button">运行完整链路</button>
               <button id="workflowConfigButton" class="button secondary" type="button">流程参数</button>
               <button id="terminateButton" class="button danger" type="button">终止任务</button>
+              <button id="cleanTaskResourcesButton" class="button danger" type="button">清理任务资源</button>
               <button id="deleteButton" class="button danger" type="button">删除任务记录</button>
             </div>
 
@@ -73,6 +75,7 @@
 
             <div class="section-title">产物</div>
             <div id="artifactList" class="artifact-list"></div>
+            <div id="resourceCleanupMeta" class="resource-cleanup-meta hidden"></div>
 
             <div id="detailError" class="error-box hidden"></div>
           </div>
@@ -109,6 +112,33 @@
             </table>
           </div>
           <div id="networkMessage" class="message"></div>
+        </section>
+      </main>
+
+      <main id="storageWorkspace" class="storage-workspace hidden">
+        <section class="panel storage-page">
+          <div class="storage-page-head">
+            <div>
+              <h2>存储清理</h2>
+              <p id="storageRoot">-</p>
+            </div>
+            <button id="refreshStorageButton" class="icon-button" title="重新统计" aria-label="重新统计" type="button">↻</button>
+          </div>
+          <div class="storage-summary">
+            <div><span>任务资源</span><strong id="storageTaskResources">-</strong></div>
+            <div><span>遗留上传</span><strong id="storageOrphanUploads">-</strong></div>
+            <div><span>可释放</span><strong id="storageCleanable">-</strong></div>
+            <div><span>任务记录</span><strong id="storageTaskRecords">-</strong></div>
+          </div>
+          <div class="storage-breakdown">
+            <div class="storage-row"><span>磁盘使用</span><strong id="storageDiskUsage">-</strong></div>
+            <div class="storage-row"><span>可清理任务</span><strong id="storageCleanableTasks">-</strong></div>
+            <div class="storage-row"><span>活动任务保护</span><strong id="storageProtectedTasks">-</strong></div>
+          </div>
+          <div class="storage-actions">
+            <button id="cleanupStorageButton" class="button danger" type="button">清理全部历史资源</button>
+            <div id="storageMessage" class="message"></div>
+          </div>
         </section>
       </main>
     </div>
@@ -151,6 +181,6 @@
       </div>
     </aside>
 
-    <script src="/assets/app.js?v=20260802-scheduled-publish"></script>
+    <script src="/assets/app.js?v=20260804-resource-cleanup"></script>
   </body>
 </html>

@@ -76,6 +76,7 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
         "/api/health",
         "/api/doctor",
         "/api/system",
+        "/api/storage",
         "/api/network/health",
     ):
         response = client.get(path)
@@ -90,9 +91,13 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert 'id="systemLine"' in index
     assert 'id="taskPager"' in index
     assert 'id="finalVideo"' not in index
-    assert "20260802-scheduled-publish" in index
+    assert "20260804-resource-cleanup" in index
     assert 'id="networkWorkspace"' in index
     assert 'id="networkViewButton"' in index
+    assert 'id="storageViewButton"' in index
+    assert 'id="storageWorkspace"' in index
+    assert 'id="cleanupStorageButton"' in index
+    assert 'id="cleanTaskResourcesButton"' in index
     assert "/assets/app.js?v=" in index
     assert "/assets/styles.css?v=" in index
     app_js = client.get("/assets/app.js").text
@@ -129,6 +134,10 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert "taskNeedsActivePolling" in app_js
     assert "scheduled-publish" in app_js
     assert "step-schedule" in styles
+    assert "/api/storage/cleanup" in app_js
+    assert "/resources/cleanup" in app_js
+    assert "storage-summary" in styles
+    assert "resource-cleanup-meta" in styles
 
     assert client.get("/api/health").json() == {"status": "ok"}
 
@@ -398,6 +407,10 @@ def test_web_scheduled_publish_waits_without_worker_or_task_lock(monkeypatch, tm
     probe = TaskLock(Path(task["folder"]), "scheduled-probe").acquire(blocking=False)
     probe.release()
 
+    cleanup = client.post(f"/api/tasks/{task['id']}/resources/cleanup")
+    assert cleanup.status_code == 409
+    assert cleanup.json()["detail"] == "Cannot clean resources for an active task"
+    assert (Path(task["folder"]) / "download.mp4").is_file()
     assert client.post(f"/api/tasks/{task['id']}/run-all").status_code == 409
     assert client.delete(f"/api/tasks/{task['id']}").status_code == 409
     terminated = client.post(f"/api/tasks/{task['id']}/terminate")
@@ -506,6 +519,164 @@ def test_web_creates_local_task_and_lists_artifacts(monkeypatch, tmp_path: Path)
     assert artifacts[0]["url"] == f"/api/tasks/{task['id']}/artifacts/download-video"
     saved_task = json.loads((tmp_path / "tasks" / "tasks.json").read_text(encoding="utf-8"))[0]
     assert saved_task["config"] == {}
+
+
+def test_web_cleans_task_resources_but_keeps_task_record(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task_payload = client.post(
+        "/api/tasks/local",
+        json={"source": str(source), "title": "Cleanup"},
+    ).json()
+    task_folder = Path(task_payload["folder"])
+    nested = task_folder / "segments" / "tts"
+    nested.mkdir(parents=True)
+    (nested / "0001.wav").write_bytes(b"audio-data")
+    original_steps = task_payload["steps"]
+
+    resources = client.get(f"/api/tasks/{task_payload['id']}/resources").json()
+
+    assert resources["cleanable"] is True
+    assert resources["resources"] == {"bytes": 15, "files": 2}
+
+    response = client.post(f"/api/tasks/{task_payload['id']}/resources/cleanup")
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["reclaimed_bytes"] == 15
+    assert result["removed_files"] == 2
+    assert result["task"]["steps"] == original_steps
+    assert result["task"]["resources_cleaned_at"]
+    assert result["task"]["resources_cleaned_bytes"] == 15
+    assert (task_folder / "task.json").is_file()
+    assert (task_folder / ".task.lock").is_file()
+    assert sorted(path.name for path in task_folder.iterdir()) == [".task.lock", "task.json"]
+    assert client.get(f"/api/tasks/{task_payload['id']}").status_code == 200
+    assert client.get(f"/api/tasks/{task_payload['id']}/artifacts/download-video").status_code == 404
+
+    saved = json.loads((tmp_path / "tasks" / "tasks.json").read_text(encoding="utf-8"))[0]
+    assert saved["id"] == task_payload["id"]
+    assert saved["steps"] == original_steps
+    assert saved["resources_cleaned_bytes"] == 15
+
+
+def test_web_refuses_to_clean_resources_for_locked_task(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task = client.post("/api/tasks/local", json={"source": str(source), "title": "Locked"}).json()
+    media = Path(task["folder"]) / "download.mp4"
+
+    with TaskLock(Path(task["folder"]), "test-active"):
+        resources = client.get(f"/api/tasks/{task['id']}/resources").json()
+        response = client.post(f"/api/tasks/{task['id']}/resources/cleanup")
+
+    assert resources["active"] is True
+    assert resources["cleanable"] is False
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Cannot clean resources for an active task"
+    assert media.read_bytes() == b"video"
+
+
+def test_web_refuses_to_clean_task_folder_outside_managed_root(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task_payload = client.post(
+        "/api/tasks/local",
+        json={"source": str(source), "title": "Outside"},
+    ).json()
+    task = web_module._store().get(task_payload["id"])
+    outside = tmp_path / "outside-task"
+    outside.mkdir()
+    protected = outside / "protected.mp4"
+    protected.write_bytes(b"keep")
+    task.folder = outside
+    web_module._store().update(task)
+
+    resources = client.get(f"/api/tasks/{task.id}/resources").json()
+    response = client.post(f"/api/tasks/{task.id}/resources/cleanup")
+
+    assert resources["managed"] is False
+    assert resources["cleanable"] is False
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Task folder is outside the managed video root"
+    assert protected.read_bytes() == b"keep"
+    assert client.get("/api/storage").json()["invalid_task_folders"] == 1
+
+
+def test_web_bulk_cleanup_skips_active_tasks_and_removes_orphan_uploads(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    task_payloads = []
+    for index in range(2):
+        source = tmp_path / f"sample-{index}.mp4"
+        source.write_bytes(f"video-{index}".encode())
+        task_payloads.append(
+            client.post("/api/tasks/local", json={"source": str(source), "title": f"Task {index}"}).json()
+        )
+    upload_dir = tmp_path / "videos" / "_uploads"
+    upload_dir.mkdir(parents=True)
+    orphan = upload_dir / "old-upload.mp4"
+    orphan.write_bytes(b"orphan")
+    locked_folder = Path(task_payloads[1]["folder"])
+
+    before = client.get("/api/storage").json()
+    assert before["task_records"] == 2
+    assert before["cleanable"]["bytes"] == 20
+    assert before["cleanable"]["tasks"] == 2
+
+    with TaskLock(locked_folder, "test-active"):
+        response = client.post("/api/storage/cleanup")
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["reclaimed_bytes"] == 13
+    assert result["removed_files"] == 2
+    assert result["cleaned_tasks"] == 1
+    assert result["skipped_tasks"] == 1
+    assert result["failed_tasks"] == 0
+    assert result["storage"]["task_records"] == 2
+    assert not orphan.exists()
+    assert not (Path(task_payloads[0]["folder"]) / "download.mp4").exists()
+    assert (locked_folder / "download.mp4").is_file()
+
+
+def test_web_upload_does_not_keep_staging_copy(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+
+    response = client.post(
+        "/api/tasks/upload",
+        files={"file": ("sample.mp4", b"uploaded-video", "video/mp4")},
+        data={"title": "Upload"},
+    )
+
+    assert response.status_code == 201
+    task = response.json()
+    assert task["source"] == "upload:sample.mp4"
+    assert (Path(task["folder"]) / "download.mp4").read_bytes() == b"uploaded-video"
+    upload_dir = tmp_path / "videos" / "_uploads"
+    assert sorted(path.name for path in upload_dir.iterdir()) == [".task.lock"]
+
+
+def test_web_bulk_cleanup_protects_upload_in_progress(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    upload_dir = tmp_path / "videos" / "_uploads"
+    upload_dir.mkdir(parents=True)
+    in_progress = upload_dir / "in-progress.mp4"
+    in_progress.write_bytes(b"uploading")
+
+    with TaskLock(upload_dir, "web-upload"):
+        storage = client.get("/api/storage").json()
+        response = client.post("/api/storage/cleanup")
+
+    assert storage["orphan_uploads"] == {"bytes": 9, "files": 1}
+    assert storage["cleanable"] == {"bytes": 0, "files": 0, "tasks": 0}
+    assert storage["uploads_protected"] is True
+    assert response.status_code == 200
+    assert response.json()["reclaimed_bytes"] == 0
+    assert response.json()["skipped_tasks"] == 1
+    assert in_progress.read_bytes() == b"uploading"
 
 
 def test_web_task_list_paginates_summary_payloads(monkeypatch, tmp_path: Path) -> None:

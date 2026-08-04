@@ -110,6 +110,8 @@ class TaskStore:
             updated_at=existing.updated_at,
             error=existing.error,
             config=dict(existing.config or incoming.config),
+            resources_cleaned_at=existing.resources_cleaned_at,
+            resources_cleaned_bytes=existing.resources_cleaned_bytes,
         )
 
     def _write_task_metadata(self, task: Task) -> None:
