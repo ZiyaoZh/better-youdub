@@ -872,6 +872,15 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.step-schedule {
+  max-width: 100%;
+  margin-top: 7px;
+  color: var(--warning);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .step-card-actions {
   display: grid;
 }

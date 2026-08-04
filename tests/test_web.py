@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import types
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -22,6 +23,7 @@ from youdub.web import create_app
 
 
 def _client(monkeypatch, tmp_path: Path) -> TestClient:
+    web_module._PUBLISH_SCHEDULER.clear()
     web_module._RUNNING.clear()
     web_module._TASK_ALIASES.clear()
     web_module._TERMINATING.clear()
@@ -88,7 +90,7 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert 'id="systemLine"' in index
     assert 'id="taskPager"' in index
     assert 'id="finalVideo"' not in index
-    assert "20260731-network-health" in index
+    assert "20260802-scheduled-publish" in index
     assert 'id="networkWorkspace"' in index
     assert 'id="networkViewButton"' in index
     assert "/assets/app.js?v=" in index
@@ -122,6 +124,11 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert "最大轮次" not in app_js
     assert "重配轮次" not in app_js
     assert "最大重配轮次" not in app_js
+    assert "定时发布时间（北京时间）" in app_js
+    assert 'timeZone: "Asia/Shanghai"' in app_js
+    assert "taskNeedsActivePolling" in app_js
+    assert "scheduled-publish" in app_js
+    assert "step-schedule" in styles
 
     assert client.get("/api/health").json() == {"status": "ok"}
 
@@ -338,6 +345,109 @@ def test_web_displays_pending_upload_after_publish_package_until_real_upload(mon
     uploaded = client.get(f"/api/tasks/{task.id}").json()
 
     assert uploaded["display_status"] == "success"
+
+
+def test_web_normalizes_scheduled_publish_time_as_beijing_time(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task = client.post("/api/tasks/local", json={"source": str(source), "title": "Scheduled"}).json()
+    config = task["config"]
+    config["publish"]["scheduled_at"] = "2026-08-03T09:30"
+
+    response = client.put(f"/api/tasks/{task['id']}/config", json={"config": config})
+
+    assert response.status_code == 200
+    assert response.json()["config"]["publish"]["scheduled_at"] == "2026-08-03T09:30:00+08:00"
+    saved = json.loads((tmp_path / "tasks" / "tasks.json").read_text(encoding="utf-8"))[0]
+    assert saved["config"]["publish"]["scheduled_at"] == "2026-08-03T09:30:00+08:00"
+
+    config = response.json()["config"]
+    config["publish"]["scheduled_at"] = "not-a-time"
+    invalid = client.put(f"/api/tasks/{task['id']}/config", json={"config": config})
+
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"] == "scheduled_at must be a valid ISO 8601 timestamp"
+
+
+def test_web_scheduled_publish_waits_without_worker_or_task_lock(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task = client.post("/api/tasks/local", json={"source": str(source), "title": "Scheduled"}).json()
+    run_at = datetime.now(web_module.BEIJING_TIMEZONE) + timedelta(hours=1)
+    config = task["config"]
+    config["publish"]["scheduled_at"] = run_at.isoformat()
+    assert client.put(f"/api/tasks/{task['id']}/config", json={"config": config}).status_code == 200
+
+    def fail_submit(*args: object, **kwargs: object) -> None:
+        raise AssertionError("future publish must not be submitted to a worker while waiting")
+
+    monkeypatch.setattr(web_module, "_submit_step_job", fail_submit)
+    response = client.post(f"/api/tasks/{task['id']}/run", json={"step": "publish-bilibili"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "queued"
+    assert payload["queued"] is True
+    assert payload["running"] is False
+    assert payload["display_status"] == "scheduled-publish"
+    assert payload["steps"]["publish-bilibili"] == "queued"
+    assert task["id"] not in web_module._RUNNING
+    assert web_module._PUBLISH_SCHEDULER.contains(task["id"])
+    probe = TaskLock(Path(task["folder"]), "scheduled-probe").acquire(blocking=False)
+    probe.release()
+
+    assert client.post(f"/api/tasks/{task['id']}/run-all").status_code == 409
+    assert client.delete(f"/api/tasks/{task['id']}").status_code == 409
+    terminated = client.post(f"/api/tasks/{task['id']}/terminate")
+    assert terminated.status_code == 200
+    assert terminated.json()["display_status"] == "terminated"
+    assert terminated.json()["steps"]["publish-bilibili"] == "failed"
+    assert not web_module._PUBLISH_SCHEDULER.contains(task["id"])
+
+
+def test_web_restores_and_dispatches_persisted_scheduled_publish(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task_payload = client.post("/api/tasks/local", json={"source": str(source), "title": "Restore"}).json()
+    store = web_module._store()
+    task = store.get(task_payload["id"])
+    future_run_at = datetime.now(web_module.BEIJING_TIMEZONE) + timedelta(days=1)
+    task.config = {"publish": {"scheduled_at": future_run_at.isoformat()}}
+    task.status = TaskStatus.QUEUED
+    task.mark_step(PipelineStep.PUBLISH_BILIBILI, StepStatus.QUEUED)
+    store.update(task)
+
+    web_module._restore_scheduled_publishes()
+
+    assert web_module._PUBLISH_SCHEDULER.contains(task.id)
+    restored = client.get(f"/api/tasks/{task.id}").json()
+    assert restored["queued"] is True
+    assert restored["running"] is False
+    assert restored["display_status"] == "scheduled-publish"
+
+    web_module._PUBLISH_SCHEDULER.clear()
+    task = store.get(task.id)
+    task.config = {"publish": {"scheduled_at": "2020-08-03T09:30:00+08:00"}}
+    store.update(task)
+    dispatched = threading.Event()
+
+    def fake_job(task_id: str, step: PipelineStep, *args: object, **kwargs: object) -> None:
+        assert task_id == task.id
+        assert step == PipelineStep.PUBLISH_BILIBILI
+        current = store.get(task_id)
+        current.status = TaskStatus.SUCCESS
+        current.mark_step(step, StepStatus.SUCCESS)
+        store.update(current)
+        dispatched.set()
+
+    monkeypatch.setattr(web_module, "_run_step_job", fake_job)
+    web_module._dispatch_scheduled_publish(task.id)
+
+    assert dispatched.wait(timeout=1)
+    _wait_for_task_idle(client, task.id)
 
 
 def test_web_basic_auth_protects_static_and_api(monkeypatch, tmp_path: Path) -> None:
@@ -849,6 +959,53 @@ def test_web_run_all_includes_bilibili_only_when_enabled(monkeypatch, tmp_path: 
     assert captured["steps"][-1] == "publish-bilibili"
     assert captured["bilibili"].dry_run is True
     assert captured["bilibili"].confirm is False
+
+
+def test_web_run_all_releases_worker_and_lock_while_publish_is_scheduled(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task = client.post("/api/tasks/local", json={"source": str(source), "title": "Deferred Run All"}).json()
+    config = task["config"]
+    config["workflow"]["include_bilibili_upload"] = True
+    config["publish"]["scheduled_at"] = (
+        datetime.now(web_module.BEIJING_TIMEZONE) + timedelta(days=1)
+    ).isoformat()
+    assert client.put(f"/api/tasks/{task['id']}/config", json={"config": config}).status_code == 200
+    captured: list[str] = []
+
+    class FakeRunner:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def run_step(self, current, step: PipelineStep, task_lock=None):
+            captured.append(step.value)
+            current.status = TaskStatus.SUCCESS
+            current.mark_step(step, StepStatus.SUCCESS)
+            return current
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+
+    response = client.post(f"/api/tasks/{task['id']}/run-all")
+
+    assert response.status_code == 200
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if web_module._PUBLISH_SCHEDULER.contains(task["id"]) and task["id"] not in web_module._RUNNING:
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("run-all did not hand the deferred publish to the scheduler")
+
+    assert captured[-1] == "prepare-publish"
+    assert "publish-bilibili" not in captured
+    scheduled = client.get(f"/api/tasks/{task['id']}").json()
+    assert scheduled["display_status"] == "scheduled-publish"
+    assert scheduled["running"] is False
+    assert scheduled["queued"] is True
+    probe = TaskLock(Path(task["folder"]), "run-all-scheduled-probe").acquire(blocking=False)
+    probe.release()
+    assert client.post(f"/api/tasks/{task['id']}/terminate").status_code == 200
 
 
 def test_web_run_all_skips_only_steps_with_success_status_and_outputs(monkeypatch, tmp_path: Path) -> None:

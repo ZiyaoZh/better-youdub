@@ -176,6 +176,8 @@ def default_task_config(config: AppConfig, *, include_secrets: bool = False) -> 
     translation["model"] = translation["model"] or DEFAULT_TRANSLATION_MODEL
     bilibili = _config_dict(options.bilibili)
     bilibili.pop("proxy", None)
+    publish = _config_dict(options.publish)
+    publish["scheduled_at"] = ""
     defaults = {
         "download": {
             "use_cookies": True,
@@ -189,7 +191,7 @@ def default_task_config(config: AppConfig, *, include_secrets: bool = False) -> 
         "tts_quality": _config_dict(options.tts_quality),
         "redub_tts": _config_dict(options.redub_tts),
         "synthesis": _config_dict(options.synthesis),
-        "publish": _config_dict(options.publish),
+        "publish": publish,
         "bilibili": bilibili,
         "workflow": {
             "include_bilibili_upload": False,

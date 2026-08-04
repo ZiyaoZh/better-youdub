@@ -12,9 +12,11 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -61,6 +63,62 @@ ARTIFACTS: dict[str, tuple[str, str]] = {
 }
 
 
+class PublishScheduler:
+    def __init__(self, dispatch: Callable[[str], None]) -> None:
+        self._dispatch = dispatch
+        self._condition = threading.Condition()
+        self._deadlines: dict[str, float] = {}
+        self._thread: threading.Thread | None = None
+
+    def schedule(self, task_id: str, run_at: datetime) -> None:
+        self.schedule_timestamp(task_id, run_at.timestamp())
+
+    def schedule_timestamp(self, task_id: str, deadline: float) -> None:
+        with self._condition:
+            self._deadlines[task_id] = deadline
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(
+                    target=self._run,
+                    name="youdub-publish-scheduler",
+                    daemon=True,
+                )
+                self._thread.start()
+            self._condition.notify_all()
+
+    def cancel(self, task_id: str) -> bool:
+        with self._condition:
+            removed = self._deadlines.pop(task_id, None) is not None
+            self._condition.notify_all()
+            return removed
+
+    def contains(self, task_id: str) -> bool:
+        with self._condition:
+            return task_id in self._deadlines
+
+    def clear(self) -> None:
+        with self._condition:
+            self._deadlines.clear()
+            self._condition.notify_all()
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while not self._deadlines:
+                    self._condition.wait()
+                task_id, deadline = min(self._deadlines.items(), key=lambda item: item[1])
+                remaining = deadline - time.time()
+                if remaining > 0:
+                    self._condition.wait(timeout=min(remaining, 60.0))
+                    continue
+                if self._deadlines.get(task_id) != deadline:
+                    continue
+                self._deadlines.pop(task_id, None)
+            try:
+                self._dispatch(task_id)
+            except Exception:
+                _mark_scheduled_publish_failed(task_id)
+
+
 _EXECUTOR = ThreadPoolExecutor(max_workers=5, thread_name_prefix="youdub-web")
 _GPU_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="youdub-gpu")
 _DUBBING_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="youdub-dubbing")
@@ -68,6 +126,7 @@ _LOCK = threading.RLock()
 _RUNNING: dict[str, Future[Any]] = {}
 _TASK_ALIASES: dict[str, str] = {}
 _TERMINATING: set[str] = set()
+_PUBLISH_SCHEDULER = PublishScheduler(lambda task_id: _dispatch_scheduled_publish(task_id))
 
 GPU_STEPS = {
     PipelineStep.SEPARATE_AUDIO,
@@ -87,6 +146,9 @@ DUBBING_STEPS = {
 DEFAULT_TASK_LIST_LIMIT = 20
 MAX_TASK_LIST_LIMIT = 100
 TASK_TERMINATED_MESSAGE = "任务已终止"
+SCHEDULED_PUBLISH_FAILED_MESSAGE = "定时发布调度失败"
+SCHEDULED_PUBLISH_RETRY_SECONDS = 30.0
+BEIJING_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
 
 
 class TaskTerminationRequested(RuntimeError):
@@ -137,7 +199,15 @@ class YtdlpSettingsUpdate(BaseModel):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="better-youdub WebUI")
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        _restore_scheduled_publishes()
+        try:
+            yield
+        finally:
+            _PUBLISH_SCHEDULER.clear()
+
+    app = FastAPI(title="better-youdub WebUI", lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=1024)
     static_dir = Path(__file__).resolve().parent / "web_static"
     _install_auth_middleware(app)
@@ -283,8 +353,12 @@ def create_app() -> FastAPI:
             future = _RUNNING.get(task_id)
             if future is not None and not future.done():
                 raise HTTPException(status_code=409, detail="Task is already running")
+            if _task_publish_scheduled(task):
+                raise HTTPException(status_code=409, detail="Task is already scheduled")
             if task_is_locked(task.folder):
                 raise HTTPException(status_code=409, detail="Task is already running")
+            if payload.step == PipelineStep.PUBLISH_BILIBILI and _defer_publish_if_needed(task):
+                return _task_payload(task)
             _mark_task_scheduled(task, payload.step)
             _track_running(
                 task_id,
@@ -313,10 +387,17 @@ def create_app() -> FastAPI:
         task = _get_task(task_id)
         with _LOCK:
             future = _unfinished_future_for_task(task_id) or _unfinished_future_for_task(task.id)
-            if future is None:
+            scheduled = _task_publish_scheduled(task)
+            if future is None and not scheduled:
                 if task_is_locked(task.folder):
                     raise HTTPException(status_code=409, detail="Task is running outside this WebUI process")
                 raise HTTPException(status_code=409, detail="Task is not running")
+            if scheduled:
+                _PUBLISH_SCHEDULER.cancel(task.id)
+                task = _mark_task_terminated(_store().get(task.id), PipelineStep.PUBLISH_BILIBILI)
+                _store().update(task)
+                if future is None:
+                    return _task_payload(task)
             _request_task_termination(task_id, task.id)
             canceled = future.cancel()
             task = _mark_task_terminated(_store().get(task.id))
@@ -329,7 +410,11 @@ def create_app() -> FastAPI:
     def delete_task(task_id: str) -> None:
         task = _get_task(task_id)
         future = _RUNNING.get(task_id)
-        if (future is not None and not future.done()) or task_is_locked(task.folder):
+        if (
+            (future is not None and not future.done())
+            or _task_publish_scheduled(task)
+            or task_is_locked(task.folder)
+        ):
             raise HTTPException(status_code=409, detail="Cannot delete a running task")
         _store().delete(task.id)
         return None
@@ -346,16 +431,17 @@ def create_app() -> FastAPI:
     @app.put("/api/tasks/{task_id}/config")
     def save_task_config(task_id: str, payload: TaskConfigUpdate) -> dict[str, Any]:
         task = _get_task(task_id)
-        if task_is_locked(task.folder) or _task_running(task.id):
+        if task_is_locked(task.folder) or _task_running(task.id) or _task_publish_scheduled(task):
             raise HTTPException(status_code=409, detail="Cannot edit a running task")
         task.config = normalize_task_config_update(_config(), task.config, payload.config)
+        _normalize_scheduled_publish_config(task.config)
         _store().update(task)
         return {"config": public_task_config(_config(), task.config)}
 
     @app.post("/api/tasks/{task_id}/download-cookies")
     def save_task_download_cookies(task_id: str, payload: CookieUpdate) -> dict[str, Any]:
         task = _get_task(task_id)
-        if task_is_locked(task.folder) or _task_running(task.id):
+        if task_is_locked(task.folder) or _task_running(task.id) or _task_publish_scheduled(task):
             raise HTTPException(status_code=409, detail="Cannot edit a running task")
         content = _clean_text(payload.content)
         if not content:
@@ -903,6 +989,8 @@ def _task_display_status(task: Task) -> str:
         return "terminating"
     if task.status == TaskStatus.FAILED and task.error == TASK_TERMINATED_MESSAGE:
         return "terminated"
+    if _task_publish_scheduled(task):
+        return "scheduled-publish"
     if (
         task.status == TaskStatus.SUCCESS
         and _step_completed(task, PipelineStep.PREPARE_PUBLISH)
@@ -942,13 +1030,27 @@ def _task_terminating(task_id: str) -> bool:
 
 def _task_queued(task_id: str) -> bool:
     future = _unfinished_future_for_task(task_id)
-    if future is None:
-        return False
     try:
         task = _store().get(task_id)
     except KeyError:
         return False
+    if future is None:
+        return _task_publish_scheduled(task)
     return not task_is_locked(task.folder)
+
+
+def _task_publish_scheduled(task: Task) -> bool:
+    if task.steps.get(PipelineStep.PUBLISH_BILIBILI.value) != StepStatus.QUEUED:
+        return False
+    if _PUBLISH_SCHEDULER.contains(task.id):
+        return True
+    if _unfinished_future_for_task(task.id) is not None:
+        return False
+    try:
+        run_at = _scheduled_publish_datetime(task)
+    except ValueError:
+        return False
+    return run_at is not None
 
 
 def _unfinished_future_for_task(task_id: str) -> Future[Any] | None:
@@ -976,9 +1078,15 @@ def _schedule_run_all_for_task(task: Task, label: str) -> None:
         future = _RUNNING.get(task.id)
         if future is not None and not future.done():
             raise HTTPException(status_code=409, detail="Task is already running")
+        if _task_publish_scheduled(task):
+            raise HTTPException(status_code=409, detail="Task is already scheduled")
         if task_is_locked(task.folder):
             raise HTTPException(status_code=409, detail="Task is already running")
-        _mark_task_scheduled(task, _first_run_all_step(task))
+        first_step = _first_run_all_step(task)
+        if first_step == PipelineStep.PUBLISH_BILIBILI and _defer_publish_if_needed(task):
+            return
+        _validate_scheduled_publish_task(task)
+        _mark_task_scheduled(task, first_step)
         _track_running(task.id, _EXECUTOR.submit(_run_all_job, task.id, label))
 
 
@@ -987,6 +1095,8 @@ def _schedule_download_for_task(task: Task, label: str, *, force: bool = False) 
         future = _RUNNING.get(task.id)
         if future is not None and not future.done():
             raise HTTPException(status_code=409, detail="Task is already running")
+        if _task_publish_scheduled(task):
+            raise HTTPException(status_code=409, detail="Task is already scheduled")
         if task_is_locked(task.folder):
             raise HTTPException(status_code=409, detail="Task is already running")
         _mark_task_scheduled(task, PipelineStep.INGEST)
@@ -1082,6 +1192,125 @@ def _mark_task_scheduled(task: Task, step: PipelineStep | None = None) -> None:
     task.error = None
     if step is not None:
         task.mark_step(step, StepStatus.QUEUED)
+    _store().update(task)
+
+
+def _normalize_scheduled_publish_config(config: dict[str, Any]) -> None:
+    publish = config.get("publish")
+    if not isinstance(publish, dict) or "scheduled_at" not in publish:
+        return
+    value = _clean_text(publish.get("scheduled_at"))
+    if not value:
+        publish.pop("scheduled_at", None)
+        if not publish:
+            config.pop("publish", None)
+        return
+    try:
+        run_at = _parse_scheduled_publish_datetime(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="scheduled_at must be a valid ISO 8601 timestamp",
+        ) from exc
+    publish["scheduled_at"] = run_at.isoformat()
+
+
+def _parse_scheduled_publish_datetime(value: str) -> datetime:
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError("Invalid scheduled publish timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=BEIJING_TIMEZONE)
+    return parsed.astimezone(BEIJING_TIMEZONE)
+
+
+def _scheduled_publish_datetime(task: Task) -> datetime | None:
+    publish = task.config.get("publish")
+    if not isinstance(publish, dict):
+        return None
+    value = _clean_text(publish.get("scheduled_at"))
+    if not value:
+        return None
+    return _parse_scheduled_publish_datetime(value)
+
+
+def _validate_scheduled_publish_task(task: Task) -> None:
+    try:
+        _scheduled_publish_datetime(task)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="scheduled_at must be a valid ISO 8601 timestamp",
+        ) from exc
+
+
+def _defer_publish_if_needed(task: Task) -> bool:
+    _validate_scheduled_publish_task(task)
+    run_at = _scheduled_publish_datetime(task)
+    if run_at is None or run_at.timestamp() <= time.time():
+        return False
+    _mark_task_scheduled(task, PipelineStep.PUBLISH_BILIBILI)
+    _PUBLISH_SCHEDULER.schedule(task.id, run_at)
+    return True
+
+
+def _restore_scheduled_publishes() -> None:
+    for task in _store().load_all():
+        if task.steps.get(PipelineStep.PUBLISH_BILIBILI.value) != StepStatus.QUEUED:
+            continue
+        try:
+            run_at = _scheduled_publish_datetime(task)
+        except ValueError:
+            _mark_scheduled_publish_failed(task.id)
+            continue
+        if run_at is None:
+            _mark_scheduled_publish_failed(task.id)
+            continue
+        _PUBLISH_SCHEDULER.schedule(task.id, run_at)
+
+
+def _dispatch_scheduled_publish(task_id: str) -> None:
+    with _LOCK:
+        try:
+            task = _store().get(task_id)
+        except KeyError:
+            return
+        if task.steps.get(PipelineStep.PUBLISH_BILIBILI.value) != StepStatus.QUEUED:
+            return
+        if _termination_requested(task_id):
+            _store().update(_mark_task_terminated(task, PipelineStep.PUBLISH_BILIBILI))
+            return
+        run_at = _scheduled_publish_datetime(task)
+        if run_at is None:
+            _mark_scheduled_publish_failed(task.id)
+            return
+        if run_at.timestamp() > time.time():
+            _PUBLISH_SCHEDULER.schedule(task.id, run_at)
+            return
+        if _unfinished_future_for_task(task.id) is not None or task_is_locked(task.folder):
+            _PUBLISH_SCHEDULER.schedule_timestamp(
+                task.id,
+                time.time() + SCHEDULED_PUBLISH_RETRY_SECONDS,
+            )
+            return
+        _track_running(
+            task.id,
+            _submit_step_job(task.id, PipelineStep.PUBLISH_BILIBILI, "web-scheduled-publish"),
+        )
+
+
+def _mark_scheduled_publish_failed(task_id: str) -> None:
+    try:
+        task = _store().get(task_id)
+    except KeyError:
+        return
+    task.status = TaskStatus.FAILED
+    task.error = SCHEDULED_PUBLISH_FAILED_MESSAGE
+    task.mark_step(PipelineStep.PUBLISH_BILIBILI, StepStatus.FAILED)
     _store().update(task)
 
 
@@ -1279,6 +1508,8 @@ def _run_all_job(task_id: str, task_lock: TaskLock | None = None) -> None:
             _raise_if_termination_requested(task_id)
             if _step_completed(task, step):
                 continue
+            if step == PipelineStep.PUBLISH_BILIBILI and _defer_publish_if_needed(task):
+                return
             _run_step_for_run_all(task_id, step, task_lock)
             _raise_if_termination_requested(task_id)
         task = _store().get(task_id)

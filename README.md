@@ -216,6 +216,8 @@ extract-audio
 
 启用 `workflow.enable_tts_redub` 后，系统会在首次生成字幕后增加一轮 `inspect-tts -> redub-tts -> transcribe-tts -> subtitle`。Bilibili 上传不在默认链路中，只有启用 `workflow.include_bilibili_upload` 后才会追加；未同时确认真实上传时，该步骤仍会降级为 dry-run。
 
+Web UI 的发布参数支持设置 `publish.scheduled_at`。该时间按北京时间（UTC+8）解释，由 YouDub 自己调度，不会传给发布平台。完整链路执行到上传步骤后会释放任务锁和 worker，等到设定时间才重新提交上传；Web 服务重启时会从任务记录恢复仍在等待的定时发布。
+
 完整链路会跳过状态为成功且产物仍然存在的步骤。重新运行某一步时，系统会清理该步骤及其下游派生产物，避免新旧结果混用。
 
 ### 访问控制

@@ -128,6 +128,7 @@ const CONFIG_SECTIONS = [
     key: "publish",
     label: "发布包",
     fields: [
+      ["scheduled_at", "定时发布时间（北京时间）", "datetime"],
       ["max_title_chars", "标题最大字符", "integer", {min: 1}],
       ["max_tags", "标签数量", "integer", {min: 1}],
       ["max_tag_chars", "单个标签字符", "integer", {min: 1}],
@@ -226,6 +227,27 @@ function fmtTime(value) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 
+function fmtBeijingTime(value) {
+  if (!value) return "-"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString("zh-CN", {timeZone: "Asia/Shanghai", hour12: false})
+}
+
+function toBeijingDateTimeInputValue(value) {
+  if (!value) return ""
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  const shifted = new Date(date.getTime() + 8 * 60 * 60 * 1000)
+  return shifted.toISOString().slice(0, 16)
+}
+
+function fromBeijingDateTimeInputValue(value) {
+  if (!value) return ""
+  const withSeconds = value.length === 16 ? `${value}:00` : value
+  return `${withSeconds}+08:00`
+}
+
 function fmtSize(bytes) {
   if (!Number.isFinite(bytes)) return ""
   if (bytes < 1024) return `${bytes} B`
@@ -255,6 +277,7 @@ function statusLabel(status) {
     queued: "排队",
     running: "运行中",
     success: "成功",
+    "scheduled-publish": "定时发布",
     "pending-upload": "待上传",
     terminating: "终止中",
     terminated: "已终止",
@@ -269,6 +292,7 @@ function statusClass(status) {
   if (status === "terminated") return "status-failed"
   if (status === "terminating") return "status-terminating"
   if (status === "queued") return "status-queued"
+  if (status === "scheduled-publish") return "status-queued"
   if (status === "running") return "status-running"
   return "status-pending"
 }
@@ -277,8 +301,13 @@ function taskActive(task) {
   return Boolean(task?.queued || task?.running)
 }
 
+function taskNeedsActivePolling(task) {
+  return taskActive(task) && task?.display_status !== "scheduled-publish"
+}
+
 function effectiveTaskStatus(task) {
   if (task?.terminating) return "terminating"
+  if (task?.display_status === "scheduled-publish") return "scheduled-publish"
   if (task?.queued) return "queued"
   if (task?.running) return "running"
   return task?.display_status || task?.status
@@ -581,13 +610,21 @@ function renderSteps(task) {
     const card = document.createElement("div")
     card.className = `step-card${configKey ? " has-config" : ""}`
     const bilibiliConfig = task.config?.bilibili || {}
+    const scheduledAt = task.config?.publish?.scheduled_at || ""
+    const scheduledForFuture = scheduledAt && new Date(scheduledAt).getTime() > Date.now()
     const realBilibiliUpload = step === "publish-bilibili" && bilibiliConfig.confirm && !bilibiliConfig.dry_run
-    const buttonLabel = step === "publish-bilibili" ? (realBilibiliUpload ? "上传" : "dry-run") : "运行"
+    const buttonLabel = step === "publish-bilibili"
+      ? (scheduledForFuture ? "定时发布" : realBilibiliUpload ? "上传" : "dry-run")
+      : "运行"
+    const scheduleMarkup = step === "publish-bilibili" && scheduledAt
+      ? `<div class="step-schedule">北京时间 ${escapeHtml(fmtBeijingTime(scheduledAt))}</div>`
+      : ""
     card.innerHTML = `
       <div class="step-card-head">
         <div>
           <h3>${label}</h3>
           <span class="status-badge ${statusClass(status)}">${statusLabel(status)}</span>
+          ${scheduleMarkup}
           ${renderStepProgress(task, step)}
         </div>
         ${configKey ? `<button class="icon-button step-config-button" type="button" title="${label}参数" aria-label="${label}参数">⚙</button>` : ""}
@@ -808,7 +845,14 @@ function renderConfigField(section, key, labelText, type, meta, value) {
       <textarea id="${id}" data-config-section="${section}" data-config-key="${key}" data-config-type="${type}"${transientDataAttribute(meta)} spellcheck="false">${escapeHtml(value ?? "")}</textarea>
     `
   } else {
-    const inputType = type === "secret" ? "password" : type === "integer" || type === "number" ? "number" : "text"
+    const inputType = type === "secret"
+      ? "password"
+      : type === "integer" || type === "number"
+        ? "number"
+        : type === "datetime"
+          ? "datetime-local"
+          : "text"
+    const inputValue = type === "datetime" ? toBeijingDateTimeInputValue(value) : value
     const attrs = [
       meta.min !== undefined ? `min="${meta.min}"` : "",
       meta.max !== undefined ? `max="${meta.max}"` : "",
@@ -816,7 +860,7 @@ function renderConfigField(section, key, labelText, type, meta, value) {
     ].filter(Boolean).join(" ")
     label.innerHTML = `
       <span>${labelText}</span>
-      <input id="${id}" data-config-section="${section}" data-config-key="${key}" data-config-type="${type}"${transientDataAttribute(meta)} type="${inputType}" ${attrs} value="${escapeHtml(value ?? "")}" />
+      <input id="${id}" data-config-section="${section}" data-config-key="${key}" data-config-type="${type}"${transientDataAttribute(meta)} type="${inputType}" ${attrs} value="${escapeHtml(inputValue ?? "")}" />
     `
   }
 
@@ -871,6 +915,8 @@ function updateTaskConfigDraftValue(input) {
     state.configDraft[section][key] = input.value === "" ? "" : parseInt(input.value, 10)
   } else if (type === "number") {
     state.configDraft[section][key] = input.value === "" ? "" : Number(input.value)
+  } else if (type === "datetime") {
+    state.configDraft[section][key] = fromBeijingDateTimeInputValue(input.value)
   } else {
     state.configDraft[section][key] = input.value
   }
@@ -1068,7 +1114,7 @@ function debounce(callback, delay) {
 
 function scheduleTaskPolling() {
   if (taskPollTimer !== null) window.clearTimeout(taskPollTimer)
-  const delay = state.tasks.some(taskActive) ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS
+  const delay = state.tasks.some(taskNeedsActivePolling) ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS
   taskPollTimer = window.setTimeout(async () => {
     if (!document.hidden && state.activeView === "tasks") {
       await refreshTasks().catch(() => undefined)

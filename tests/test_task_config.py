@@ -131,6 +131,24 @@ def test_task_config_exposes_web_translation_defaults(monkeypatch, tmp_path: Pat
     assert options.translation.proxy is None
 
 
+def test_task_config_keeps_scheduled_publish_out_of_platform_options(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("YOUDUB_CONFIG_PATH", str(tmp_path / "config" / "youdub.json"))
+    config = AppConfig.from_env()
+
+    defaults = default_task_config(config)
+    updated = normalize_task_config_update(
+        config,
+        {},
+        {"publish": {"scheduled_at": "2026-08-03T09:30:00+08:00"}},
+    )
+    options = runtime_options_from_task_config(config, updated)
+
+    assert defaults["publish"]["scheduled_at"] == ""
+    assert updated == {"publish": {"scheduled_at": "2026-08-03T09:30:00+08:00"}}
+    assert not hasattr(options.publish, "scheduled_at")
+    assert not hasattr(options.bilibili, "scheduled_at")
+
+
 def test_task_config_uses_system_network_proxy_for_network_clients(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("YOUDUB_ROOT", str(tmp_path / "videos"))
     monkeypatch.setenv("YOUDUB_TASKS_PATH", str(tmp_path / "tasks" / "tasks.json"))
