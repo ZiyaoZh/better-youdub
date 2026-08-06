@@ -819,6 +819,26 @@ textarea:focus {
   word-break: break-all;
 }
 
+.parameter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.parameter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.parameter-actions .button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
 .run-bar {
   display: flex;
   flex-wrap: wrap;

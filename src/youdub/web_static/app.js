@@ -178,8 +178,12 @@ const NETWORK_POLL_INTERVAL_MS = 60000
 const TASK_ROW_HEIGHT_PX = 66
 const TASK_PAGE_SIZE_MIN = 4
 const TASK_PAGE_SIZE_MAX = 50
+const DEVICE_IDENTITY_STORAGE_KEY = "youdub.device-identity.v1"
+const TASK_CONFIG_CLIPBOARD_STORAGE_KEY = "youdub.task-config-clipboard.v1"
 
 const state = {
+  deviceIdentity: loadOrCreateDeviceIdentity(),
+  configClipboard: null,
   tasks: [],
   selectedId: null,
   loading: false,
@@ -202,14 +206,69 @@ const state = {
   storageRefreshing: false,
   storage: null,
 }
+state.configClipboard = loadTaskConfigClipboard(state.deviceIdentity)
 
 let taskPollTimer = null
 let networkPollTimer = null
 
 const $ = (id) => document.getElementById(id)
 
+function loadOrCreateDeviceIdentity() {
+  try {
+    const stored = window.localStorage.getItem(DEVICE_IDENTITY_STORAGE_KEY)
+    if (validDeviceIdentity(stored)) return stored.toLowerCase()
+  } catch {}
+  const identity = generateDeviceIdentity()
+  try {
+    window.localStorage.setItem(DEVICE_IDENTITY_STORAGE_KEY, identity)
+  } catch {}
+  return identity
+}
+
+function generateDeviceIdentity() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
+  const bytes = new Uint8Array(16)
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes)
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256)
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+function validDeviceIdentity(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""))
+}
+
+function loadTaskConfigClipboard(deviceIdentity) {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(TASK_CONFIG_CLIPBOARD_STORAGE_KEY) || "null")
+    if (
+      value
+      && typeof value.sourceTaskId === "string"
+      && typeof value.sourceTitle === "string"
+      && value.identity === deviceIdentity
+    ) {
+      return value
+    }
+  } catch {}
+  return null
+}
+
+function saveTaskConfigClipboard(value) {
+  try {
+    window.localStorage.setItem(TASK_CONFIG_CLIPBOARD_STORAGE_KEY, JSON.stringify(value))
+  } catch {}
+}
+
 async function api(path, options = {}) {
   const headers = options.body instanceof FormData ? {} : {"Content-Type": "application/json"}
+  headers["X-YouDub-Identity"] = state.deviceIdentity
   const response = await fetch(path, {...options, headers: {...headers, ...(options.headers || {})}})
   if (!response.ok) {
     let detail = response.statusText
@@ -642,6 +701,8 @@ function renderDetail(task, options = {}) {
   $("deleteButton").disabled = taskActive(task)
   $("cleanTaskResourcesButton").disabled = taskActive(task)
   $("saveTaskConfigButton").disabled = taskActive(task)
+  setMessage("taskParameterMessage", "")
+  renderTaskParameterActions(task)
   const cleanupMeta = $("resourceCleanupMeta")
   cleanupMeta.classList.toggle("hidden", !task.resources_cleaned_at)
   cleanupMeta.textContent = task.resources_cleaned_at
@@ -652,6 +713,71 @@ function renderDetail(task, options = {}) {
   const editingConfig = $("taskConfigForm").contains(document.activeElement)
   if (options.forceConfig || (!state.configDirty && !editingConfig)) {
     renderTaskConfig(task, {forceDraft: true})
+  }
+}
+
+function renderTaskParameterActions(task) {
+  const copyButton = $("copyTaskConfigButton")
+  const pasteButton = $("pasteTaskConfigButton")
+  const ownsTask = task.identity && task.identity === state.deviceIdentity
+  copyButton.disabled = !ownsTask
+  copyButton.title = !task.identity
+    ? "当前任务不支持复制参数"
+    : ownsTask
+      ? "复制该任务的全部已保存参数"
+      : "当前任务不能复制参数"
+  copyButton.onclick = () => copyTaskParameters(task)
+
+  const pasteDisabledReason = taskParameterPasteDisabledReason(task)
+  pasteButton.disabled = Boolean(pasteDisabledReason)
+  pasteButton.title = pasteDisabledReason || `粘贴“${state.configClipboard?.sourceTitle || state.configClipboard?.sourceTaskId}”的全部参数`
+  pasteButton.onclick = () => pasteTaskParameters(task)
+}
+
+function taskParameterPasteDisabledReason(task) {
+  if (!task.identity) return "当前任务不支持粘贴参数"
+  if (task.identity !== state.deviceIdentity) return "当前任务不能粘贴参数"
+  if (!state.configClipboard) return "请先复制其他可用任务的参数"
+  if (state.configClipboard.identity !== task.identity) return "参数来源与当前任务不兼容"
+  if (state.configClipboard.sourceTaskId === task.id) return "不能向参数来源任务自身粘贴"
+  if (taskActive(task)) return "运行中的任务不能修改参数"
+  return ""
+}
+
+function copyTaskParameters(task) {
+  if (!task.identity || task.identity !== state.deviceIdentity) return
+  state.configClipboard = {
+    sourceTaskId: task.id,
+    sourceTitle: task.title || task.id,
+    identity: task.identity,
+    copiedAt: new Date().toISOString(),
+  }
+  saveTaskConfigClipboard(state.configClipboard)
+  renderTaskParameterActions(task)
+  setMessage("taskParameterMessage", `已复制“${state.configClipboard.sourceTitle}”的全部参数`)
+}
+
+async function pasteTaskParameters(task) {
+  const disabledReason = taskParameterPasteDisabledReason(task)
+  if (disabledReason) return
+  const source = state.configClipboard
+  $("pasteTaskConfigButton").disabled = true
+  setMessage("taskParameterMessage", "粘贴中")
+  try {
+    await api(`/api/tasks/${task.id}/config/paste`, {
+      method: "POST",
+      body: JSON.stringify({source_task_id: source.sourceTaskId}),
+    })
+    state.configDirty = false
+    state.configTransient = {}
+    state.configTaskId = null
+    state.configDraft = null
+    const updatedTask = await api(`/api/tasks/${task.id}`)
+    renderDetail(updatedTask, {forceConfig: true})
+    setMessage("taskParameterMessage", `已粘贴“${source.sourceTitle}”的全部参数`)
+  } catch (error) {
+    renderTaskParameterActions(task)
+    setMessage("taskParameterMessage", error.message, true)
   }
 }
 

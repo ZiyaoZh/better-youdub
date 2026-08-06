@@ -102,6 +102,7 @@ class TaskStore:
             title=incoming.title,
             source=incoming.source,
             folder=incoming.folder,
+            identity=existing.identity or incoming.identity,
             source_key=incoming.source_key or existing.source_key,
             author=incoming.author or existing.author,
             status=existing.status,

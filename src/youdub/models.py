@@ -53,6 +53,7 @@ class Task:
     title: str
     source: str
     folder: Path
+    identity: str | None = None
     source_key: str | None = None
     author: str | None = None
     status: TaskStatus = TaskStatus.PENDING
@@ -70,6 +71,7 @@ class Task:
             "title": self.title,
             "source": self.source,
             "folder": str(self.folder),
+            "identity": self.identity,
             "source_key": self.source_key,
             "author": self.author,
             "status": self.status.value,
@@ -89,6 +91,7 @@ class Task:
             title=data["title"],
             source=data["source"],
             folder=Path(data["folder"]),
+            identity=data.get("identity") if isinstance(data.get("identity"), str) else None,
             source_key=data.get("source_key"),
             author=data.get("author"),
             status=TaskStatus(data.get("status", TaskStatus.PENDING)),

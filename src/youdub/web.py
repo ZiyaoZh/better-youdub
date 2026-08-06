@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import json
 import os
 import secrets
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -191,6 +192,10 @@ class TaskConfigUpdate(BaseModel):
     config: dict[str, Any]
 
 
+class TaskConfigPasteRequest(BaseModel):
+    source_task_id: str
+
+
 class CookieUpdate(BaseModel):
     content: str | None = None
     clear: bool = False
@@ -295,7 +300,11 @@ def create_app() -> FastAPI:
         return _task_payload(_get_task(task_id))
 
     @app.post("/api/tasks/url", status_code=201)
-    def create_url_task(payload: UrlTaskRequest) -> dict[str, Any]:
+    def create_url_task(
+        payload: UrlTaskRequest,
+        task_identity: str | None = Header(None, alias="X-YouDub-Identity"),
+    ) -> dict[str, Any]:
+        identity = _validated_task_identity(task_identity)
         config = _config()
         config.ensure_dirs()
         url = _validated_url(payload.url)
@@ -314,12 +323,17 @@ def create_app() -> FastAPI:
             root=config.root,
             cover_path=result.cover_path,
         )
+        task.identity = identity
         task.config = _task_config_for_url_payload(config, payload)
         task = _store().upsert(task)
         return _task_payload(task)
 
     @app.post("/api/tasks/url-draft", status_code=201)
-    def create_url_draft_task(payload: UrlTaskRequest) -> dict[str, Any]:
+    def create_url_draft_task(
+        payload: UrlTaskRequest,
+        task_identity: str | None = Header(None, alias="X-YouDub-Identity"),
+    ) -> dict[str, Any]:
+        identity = _validated_task_identity(task_identity)
         config = _config()
         config.ensure_dirs()
         url = _validated_url(payload.url)
@@ -328,19 +342,30 @@ def create_app() -> FastAPI:
         if existing is not None:
             return _task_payload(existing)
         task = create_pending_url_task(url, config.root)
+        task.identity = identity
         task.config = _task_config_for_url_payload(config, payload)
         _store().add(task)
         return _task_payload(task)
 
     @app.post("/api/tasks/local", status_code=201)
-    def create_local_task(payload: LocalTaskRequest) -> dict[str, Any]:
+    def create_local_task(
+        payload: LocalTaskRequest,
+        task_identity: str | None = Header(None, alias="X-YouDub-Identity"),
+    ) -> dict[str, Any]:
+        identity = _validated_task_identity(task_identity)
         config = _config()
         task = create_task_from_local_media(Path(payload.source), config.root, payload.title)
+        task.identity = identity
         _store().add(task)
         return _task_payload(task)
 
     @app.post("/api/tasks/upload", status_code=201)
-    def upload_task(file: UploadFile = File(...), title: str = Form("")) -> dict[str, Any]:
+    def upload_task(
+        file: UploadFile = File(...),
+        title: str = Form(""),
+        task_identity: str | None = Header(None, alias="X-YouDub-Identity"),
+    ) -> dict[str, Any]:
+        identity = _validated_task_identity(task_identity)
         original_name = Path(file.filename or "").name.strip()
         suffix = Path(original_name).suffix.lower()
         if suffix not in ALLOWED_VIDEO_SUFFIXES:
@@ -359,6 +384,7 @@ def create_app() -> FastAPI:
                         raise HTTPException(status_code=422, detail="Uploaded file is empty")
                     task = create_task_from_local_media(upload_path, config.root, title or Path(original_name).stem)
                     task.source = f"upload:{original_name}"
+                    task.identity = identity
                     _store().add(task)
                     return _task_payload(task)
             except TaskLockBusy as exc:
@@ -477,6 +503,29 @@ def create_app() -> FastAPI:
         _normalize_scheduled_publish_config(task.config)
         _store().update(task)
         return {"config": public_task_config(_config(), task.config)}
+
+    @app.post("/api/tasks/{task_id}/config/paste")
+    def paste_task_config(
+        task_id: str,
+        payload: TaskConfigPasteRequest,
+        task_identity: str | None = Header(None, alias="X-YouDub-Identity"),
+    ) -> dict[str, Any]:
+        target = _get_task(task_id)
+        source = _get_task(payload.source_task_id)
+        identity = _validated_task_identity(task_identity)
+        if source.id == target.id:
+            raise HTTPException(status_code=409, detail="Cannot paste parameters into the source task")
+        if identity is None or source.identity != identity or target.identity != identity:
+            raise HTTPException(status_code=403, detail="Parameter paste requires tasks with the same identity")
+        if task_is_locked(target.folder) or _task_running(target.id) or _task_publish_scheduled(target):
+            raise HTTPException(status_code=409, detail="Cannot edit a running task")
+        target.config = copy.deepcopy(source.config)
+        _normalize_scheduled_publish_config(target.config)
+        _store().update(target)
+        return {
+            "config": public_task_config(_config(), target.config),
+            "source_task_id": source.id,
+        }
 
     @app.post("/api/tasks/{task_id}/download-cookies")
     def save_task_download_cookies(task_id: str, payload: CookieUpdate) -> dict[str, Any]:
@@ -1603,6 +1652,7 @@ def _downloaded_task_payload(existing: Task, incoming: Task, config: dict[str, A
         title=incoming.title,
         source=incoming.source,
         folder=incoming.folder,
+        identity=existing.identity,
         source_key=incoming.source_key,
         author=incoming.author,
         status=TaskStatus.PENDING,
@@ -2067,7 +2117,7 @@ def _task_download_cookies_path(task: Task) -> Path | None:
 
 def _ensure_task_download_cookies_path(task: Task, path: Path) -> None:
     config = _config()
-    effective = effective_task_config(config, task.config)
+    effective = effective_task_config(config, task.config, include_secrets=True)
     download = effective.setdefault("download", {})
     if not _clean_text(download.get("cookies_path")):
         download["cookies_path"] = str(path)
@@ -2091,6 +2141,16 @@ def _clean_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _validated_task_identity(value: Any) -> str | None:
+    identity = _clean_text(value)
+    if identity is None:
+        return None
+    try:
+        return str(uuid.UUID(identity))
+    except (AttributeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Invalid task identity") from exc
 
 
 def _validated_url(value: Any) -> str:

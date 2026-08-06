@@ -21,6 +21,9 @@ from youdub.tts import TTSConfig
 from youdub import web as web_module
 from youdub.web import create_app
 
+DEVICE_A = "11111111-1111-4111-8111-111111111111"
+DEVICE_B = "22222222-2222-4222-8222-222222222222"
+
 
 def _client(monkeypatch, tmp_path: Path) -> TestClient:
     web_module._PUBLISH_SCHEDULER.clear()
@@ -91,7 +94,11 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert 'id="systemLine"' in index
     assert 'id="taskPager"' in index
     assert 'id="finalVideo"' not in index
-    assert "20260804-resource-cleanup" in index
+    assert "20260805-task-parameter-copy" in index
+    assert 'id="detailIdentity"' not in index
+    assert "身份标识" not in index
+    assert 'id="copyTaskConfigButton"' in index
+    assert 'id="pasteTaskConfigButton"' in index
     assert 'id="networkWorkspace"' in index
     assert 'id="networkViewButton"' in index
     assert 'id="storageViewButton"' in index
@@ -138,6 +145,12 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert "/resources/cleanup" in app_js
     assert "storage-summary" in styles
     assert "resource-cleanup-meta" in styles
+    assert 'headers["X-YouDub-Identity"]' in app_js
+    assert "/config/paste" in app_js
+    assert "loadOrCreateDeviceIdentity" in app_js
+    assert "task-identity" not in styles
+    assert "身份 " not in app_js
+    assert "parameter-actions" in styles
 
     assert client.get("/api/health").json() == {"status": "ok"}
 
@@ -513,12 +526,131 @@ def test_web_creates_local_task_and_lists_artifacts(monkeypatch, tmp_path: Path)
     assert "config" not in tasks[0]
     assert "artifacts" not in tasks[0]
     assert "step_completion" not in tasks[0]
+    assert "identity" not in tasks[0]
 
     artifacts = client.get(f"/api/tasks/{task['id']}/artifacts").json()["artifacts"]
     assert artifacts[0]["key"] == "download-video"
     assert artifacts[0]["url"] == f"/api/tasks/{task['id']}/artifacts/download-video"
     saved_task = json.loads((tmp_path / "tasks" / "tasks.json").read_text(encoding="utf-8"))[0]
     assert saved_task["config"] == {}
+
+
+def test_web_assigns_distinct_device_identities_to_created_tasks(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    first_source = tmp_path / "first.mp4"
+    second_source = tmp_path / "second.mp4"
+    first_source.write_bytes(b"first")
+    second_source.write_bytes(b"second")
+
+    first = client.post(
+        "/api/tasks/local",
+        headers={"X-YouDub-Identity": DEVICE_A},
+        json={"source": str(first_source), "title": "First Device"},
+    )
+    second = client.post(
+        "/api/tasks/local",
+        headers={"X-YouDub-Identity": DEVICE_B},
+        json={"source": str(second_source), "title": "Second Device"},
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["identity"] == DEVICE_A
+    assert second.json()["identity"] == DEVICE_B
+    listed = client.get("/api/tasks").json()["tasks"]
+    assert {task["id"] for task in listed} == {first.json()["id"], second.json()["id"]}
+    assert all("identity" not in task for task in listed)
+    saved = json.loads((tmp_path / "tasks" / "tasks.json").read_text(encoding="utf-8"))
+    assert {task["identity"] for task in saved} == {DEVICE_A, DEVICE_B}
+
+
+def test_web_rejects_invalid_task_identity_before_creating_task(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+
+    response = client.post(
+        "/api/tasks/local",
+        headers={"X-YouDub-Identity": "not-a-uuid"},
+        json={"source": str(source), "title": "Invalid Identity"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Invalid task identity"
+    assert client.get("/api/tasks").json()["total"] == 0
+    assert not (tmp_path / "videos").exists()
+
+
+def test_web_pastes_all_task_config_only_for_same_identity(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+
+    def create_task(name: str, identity: str | None) -> dict:
+        source = tmp_path / f"{name}.mp4"
+        source.write_bytes(name.encode())
+        headers = {"X-YouDub-Identity": identity} if identity else {}
+        return client.post(
+            "/api/tasks/local",
+            headers=headers,
+            json={"source": str(source), "title": name},
+        ).json()
+
+    source = create_task("source", DEVICE_A)
+    target = create_task("target", DEVICE_A)
+    other_device = create_task("other", DEVICE_B)
+    legacy = create_task("legacy", None)
+    source_config = source["config"]
+    source_config["download"]["max_height"] = 720
+    source_config["translation"]["api_key"] = "sk-source-secret"
+    source_config["translation"]["model"] = "source-model"
+    source_config["tts"]["cfg_value"] = 3.75
+    updated = client.put(
+        f"/api/tasks/{source['id']}/config",
+        headers={"X-YouDub-Identity": DEVICE_A},
+        json={"config": source_config},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["config"]["translation"]["api_key"] == "********"
+
+    pasted = client.post(
+        f"/api/tasks/{target['id']}/config/paste",
+        headers={"X-YouDub-Identity": DEVICE_A},
+        json={"source_task_id": source["id"]},
+    )
+
+    assert pasted.status_code == 200
+    assert pasted.json()["source_task_id"] == source["id"]
+    assert pasted.json()["config"]["download"]["max_height"] == 720
+    assert pasted.json()["config"]["translation"]["api_key"] == "********"
+    stored_source = web_module._store().get(source["id"])
+    stored_target = web_module._store().get(target["id"])
+    assert stored_target.config == stored_source.config
+    assert stored_target.config["translation"]["api_key"] == "sk-source-secret"
+
+    wrong_target = client.post(
+        f"/api/tasks/{other_device['id']}/config/paste",
+        headers={"X-YouDub-Identity": DEVICE_A},
+        json={"source_task_id": source["id"]},
+    )
+    wrong_requester = client.post(
+        f"/api/tasks/{target['id']}/config/paste",
+        headers={"X-YouDub-Identity": DEVICE_B},
+        json={"source_task_id": source["id"]},
+    )
+    legacy_paste = client.post(
+        f"/api/tasks/{legacy['id']}/config/paste",
+        headers={"X-YouDub-Identity": DEVICE_A},
+        json={"source_task_id": source["id"]},
+    )
+    self_paste = client.post(
+        f"/api/tasks/{source['id']}/config/paste",
+        headers={"X-YouDub-Identity": DEVICE_A},
+        json={"source_task_id": source["id"]},
+    )
+
+    assert wrong_target.status_code == 403
+    assert wrong_requester.status_code == 403
+    assert legacy_paste.status_code == 403
+    assert self_paste.status_code == 409
 
 
 def test_web_cleans_task_resources_but_keeps_task_record(monkeypatch, tmp_path: Path) -> None:
@@ -923,6 +1055,7 @@ def test_web_downloads_url_draft_with_saved_config_and_hydrates_same_task(monkey
     client = _client(monkeypatch, tmp_path)
     draft = client.post(
         "/api/tasks/url-draft",
+        headers={"X-YouDub-Identity": DEVICE_A},
         json={"url": "https://example.test/watch?v=abc123", "max_height": 720},
     ).json()
     config = draft["config"]
@@ -968,6 +1101,7 @@ def test_web_downloads_url_draft_with_saved_config_and_hydrates_same_task(monkey
     assert response.json()["running"] is True
     task = _wait_for_task_idle(client, draft["id"])
     assert task["id"] == draft["id"]
+    assert task["identity"] == DEVICE_A
     assert task["title"] == "Hydrated"
     assert task["source"] == "https://example.test/watch?v=abc123"
     assert task["source_key"] == "youtube:abc123"
@@ -1003,8 +1137,16 @@ def test_web_url_draft_download_merges_existing_stable_task(monkeypatch, tmp_pat
         return DownloadResult(task_dir, info_path, media_path, None, info, "youtube:abc123")
 
     monkeypatch.setattr(web_module, "download_url_to_artifacts", fake_initial_download)
-    existing = client.post("/api/tasks/url", json={"url": "https://example.test/watch?v=abc123"}).json()
-    draft = client.post("/api/tasks/url-draft", json={"url": "https://example.test/other?v=abc123"}).json()
+    existing = client.post(
+        "/api/tasks/url",
+        headers={"X-YouDub-Identity": DEVICE_A},
+        json={"url": "https://example.test/watch?v=abc123"},
+    ).json()
+    draft = client.post(
+        "/api/tasks/url-draft",
+        headers={"X-YouDub-Identity": DEVICE_B},
+        json={"url": "https://example.test/other?v=abc123"},
+    ).json()
 
     config = draft["config"]
     config["translation"]["model"] = "gpt-draft"
@@ -1017,6 +1159,7 @@ def test_web_url_draft_download_merges_existing_stable_task(monkeypatch, tmp_pat
     assert [task["id"] for task in tasks] == [existing["id"]]
     merged = client.get(f"/api/tasks/{draft['id']}").json()
     assert merged["id"] == existing["id"]
+    assert merged["identity"] == DEVICE_A
     assert merged["config"]["translation"]["model"] == "gpt-draft"
     assert not Path(draft["folder"]).exists()
 
@@ -1027,6 +1170,10 @@ def test_web_run_all_downloads_url_draft_before_pipeline_steps(monkeypatch, tmp_
         "/api/tasks/url-draft",
         json={"url": "https://example.test/watch?v=abc123", "max_height": 720},
     ).json()
+    config = draft["config"]
+    config["bilibili"]["sessdata"] = "sess-task"
+    config["bilibili"]["bili_jct"] = "jct-task"
+    assert client.put(f"/api/tasks/{draft['id']}/config", json={"config": config}).status_code == 200
     captured = {"steps": []}
 
     def fake_download(url: str, root: Path, config: object) -> DownloadResult:
@@ -1092,6 +1239,11 @@ def test_web_run_all_downloads_url_draft_before_pipeline_steps(monkeypatch, tmp_
     assert task["source_key"] == "youtube:abc123"
     assert task["steps"]["ingest"] == "success"
     assert task["steps"]["prepare-publish"] == "success"
+    assert task["config"]["bilibili"]["sessdata"] == "********"
+    assert task["config"]["bilibili"]["bili_jct"] == "********"
+    stored = web_module._store().get(task["id"])
+    assert stored.config["bilibili"]["sessdata"] == "sess-task"
+    assert stored.config["bilibili"]["bili_jct"] == "jct-task"
 
 
 def test_web_run_all_includes_bilibili_only_when_enabled(monkeypatch, tmp_path: Path) -> None:
@@ -1719,6 +1871,41 @@ def test_web_task_download_cookies_uses_saved_path_without_echoing_content(monke
     )
     saved_tasks = (tmp_path / "tasks" / "tasks.json").read_text(encoding="utf-8")
     assert "task-secret" not in saved_tasks
+
+
+def test_web_saving_download_cookies_preserves_task_secrets(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task = client.post("/api/tasks/local", json={"source": str(source), "title": "Cookie Secrets"}).json()
+    config = task["config"]
+    expected = {
+        "whisperx": {"hf_token": "hf-whisper-task"},
+        "translation": {"api_key": "sk-translation-task"},
+        "tts": {"hf_token": "hf-tts-task"},
+        "bilibili": {"sessdata": "sess-task", "bili_jct": "jct-task"},
+    }
+    for section, values in expected.items():
+        config[section].update(values)
+    assert client.put(f"/api/tasks/{task['id']}/config", json={"config": config}).status_code == 200
+
+    response = client.post(
+        f"/api/tasks/{task['id']}/download-cookies",
+        json={
+            "content": (
+                "# Netscape HTTP Cookie File\n"
+                ".youtube.com TRUE / TRUE 1815872581 LOGIN_INFO task-secret\n"
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    refreshed = client.get(f"/api/tasks/{task['id']}").json()
+    stored = web_module._store().get(task["id"])
+    for section, values in expected.items():
+        for field, value in values.items():
+            assert refreshed["config"][section][field] == "********"
+            assert stored.config[section][field] == value
 
 
 def test_web_run_step_uses_saved_task_config(monkeypatch, tmp_path: Path) -> None:
