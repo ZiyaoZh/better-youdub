@@ -47,8 +47,9 @@ DEFAULT_SEGMENT_EXTRA_PROMPT = (
 DEFAULT_CORRECTION_PROMPT = (
     "If the video is about Bloons TD 6 or related games, apply these term preferences. "
     "Keep MOAB, BFB, ZOMG, DDT, BAD, and Ninja Kiwi in English. Translate paragon as 模范, "
-    "Bloonarius as 充气机, Lych as 巫妖, Vortex as 空气大师, DreadBloon as 恐怖气球, "
-    "Phayze as 菲兹, BLASTAPOPOULOS as 轰炸飞艇, diamondback as 菱背, Blons as 金发女郎, "
+    "Bloonarius as 充气机, Lych as 巫妖, Vortex as 漩涡, DreadBloon as 恐怖气球, "
+    "Phayze as 菲兹, BLASTAPOPOULOS as 轰炸飞艇, diamondback as 菱背, Skywarden/skywarden as 天卫, "
+    "Blons as 金发女郎, "
     "CHIMPS as 超猩猩模式, pops as 击破数, Popsaiden as 波塞冬, and Bloons TD Battles 2 as 气球塔防对战2. "
     "first targeting, strong targeting, and last targeting should be translated as 第一个目标, 强力目标, and 最后一个目标. "
     "When ASR says tax or tag in a tower context, it is likely Tack and should be translated as 图钉. "

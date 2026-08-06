@@ -37,6 +37,8 @@ def test_task_config_empty_secret_defaults_fall_back_to_runtime_secrets(monkeypa
     task_config = default_task_config(config)
     assert task_config["translation"]["api_key"] == ""
     assert "Bloons TD 6" in task_config["translation"]["correction_prompt"]
+    assert "Skywarden/skywarden as 天卫" in task_config["translation"]["correction_prompt"]
+    assert "Vortex as 漩涡" in task_config["translation"]["correction_prompt"]
     assert task_config["whisperx"]["hf_token"] == ""
 
     options = runtime_options_from_task_config(config, {})
@@ -44,6 +46,8 @@ def test_task_config_empty_secret_defaults_fall_back_to_runtime_secrets(monkeypa
     assert options.translation.api_key == "sk-env"
     assert options.translation.model == "gpt-env"
     assert "Bloons TD 6" in options.translation.correction_prompt
+    assert "Skywarden/skywarden as 天卫" in options.translation.correction_prompt
+    assert "Vortex as 漩涡" in options.translation.correction_prompt
     assert options.whisperx.hf_token == "hf_env"
     assert options.tts.hf_token == "hf_env"
 
