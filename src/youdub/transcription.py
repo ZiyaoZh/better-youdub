@@ -3,16 +3,18 @@ from __future__ import annotations
 import json
 import os
 import inspect
+import logging
 import unicodedata
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .gpu import cleanup_gpu_memory
+from .gpu import cleanup_gpu_memory, run_with_cuda_oom_fallback
 from .hf_runtime import prepare_huggingface_environment, run_huggingface_download
 
 
+LOGGER = logging.getLogger(__name__)
 WHISPER_OUTPUT = "transcript.whisper.json"
 ALIGN_OUTPUT = "transcript.aligned.json"
 DIARIZE_OUTPUT = "transcript.diarized.json"
@@ -350,28 +352,48 @@ def run_whisper(
     download_root = config.models_dir / "ASR" / "whisper"
     download_root.mkdir(parents=True, exist_ok=True)
 
-    model = None
-    result = None
-    try:
-        model = run_huggingface_download(
-            config.proxy,
-            lambda: whisperx.load_model(
-                model_name,
-                **_whisperx_load_model_kwargs(
-                    whisperx.load_model,
-                    download_root=str(download_root),
-                    device=device,
-                    config=config,
+    def transcribe(attempt_device: str) -> dict[str, Any]:
+        model = None
+        result = None
+        try:
+            load_kwargs = _whisperx_load_model_kwargs(
+                whisperx.load_model,
+                download_root=str(download_root),
+                device=attempt_device,
+                config=config,
+            )
+            log_start = LOGGER.warning if attempt_device == "cpu" else LOGGER.info
+            log_start(
+                "WhisperX transcription starting: device=%s compute_type=%s threads=%s batch_size=%s audio=%s",
+                attempt_device,
+                load_kwargs.get("compute_type", "default"),
+                load_kwargs.get("threads", "default"),
+                config.batch_size,
+                audio_path,
+            )
+            model = run_huggingface_download(
+                config.proxy,
+                lambda: whisperx.load_model(
+                    model_name,
+                    **load_kwargs,
                 ),
-            ),
-        )
-        result = _transcribe_with_options(model, audio_path, config)
-        if result.get("language") == "nn":
-            raise RuntimeError(f"No language detected in {audio_path}")
+            )
+            result = _transcribe_with_options(model, audio_path, config)
+            if result.get("language") == "nn":
+                raise RuntimeError(f"No language detected in {audio_path}")
+            return result
+        finally:
+            del model, result
 
+    try:
+        result = run_with_cuda_oom_fallback(
+            transcribe,
+            device=device,
+            label="whisperx-whisper",
+        )
         return _write_json(task_dir / output_name, result)
     finally:
-        del model, result
+        result = None
         cleanup_gpu_memory("whisperx-whisper")
 
 
@@ -396,29 +418,41 @@ def run_align(
     import whisperx
 
     device = _resolve_device(config.device)
-    align_model = None
-    metadata = None
-    aligned = None
+
+    def align(attempt_device: str) -> dict[str, Any]:
+        align_model = None
+        metadata = None
+        aligned = None
+        try:
+            align_model, metadata = run_huggingface_download(
+                config.proxy,
+                lambda: whisperx.load_align_model(
+                    language_code=language,
+                    device=attempt_device,
+                ),
+            )
+            aligned = whisperx.align(
+                result["segments"],
+                align_model,
+                metadata,
+                str(audio_path),
+                attempt_device,
+                return_char_alignments=False,
+            )
+            aligned["language"] = language
+            return aligned
+        finally:
+            del align_model, metadata, aligned
+
     try:
-        align_model, metadata = run_huggingface_download(
-            config.proxy,
-            lambda: whisperx.load_align_model(
-                language_code=language,
-                device=device,
-            ),
+        aligned = run_with_cuda_oom_fallback(
+            align,
+            device=device,
+            label="whisperx-align",
         )
-        aligned = whisperx.align(
-            result["segments"],
-            align_model,
-            metadata,
-            str(audio_path),
-            device,
-            return_char_alignments=False,
-        )
-        aligned["language"] = language
         return _write_json(task_dir / output_name, aligned)
     finally:
-        del align_model, metadata, aligned
+        aligned = None
         cleanup_gpu_memory("whisperx-align")
 
 
@@ -427,8 +461,6 @@ def run_diarize(task_dir: Path, config: WhisperXConfig) -> Path:
     result = _read_json(aligned_path)
 
     prepare_whisperx_runtime(config)
-    pipeline = None
-    diarize_segments = None
     try:
         if config.diarization:
             audio_path = task_dir / "audio_vocals.wav"
@@ -445,21 +477,36 @@ def run_diarize(task_dir: Path, config: WhisperXConfig) -> Path:
                     "Hugging Face token is required for WhisperX diarization"
                 )
 
-            with _DIARIZATION_LOCK:
-                pipeline = run_huggingface_download(
-                    config.proxy,
-                    lambda: DiarizationPipeline(use_auth_token=token, device=device),
-                )
-                diarize_segments = pipeline(
-                    str(audio_path),
-                    min_speakers=config.min_speakers,
-                    max_speakers=config.max_speakers,
-                )
-            result = whisperx.assign_word_speakers(diarize_segments, result)
+            def diarize(attempt_device: str) -> dict[str, Any]:
+                pipeline = None
+                diarize_segments = None
+                try:
+                    with _DIARIZATION_LOCK:
+                        pipeline = run_huggingface_download(
+                            config.proxy,
+                            lambda: DiarizationPipeline(
+                                use_auth_token=token,
+                                device=attempt_device,
+                            ),
+                        )
+                        diarize_segments = pipeline(
+                            str(audio_path),
+                            min_speakers=config.min_speakers,
+                            max_speakers=config.max_speakers,
+                        )
+                    return whisperx.assign_word_speakers(diarize_segments, result)
+                finally:
+                    del pipeline, diarize_segments
+
+            result = run_with_cuda_oom_fallback(
+                diarize,
+                device=device,
+                label="whisperx-diarize",
+            )
 
         return _write_json(task_dir / DIARIZE_OUTPUT, result)
     finally:
-        del pipeline, diarize_segments, result
+        result = None
         cleanup_gpu_memory("whisperx-diarize")
 
 
@@ -530,15 +577,29 @@ def _whisperx_load_model_kwargs(
         "device": device,
     }
     asr_options = _asr_options(config)
-    if not asr_options:
-        return kwargs
     try:
         parameters = inspect.signature(load_model).parameters
     except (TypeError, ValueError):
         parameters = {}
-    if "asr_options" in parameters:
+    if device == "cpu":
+        kwargs["compute_type"] = "int8"
+        kwargs["threads"] = _whisper_cpu_threads()
+    if asr_options and "asr_options" in parameters:
         kwargs["asr_options"] = asr_options
     return kwargs
+
+
+def _whisper_cpu_threads() -> int:
+    value = os.getenv("YOUDUB_WHISPER_CPU_THREADS")
+    if value is None or not value.strip():
+        return min(16, os.cpu_count() or 1)
+    try:
+        threads = int(value)
+    except ValueError as exc:
+        raise ValueError("YOUDUB_WHISPER_CPU_THREADS must be an integer") from exc
+    if threads < 1:
+        raise ValueError("YOUDUB_WHISPER_CPU_THREADS must be at least 1")
+    return threads
 
 
 def _transcribe_with_options(model: Any, audio_path: Path, config: WhisperXConfig) -> dict[str, Any]:

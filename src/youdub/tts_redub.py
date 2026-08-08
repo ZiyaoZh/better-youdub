@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .gpu import is_cuda_oom_error, run_with_cuda_oom_fallback
 from .tts import (
     TTSConfig,
     TTS_SEGMENTS_DIR,
@@ -64,15 +65,50 @@ def redub_tts(
         raise FileNotFoundError(vocals_dir)
     version_dir = task_dir / TTS_VERSIONS_DIR / f"round-{redub_config.round:03d}"
     version_dir.mkdir(parents=True, exist_ok=True)
+    completed_items: set[int] = set()
 
+    return run_with_cuda_oom_fallback(
+        lambda device: _redub_tts_on_device(
+            task_dir,
+            tts_config,
+            redub_config,
+            segments,
+            entries,
+            tts_dir,
+            vocals_dir,
+            version_dir,
+            completed_items,
+            device,
+        ),
+        device="auto",
+        label="voxcpm-redub",
+    )
+
+
+def _redub_tts_on_device(
+    task_dir: Path,
+    tts_config: TTSConfig,
+    redub_config: RedubTTSConfig,
+    segments: list[dict[str, Any]],
+    entries: list[dict[str, Any]],
+    tts_dir: Path,
+    vocals_dir: Path,
+    version_dir: Path,
+    completed_items: set[int],
+    device: str,
+) -> Path:
     model = None
+    succeeded = False
     try:
-        model = load_voxcpm_model(tts_config)
+        model = load_voxcpm_model(tts_config, device=device)
         fallback = choose_fallback_reference(vocals_dir, tts_config.min_reference_ms)
-        for item in segments:
+        for plan_index, item in enumerate(segments):
+            if plan_index in completed_items:
+                continue
             tts_index = int(item["tts_index"])
             if tts_index < 1 or tts_index > len(entries):
                 _append_history(task_dir, _history_record(redub_config, item, "failed", error="tts_index_out_of_range"))
+                completed_items.add(plan_index)
                 continue
             active_path = tts_dir / f"{tts_index:04d}.wav"
             previous_path = backup_tts_segment(active_path, version_dir)
@@ -101,26 +137,30 @@ def redub_tts(
                         strategy=_strategy_for_history(item, tts_config),
                     ),
                 )
+                completed_items.add(plan_index)
             except Exception as exc:
                 if previous_path.exists():
                     replace_tts_segment(previous_path, active_path)
-                _append_history(
-                    task_dir,
-                    _history_record(
-                        redub_config,
-                        item,
-                        "failed",
-                        old_file=previous_path,
-                        new_file=new_path if new_path.exists() else None,
-                        strategy=_strategy_for_history(item, tts_config),
-                        error=str(exc),
-                    ),
-                )
+                if device == "cpu" or not is_cuda_oom_error(exc):
+                    _append_history(
+                        task_dir,
+                        _history_record(
+                            redub_config,
+                            item,
+                            "failed",
+                            old_file=previous_path,
+                            new_file=new_path if new_path.exists() else None,
+                            strategy=_strategy_for_history(item, tts_config),
+                            error=str(exc),
+                        ),
+                    )
                 raise
-        return write_tts_mix(entries, tts_dir, task_dir, tts_config)
+        output = write_tts_mix(entries, tts_dir, task_dir, tts_config)
+        succeeded = True
+        return output
     finally:
         del model
-        if not tts_config.cache_model:
+        if not tts_config.cache_model or not succeeded:
             unload_voxcpm_model()
 
 

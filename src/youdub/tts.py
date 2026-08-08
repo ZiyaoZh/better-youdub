@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .gpu import cleanup_gpu_memory
+from .gpu import cleanup_gpu_memory, run_with_cuda_oom_fallback
 from .hf_runtime import run_huggingface_download
 
 TRANSLATION_INPUT = "translation.json"
@@ -44,7 +44,7 @@ _TOWER_PATH_PATTERN = re.compile(
 )
 
 _MODEL = None
-_MODEL_KEY: tuple[str, bool, str | None] | None = None
+_MODEL_KEY: tuple[str, bool, str | None, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -86,9 +86,32 @@ def generate_tts(task_dir: Path, config: TTSConfig) -> Path:
         write_tts_mix(entries, tts_dir, task_dir, config)
         return task_dir / TTS_OUTPUT
 
+    return run_with_cuda_oom_fallback(
+        lambda device: _generate_tts_on_device(
+            task_dir,
+            config,
+            entries,
+            vocals_dir,
+            tts_dir,
+            device,
+        ),
+        device="auto",
+        label="voxcpm-tts",
+    )
+
+
+def _generate_tts_on_device(
+    task_dir: Path,
+    config: TTSConfig,
+    entries: list[dict[str, Any]],
+    vocals_dir: Path,
+    tts_dir: Path,
+    device: str,
+) -> Path:
     model = None
+    succeeded = False
     try:
-        model = load_voxcpm_model(config)
+        model = load_voxcpm_model(config, device=device)
         fallback = choose_fallback_reference(vocals_dir, config.min_reference_ms)
         manifest = _load_tts_manifest(task_dir)
         manifest_segments = _manifest_segments(manifest)
@@ -122,10 +145,12 @@ def generate_tts(task_dir: Path, config: TTSConfig) -> Path:
             for key in stale_manifest_keys:
                 manifest_segments.pop(key, None)
             _write_tts_manifest(task_dir, manifest)
-        return write_tts_mix(entries, tts_dir, task_dir, config)
+        output = write_tts_mix(entries, tts_dir, task_dir, config)
+        succeeded = True
+        return output
     finally:
         del model
-        if not config.cache_model:
+        if not config.cache_model or not succeeded:
             unload_voxcpm_model()
 
 
@@ -396,10 +421,11 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(min(value, maximum), minimum)
 
 
-def load_voxcpm_model(config: TTSConfig):
+def load_voxcpm_model(config: TTSConfig, *, device: str = "auto"):
     global _MODEL, _MODEL_KEY
     model_source = str(config.model_dir.expanduser()) if config.model_dir else config.model
-    model_key = (model_source, config.load_denoiser, config.hf_token)
+    device = str(device).strip().lower() or "auto"
+    model_key = (model_source, config.load_denoiser, config.hf_token, device)
     if _MODEL is not None and _MODEL_KEY == model_key:
         return _MODEL
     if _MODEL is not None:
@@ -414,7 +440,12 @@ def load_voxcpm_model(config: TTSConfig):
             from voxcpm import VoxCPM
         except ImportError as exc:
             raise ImportError("The voxcpm package is required for TTS. Add it to GPU dependencies.") from exc
-        return VoxCPM.from_pretrained(model_source, load_denoiser=config.load_denoiser)
+        return VoxCPM.from_pretrained(
+            model_source,
+            load_denoiser=config.load_denoiser and device != "cpu",
+            device=device,
+            optimize=device != "cpu",
+        )
 
     _MODEL = run_huggingface_download(config.proxy, load_model)
     _MODEL_KEY = model_key

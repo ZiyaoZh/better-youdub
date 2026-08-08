@@ -367,7 +367,7 @@ YOUDUB_ROOT/<author>/<upload_date> <title>/
 | 模型与配置 | `YOUDUB_MODELS_DIR`、`YOUDUB_CONFIG_PATH` | 模型目录和 JSON 配置文件 |
 | 下载 | `YOUDUB_COOKIES_PATH`、`YOUDUB_YTDLP_PROXY`、`YOUDUB_DOWNLOAD_MAX_HEIGHT` | cookies、兼容的下载候选代理和默认清晰度 |
 | Web | `YOUDUB_WEB_USERNAME`、`YOUDUB_WEB_PASSWORD`、`YOUDUB_WEB_PORT` | 登录和宿主机端口 |
-| WhisperX | `YOUDUB_WHISPER_MODEL`、`YOUDUB_WHISPER_DEVICE`、`YOUDUB_WHISPER_DIARIZATION` | 识别模型、设备和说话人分离 |
+| WhisperX | `YOUDUB_WHISPER_MODEL`、`YOUDUB_WHISPER_DEVICE`、`YOUDUB_WHISPER_CPU_THREADS`、`YOUDUB_WHISPER_DIARIZATION` | 识别模型、设备、CPU 线程数和说话人分离 |
 | 翻译 | `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` | OpenAI 兼容接口 |
 | 系统网络 | `YOUDUB_NETWORK_PROXY`、`YOUDUB_NETWORK_SSH_HOST` | 自动调度使用的 HTTP/SOCKS 候选代理或 SSH 动态转发 |
 | TTS | `YOUDUB_TTS_MODEL`、`YOUDUB_TTS_MODEL_DIR`、`YOUDUB_TTS_CACHE_MODEL` | VoxCPM2 模型、离线路径和缓存策略 |
@@ -375,6 +375,8 @@ YOUDUB_ROOT/<author>/<upload_date> <title>/
 | 发布 | `BILI_SESSDATA`、`BILI_BILI_JCT`、`BILI_PROXY` | Bilibili 凭证和代理 |
 
 `YOUDUB_DOWNLOAD_MAX_HEIGHT=0` 表示不限制下载高度。首次调试建议先限制为 `720` 或使用短视频，以减少下载、模型运行和合成时间。
+
+当 Demucs、WhisperX 或 VoxCPM2 在 CUDA 上因显存不足失败时，对应推理会自动清理 CUDA 缓存并在 CPU 上重试一次。WhisperX 的 CPU 重试使用 `int8` 计算类型，并默认使用最多 16 个 CPU 推理线程；可通过 `YOUDUB_WHISPER_CPU_THREADS` 调整。VoxCPM2 会卸载 CUDA 模型后以 CPU 模式重载，并复用已经成功写入的配音片段。只有可确认的 CUDA OOM 会触发回退，模型损坏、参数错误等其他异常仍会直接失败。CPU 推理通常明显更慢，但不会因为其他进程临时占用显存而中断整个任务。
 
 Docker 启动时，如果配置了 `network.ssh_host` 或 `YOUDUB_NETWORK_SSH_HOST`，入口脚本会建立 SSH 动态转发，并将系统候选代理指向本地 SOCKS 端口。Compose 默认把 `${HOME}/.ssh` 以只读方式挂载到容器；非默认 SSH 目录可通过 `YOUDUB_SSH_DIR` 指定。旧的 `translation.ssh_host` 和 `YOUDUB_TRANSLATION_SSH_HOST` 仍可兼容读取。
 

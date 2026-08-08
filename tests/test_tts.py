@@ -3,7 +3,7 @@ import sys
 import types
 from pathlib import Path
 
-from youdub import tts
+from youdub import tts, tts_redub
 from youdub.network import network_router
 from youdub.tts import (
     TTSConfig,
@@ -50,9 +50,18 @@ def test_load_voxcpm_model_tries_direct_before_system_proxy(monkeypatch) -> None
 
     class FakeVoxCPM:
         @classmethod
-        def from_pretrained(cls, model_source: str, *, load_denoiser: bool):
+        def from_pretrained(
+            cls,
+            model_source: str,
+            *,
+            load_denoiser: bool,
+            device: str,
+            optimize: bool,
+        ):
             captured["model_source"] = model_source
             captured["load_denoiser"] = load_denoiser
+            captured["device"] = device
+            captured["optimize"] = optimize
             captured["proxies"] = factories[-1]().proxies
             return object()
 
@@ -72,6 +81,8 @@ def test_load_voxcpm_model_tries_direct_before_system_proxy(monkeypatch) -> None
     assert captured == {
         "model_source": "openbmb/VoxCPM2",
         "load_denoiser": True,
+        "device": "auto",
+        "optimize": True,
         "proxies": {},
     }
 
@@ -150,7 +161,10 @@ def test_generate_tts_writes_segments_mix_and_timings(tmp_path: Path, monkeypatc
     )
     sf.write(tmp_path / "audio_vocals.wav", np.ones(32000, dtype=np.float32) * 0.05, 16000)
     unloaded = []
-    monkeypatch.setattr("youdub.tts.load_voxcpm_model", lambda _config: _FakeModel())
+    monkeypatch.setattr(
+        "youdub.tts.load_voxcpm_model",
+        lambda _config, *, device="auto": _FakeModel(),
+    )
     monkeypatch.setattr("youdub.tts.unload_voxcpm_model", lambda: unloaded.append(True))
 
     output = generate_tts(tmp_path, TTSConfig(min_reference_ms=100, align_audio=False))
@@ -187,7 +201,10 @@ def test_generate_tts_uses_tower_path_tts_text_and_regenerates_without_matching_
             captured_texts.append(kwargs["text"])
             return super().generate(**kwargs)
 
-    monkeypatch.setattr("youdub.tts.load_voxcpm_model", lambda _config: CapturingModel())
+    monkeypatch.setattr(
+        "youdub.tts.load_voxcpm_model",
+        lambda _config, *, device="auto": CapturingModel(),
+    )
     monkeypatch.setattr("youdub.tts.unload_voxcpm_model", lambda: None)
 
     generate_tts(tmp_path, TTSConfig(min_reference_ms=100, align_audio=False))
@@ -210,12 +227,76 @@ def test_generate_tts_can_keep_model_cached(tmp_path: Path, monkeypatch) -> None
     )
     sf.write(tmp_path / "audio_vocals.wav", np.ones(16000, dtype=np.float32) * 0.05, 16000)
     unloaded = []
-    monkeypatch.setattr("youdub.tts.load_voxcpm_model", lambda _config: _FakeModel())
+    monkeypatch.setattr(
+        "youdub.tts.load_voxcpm_model",
+        lambda _config, *, device="auto": _FakeModel(),
+    )
     monkeypatch.setattr("youdub.tts.unload_voxcpm_model", lambda: unloaded.append(True))
 
     generate_tts(tmp_path, TTSConfig(min_reference_ms=100, align_audio=False, cache_model=True))
 
     assert unloaded == []
+
+
+def test_generate_tts_reloads_on_cpu_after_cuda_oom(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "translation.json").write_text(
+        json.dumps(
+            [{"start": 0.0, "end": 0.5, "translation": "第一句。"}],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    devices = []
+    unloaded = []
+
+    def fake_split_reference_audio(*_args, **_kwargs) -> Path:
+        vocals_dir = tmp_path / "segments" / "vocals"
+        vocals_dir.mkdir(parents=True)
+        (vocals_dir / "0001.wav").write_bytes(b"reference")
+        return vocals_dir
+
+    class FakeSoundFile:
+        @staticmethod
+        def write(path: str, wav, sample_rate: int) -> None:
+            assert wav == b"generated"
+            assert sample_rate == 16000
+            Path(path).write_bytes(wav)
+
+    class CpuModel:
+        tts_model = _FakeTTSModel()
+
+        def generate(self, **kwargs):
+            return b"generated"
+
+    class CudaOomModel(CpuModel):
+        def generate(self, **kwargs):
+            raise RuntimeError("CUDA out of memory while running VoxCPM")
+
+    def fake_load_model(_config, *, device="auto"):
+        devices.append(device)
+        return CudaOomModel() if device == "auto" else CpuModel()
+
+    monkeypatch.setattr(tts, "split_reference_audio", fake_split_reference_audio)
+    monkeypatch.setattr(tts, "audio_duration_ms", lambda _path: 1000.0)
+    monkeypatch.setattr(tts, "_soundfile", lambda: FakeSoundFile())
+    monkeypatch.setattr(
+        tts,
+        "write_tts_mix",
+        lambda _entries, _tts_dir, task_dir, _config: task_dir / "audio_tts.wav",
+    )
+    monkeypatch.setattr("youdub.tts.load_voxcpm_model", fake_load_model)
+    monkeypatch.setattr("youdub.tts.unload_voxcpm_model", lambda: unloaded.append(True))
+    monkeypatch.setattr("youdub.gpu.cleanup_gpu_memory", lambda _label: None)
+
+    output = generate_tts(
+        tmp_path,
+        TTSConfig(min_reference_ms=100, align_audio=False),
+    )
+
+    assert output == tmp_path / "audio_tts.wav"
+    assert devices == ["auto", "cpu"]
+    assert unloaded == [True, True]
+    assert (tmp_path / "segments" / "tts" / "0001.wav").read_bytes() == b"generated"
 
 
 def test_unload_voxcpm_model_clears_cached_model(monkeypatch) -> None:
@@ -289,7 +370,10 @@ def test_redub_tts_replaces_segment_and_rebuilds_mix(tmp_path: Path, monkeypatch
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr("youdub.tts_redub.load_voxcpm_model", lambda _config: _FakeModel())
+    monkeypatch.setattr(
+        "youdub.tts_redub.load_voxcpm_model",
+        lambda _config, *, device="auto": _FakeModel(),
+    )
     unloaded = []
     monkeypatch.setattr("youdub.tts_redub.unload_voxcpm_model", lambda: unloaded.append(True))
 
@@ -340,7 +424,10 @@ def test_redub_tts_uses_tower_path_tts_text(tmp_path: Path, monkeypatch) -> None
             captured_texts.append(kwargs["text"])
             return super().generate(**kwargs)
 
-    monkeypatch.setattr("youdub.tts_redub.load_voxcpm_model", lambda _config: CapturingModel())
+    monkeypatch.setattr(
+        "youdub.tts_redub.load_voxcpm_model",
+        lambda _config, *, device="auto": CapturingModel(),
+    )
     monkeypatch.setattr("youdub.tts_redub.unload_voxcpm_model", lambda: None)
 
     redub_tts(tmp_path, TTSConfig(min_reference_ms=100, align_audio=False), RedubTTSConfig())
@@ -348,3 +435,96 @@ def test_redub_tts_uses_tower_path_tts_text(tmp_path: Path, monkeypatch) -> None
     assert captured_texts == ["走 2杠0杠5 路线。"]
     manifest = json.loads((tmp_path / "segments" / "tts.manifest.json").read_text(encoding="utf-8"))
     assert manifest["segments"]["0001"]["tts_text"] == "走 2杠0杠5 路线。"
+
+
+def test_redub_tts_resumes_unfinished_segments_on_cpu_after_cuda_oom(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    entries = [
+        {"start": 0.0, "end": 0.5, "translation": "第一句。"},
+        {"start": 0.5, "end": 1.0, "translation": "第二句。"},
+    ]
+    (tmp_path / "translation.json").write_text(
+        json.dumps(entries, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    vocals_dir = tmp_path / "segments" / "vocals"
+    tts_dir = tmp_path / "segments" / "tts"
+    vocals_dir.mkdir(parents=True)
+    tts_dir.mkdir(parents=True)
+    for index in range(1, 3):
+        (vocals_dir / f"{index:04d}.wav").write_bytes(f"reference-{index}".encode())
+        (tts_dir / f"{index:04d}.wav").write_bytes(f"original-{index}".encode())
+    (tmp_path / "tts.redub.plan.json").write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {"segment_id": 0, "tts_index": 1},
+                    {"segment_id": 1, "tts_index": 2},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    devices = []
+    generate_calls = []
+    unloaded = []
+
+    class FakeSoundFile:
+        @staticmethod
+        def write(path: str, wav, sample_rate: int) -> None:
+            assert sample_rate == 16000
+            Path(path).write_bytes(wav)
+
+    class FakeModel:
+        tts_model = _FakeTTSModel()
+
+        def __init__(self, device: str) -> None:
+            self.device = device
+
+        def generate(self, **kwargs):
+            text = kwargs["text"]
+            generate_calls.append((self.device, text))
+            if self.device == "auto" and text == "第二句。":
+                raise RuntimeError("CUDA out of memory during local redub")
+            return f"{self.device}:{text}".encode()
+
+    def fake_load_model(_config, *, device="auto"):
+        devices.append(device)
+        return FakeModel(device)
+
+    monkeypatch.setattr(tts_redub, "load_voxcpm_model", fake_load_model)
+    monkeypatch.setattr(tts_redub, "unload_voxcpm_model", lambda: unloaded.append(True))
+    monkeypatch.setattr(tts_redub, "audio_duration_ms", lambda _path: 1000.0)
+    monkeypatch.setattr(tts, "audio_duration_ms", lambda _path: 1000.0)
+    monkeypatch.setattr(tts_redub, "_soundfile", lambda: FakeSoundFile())
+    monkeypatch.setattr(tts_redub, "update_tts_manifest_record", lambda *_args: None)
+    monkeypatch.setattr(
+        tts_redub,
+        "write_tts_mix",
+        lambda _entries, _tts_dir, task_dir, _config: task_dir / "audio_tts.wav",
+    )
+    monkeypatch.setattr("youdub.gpu.cleanup_gpu_memory", lambda _label: None)
+
+    output = redub_tts(
+        tmp_path,
+        TTSConfig(min_reference_ms=100, align_audio=False),
+        RedubTTSConfig(),
+    )
+
+    assert output == tmp_path / "audio_tts.wav"
+    assert devices == ["auto", "cpu"]
+    assert generate_calls == [
+        ("auto", "第一句。"),
+        ("auto", "第二句。"),
+        ("cpu", "第二句。"),
+    ]
+    assert unloaded == [True, True]
+    version_dir = tmp_path / "segments" / "tts_versions" / "round-001"
+    assert (version_dir / "0001.previous.wav").read_bytes() == b"original-1"
+    history = [
+        json.loads(line)
+        for line in (tmp_path / "tts.redub.history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [item["status"] for item in history] == ["success", "success"]
