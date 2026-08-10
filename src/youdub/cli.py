@@ -108,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="WhisperX device: auto, cuda, or cpu",
     )
     run_task.add_argument(
+        "--demucs-device",
+        default=argparse.SUPPRESS,
+        help="Demucs device: auto, cuda, cuda:N, or cpu",
+    )
+    run_task.add_argument(
         "--whisper-batch-size",
         type=int,
         default=argparse.SUPPRESS,
@@ -180,6 +185,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--tts-model",
         default=argparse.SUPPRESS,
         help="VoxCPM2 Hugging Face model id for TTS",
+    )
+    run_task.add_argument(
+        "--tts-device",
+        default=argparse.SUPPRESS,
+        help="VoxCPM2 device: auto, cuda, cuda:N, or cpu",
     )
     run_task.add_argument(
         "--tts-model-dir",
@@ -479,6 +489,7 @@ def cmd_run_task(config: AppConfig, args: argparse.Namespace) -> int:
     options = runtime_options_from_task_config(config, runtime_config)
     try:
         task = PipelineRunner(
+            demucs_config=options.demucs,
             whisperx_config=options.whisperx,
             translation_config=options.translation,
             tts_config=options.tts,
@@ -514,6 +525,7 @@ def _run_task_cli_overrides(args: argparse.Namespace) -> dict[str, object]:
     overrides: dict[str, object] = {}
     _set_cli_override(overrides, args, "whisper_model", "whisperx", "model_name")
     _set_cli_override(overrides, args, "whisper_device", "whisperx", "device")
+    _set_cli_override(overrides, args, "demucs_device", "demucs", "device")
     _set_cli_override(overrides, args, "whisper_batch_size", "whisperx", "batch_size")
     _set_cli_override(overrides, args, "whisper_language", "whisperx", "language")
     _set_cli_override(overrides, args, "whisper_initial_prompt", "whisperx", "initial_prompt")
@@ -530,6 +542,7 @@ def _run_task_cli_overrides(args: argparse.Namespace) -> dict[str, object]:
     _set_cli_override(overrides, args, "translation_correction_prompt", "translation", "correction_prompt")
 
     _set_cli_override(overrides, args, "tts_model", "tts", "model")
+    _set_cli_override(overrides, args, "tts_device", "tts", "device")
     _set_cli_override(overrides, args, "tts_model_dir", "tts", "model_dir", transform=_path_text)
     _set_cli_override(overrides, args, "tts_load_denoiser", "tts", "load_denoiser")
     _set_cli_override(overrides, args, "tts_cfg_value", "tts", "cfg_value")

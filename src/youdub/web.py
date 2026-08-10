@@ -1714,6 +1714,7 @@ def _run_step_job(
         if step == PipelineStep.PUBLISH_BILIBILI and not options.bilibili.dry_run and not options.bilibili.confirm:
             options = dry_run_bilibili_options(options)
         task = PipelineRunner(
+            demucs_config=options.demucs,
             whisperx_config=options.whisperx,
             translation_config=options.translation,
             tts_config=options.tts,

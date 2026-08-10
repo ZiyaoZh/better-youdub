@@ -26,6 +26,13 @@ const CONFIG_SECTIONS = [
     ],
   },
   {
+    key: "demucs",
+    label: "人声分离",
+    fields: [
+      ["device", "设备", "select", {options: ["auto", "cuda", "cpu"]}],
+    ],
+  },
+  {
     key: "whisperx",
     label: "识别",
     fields: [
@@ -71,6 +78,7 @@ const CONFIG_SECTIONS = [
     fields: [
       ["model", "TTS 模型", "text"],
       ["model_dir", "本地模型目录", "text"],
+      ["device", "设备", "select", {options: ["auto", "cuda", "cpu"]}],
       ["hf_token", "Hugging Face Token", "secret"],
       ["load_denoiser", "加载降噪器", "boolean"],
       ["cfg_value", "CFG", "number", {min: 0, step: 0.1}],
@@ -160,6 +168,7 @@ const CONFIG_SECTIONS = [
 ]
 
 const STEP_CONFIG_SECTIONS = {
+  "separate-audio": "demucs",
   transcribe: "whisperx",
   translate: "translation",
   tts: "tts",

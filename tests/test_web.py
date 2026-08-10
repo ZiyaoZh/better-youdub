@@ -857,6 +857,7 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert "Bloons TD 6" in defaults.json()["config"]["translation"]["correction_prompt"]
     assert defaults.json()["config"]["translation"]["base_url"] == WEB_TRANSLATION_BASE_URL_DEFAULT
     assert defaults.json()["config"]["translation"]["model"] == WEB_TRANSLATION_MODEL_DEFAULT
+    assert defaults.json()["config"]["demucs"]["device"] == "auto"
     assert "network" not in defaults.json()["config"]
     assert "proxy" not in defaults.json()["config"]["translation"]
     assert defaults.json()["config"]["tts"]["inference_timesteps"] == 10
@@ -865,6 +866,7 @@ def test_web_task_config_defaults_update_and_mask_secrets(monkeypatch, tmp_path:
     assert defaults.json()["config"]["tts"]["end_pad_ms"] == 160
     assert defaults.json()["config"]["tts"]["tower_path_pronunciation"] == "dash"
     assert defaults.json()["config"]["tts"]["model_dir"] == str(voxcpm_snapshot)
+    assert defaults.json()["config"]["tts"]["device"] == "auto"
 
     task = client.post("/api/tasks/local", json={"source": str(source), "title": "Config Smoke"}).json()
     assert task["config"]["whisperx"]["model_name"] == "large-v2"

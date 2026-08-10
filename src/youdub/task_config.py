@@ -9,6 +9,7 @@ from typing import Any
 from .config import AppConfig
 from .downloader import DownloadConfig
 from .hf_runtime import cached_huggingface_snapshot
+from .media import DemucsConfig
 from .publishing import BilibiliPublishConfig, PublishPackageConfig
 from .runtime import RuntimeOptions
 from .synthesis import SynthesisConfig
@@ -72,6 +73,7 @@ def _default_runtime_options(config: AppConfig) -> RuntimeOptions:
     bilibili_defaults = BilibiliPublishConfig.from_env()
     network_proxy = config.network.proxy
     return RuntimeOptions(
+        demucs=DemucsConfig.from_env(),
         whisperx=WhisperXConfig(
             models_dir=config.models_dir,
             model_name=os.getenv("YOUDUB_WHISPER_MODEL", "large-v2"),
@@ -110,6 +112,7 @@ def _default_runtime_options(config: AppConfig) -> RuntimeOptions:
             model=tts_model,
             model_dir=tts_model_dir,
             hf_token=config.secrets.huggingface.token,
+            device=os.getenv("YOUDUB_TTS_DEVICE", tts_defaults.device),
             load_denoiser=_bool_env(
                 "YOUDUB_TTS_LOAD_DENOISER",
                 _bool_env("VOXCPM_LOAD_DENOISER", tts_defaults.load_denoiser),
@@ -185,6 +188,7 @@ def default_task_config(config: AppConfig, *, include_secrets: bool = False) -> 
             "max_height": config.download_max_height,
             "force_download": False,
         },
+        "demucs": _config_dict(options.demucs),
         "whisperx": whisperx,
         "translation": translation,
         "tts": tts,
@@ -343,6 +347,9 @@ def runtime_options_from_task_config(config: AppConfig, overrides: Mapping[str, 
     bilibili_default_proxy = BilibiliPublishConfig.from_env().proxy
     workflow_max_rounds = int(values["workflow"]["tts_redub_max_rounds"])
     return RuntimeOptions(
+        demucs=DemucsConfig(
+            device=str(values["demucs"]["device"]),
+        ),
         whisperx=WhisperXConfig(
             models_dir=config.models_dir,
             model_name=str(values["whisperx"]["model_name"]),
@@ -382,6 +389,7 @@ def runtime_options_from_task_config(config: AppConfig, overrides: Mapping[str, 
             model=str(values["tts"]["model"]),
             model_dir=_optional_path(values["tts"]["model_dir"]),
             hf_token=_optional_str(values["tts"]["hf_token"]),
+            device=str(values["tts"]["device"]),
             load_denoiser=bool(values["tts"]["load_denoiser"]),
             cfg_value=float(values["tts"]["cfg_value"]),
             inference_timesteps=int(values["tts"]["inference_timesteps"]),

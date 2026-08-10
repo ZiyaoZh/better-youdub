@@ -1,8 +1,21 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
+
+from .gpu import resolve_device
+
+
+@dataclass(frozen=True)
+class DemucsConfig:
+    device: str = "auto"
+
+    @classmethod
+    def from_env(cls) -> "DemucsConfig":
+        return cls(device=os.getenv("YOUDUB_DEMUCS_DEVICE", cls.device))
 
 
 class CommandError(RuntimeError):
@@ -66,6 +79,7 @@ def separate_audio(
     output_dir: Path,
     model_name: str = "htdemucs_ft",
     segment_seconds: int = 6,
+    device: str = "auto",
 ) -> tuple[Path, Path]:
     require_binary("demucs")
     if not audio_path.exists():
@@ -73,6 +87,7 @@ def separate_audio(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     demucs_root = output_dir / "demucs"
+    resolved_device = resolve_device(device)
     command = [
         "demucs",
         "--two-stems",
@@ -81,6 +96,8 @@ def separate_audio(
         model_name,
         "--segment",
         str(segment_seconds),
+        "--device",
+        resolved_device.torch_name,
         "--out",
         str(demucs_root),
         str(audio_path),

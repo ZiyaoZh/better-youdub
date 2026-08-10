@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .gpu import cleanup_gpu_memory
+from .gpu import cleanup_gpu_memory, resolve_device
 from .hf_runtime import run_huggingface_download
 
 TRANSLATION_INPUT = "translation.json"
@@ -44,7 +44,7 @@ _TOWER_PATH_PATTERN = re.compile(
 )
 
 _MODEL = None
-_MODEL_KEY: tuple[str, bool, str | None] | None = None
+_MODEL_KEY: tuple[str, bool, str | None, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +68,7 @@ class TTSConfig:
     cache_model: bool = DEFAULT_TTS_CACHE_MODEL
     tower_path_pronunciation: str = DEFAULT_TTS_TOWER_PATH_PRONUNCIATION
     proxy: str | None = None
+    device: str = "auto"
 
 
 def generate_tts(task_dir: Path, config: TTSConfig) -> Path:
@@ -399,7 +400,9 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
 def load_voxcpm_model(config: TTSConfig):
     global _MODEL, _MODEL_KEY
     model_source = str(config.model_dir.expanduser()) if config.model_dir else config.model
-    model_key = (model_source, config.load_denoiser, config.hf_token)
+    resolved_device = resolve_device(config.device)
+    device_name = resolved_device.torch_name
+    model_key = (model_source, config.load_denoiser, config.hf_token, device_name)
     if _MODEL is not None and _MODEL_KEY == model_key:
         return _MODEL
     if _MODEL is not None:
@@ -414,7 +417,11 @@ def load_voxcpm_model(config: TTSConfig):
             from voxcpm import VoxCPM
         except ImportError as exc:
             raise ImportError("The voxcpm package is required for TTS. Add it to GPU dependencies.") from exc
-        return VoxCPM.from_pretrained(model_source, load_denoiser=config.load_denoiser)
+        return VoxCPM.from_pretrained(
+            model_source,
+            load_denoiser=config.load_denoiser,
+            device=device_name,
+        )
 
     _MODEL = run_huggingface_download(config.proxy, load_model)
     _MODEL_KEY = model_key

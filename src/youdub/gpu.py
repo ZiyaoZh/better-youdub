@@ -9,6 +9,18 @@ LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class ResolvedDevice:
+    name: str
+    index: int | None = None
+
+    @property
+    def torch_name(self) -> str:
+        if self.name == "cuda" and self.index is not None:
+            return f"cuda:{self.index}"
+        return self.name
+
+
+@dataclass(frozen=True)
 class CudaMemorySnapshot:
     label: str
     device: int | None
@@ -24,6 +36,66 @@ class CudaMemorySnapshot:
             "reserved_mb": round(self.reserved / 1024 / 1024, 2),
             "max_reserved_mb": round(self.max_reserved / 1024 / 1024, 2),
         }
+
+
+def resolve_device(device: str) -> ResolvedDevice:
+    requested = device.strip().lower()
+    explicit_index = _parse_cuda_device_index(requested)
+    if requested == "cpu":
+        return ResolvedDevice("cpu")
+    if requested not in {"auto", "cuda"} and explicit_index is None:
+        return ResolvedDevice(device)
+
+    import torch
+
+    cuda = torch.cuda
+    if not cuda.is_available():
+        if requested == "auto":
+            return ResolvedDevice("cpu")
+        raise RuntimeError("CUDA was requested but no CUDA device is available")
+
+    device_count = int(cuda.device_count())
+    if device_count <= 0:
+        if requested == "auto":
+            return ResolvedDevice("cpu")
+        raise RuntimeError("CUDA was requested but no CUDA device is available")
+
+    if explicit_index is not None:
+        if explicit_index >= device_count:
+            raise ValueError(
+                f"CUDA device index {explicit_index} is out of range; "
+                f"{device_count} device(s) are available"
+            )
+        return ResolvedDevice("cuda", explicit_index)
+
+    selected_index = _device_with_most_free_memory(cuda, device_count)
+    LOGGER.info("Selected CUDA device %s for requested device %s", selected_index, requested)
+    return ResolvedDevice("cuda", selected_index)
+
+
+def _parse_cuda_device_index(device: str) -> int | None:
+    if not device.startswith("cuda:"):
+        return None
+    value = device.removeprefix("cuda:")
+    if not value.isdigit():
+        raise ValueError(f"Invalid CUDA device: {device}")
+    return int(value)
+
+
+def _device_with_most_free_memory(cuda: Any, device_count: int) -> int:
+    available: list[tuple[int, int]] = []
+    for index in range(device_count):
+        try:
+            free_bytes, _total_bytes = cuda.mem_get_info(index)
+        except Exception:
+            LOGGER.warning("Unable to query free memory for CUDA device %s", index, exc_info=True)
+            continue
+        available.append((int(free_bytes), index))
+
+    if not available:
+        LOGGER.warning("Unable to query CUDA device memory; falling back to device 0")
+        return 0
+    return max(available)[1]
 
 
 def cuda_memory_snapshot(label: str = "") -> CudaMemorySnapshot | None:

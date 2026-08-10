@@ -19,9 +19,10 @@ def test_pipeline_marks_separate_audio_success(tmp_path: Path, monkeypatch) -> N
     task = Task(id="abc123", title="demo", source="/tmp/demo.mp4", folder=tmp_path)
     (tmp_path / "audio.wav").write_bytes(b"audio")
 
-    def fake_separate_audio(audio_path: Path, output_dir: Path) -> tuple[Path, Path]:
+    def fake_separate_audio(audio_path: Path, output_dir: Path, *, device: str) -> tuple[Path, Path]:
         assert audio_path == tmp_path / "audio.wav"
         assert output_dir == tmp_path
+        assert device == "auto"
         vocals = output_dir / "audio_vocals.wav"
         instruments = output_dir / "audio_instruments.wav"
         vocals.write_bytes(b"vocals")

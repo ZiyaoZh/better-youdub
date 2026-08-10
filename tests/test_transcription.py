@@ -7,6 +7,56 @@ from youdub import transcription
 from youdub.transcription import WhisperXConfig
 
 
+def test_resolve_device_selects_gpu_with_most_free_memory(monkeypatch) -> None:
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def device_count() -> int:
+            return 3
+
+        @staticmethod
+        def mem_get_info(index: int) -> tuple[int, int]:
+            return {
+                0: (2, 80),
+                1: (70, 80),
+                2: (40, 80),
+            }[index]
+
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=FakeCuda()))
+
+    assert transcription._resolve_device("auto") == transcription._ResolvedDevice("cuda", 1)
+    assert transcription._resolve_device("cuda") == transcription._ResolvedDevice("cuda", 1)
+    assert transcription._resolve_device("cuda:2") == transcription._ResolvedDevice("cuda", 2)
+
+
+def test_whisperx_load_model_kwargs_pass_device_index_without_asr_options() -> None:
+    def fake_load_model(
+        model_name: str,
+        *,
+        download_root: str,
+        device: str,
+        device_index: int = 0,
+    ) -> object:
+        return object()
+
+    kwargs = transcription._whisperx_load_model_kwargs(
+        fake_load_model,
+        download_root="/models",
+        device="cuda",
+        device_index=2,
+        config=WhisperXConfig(models_dir=Path("/models")),
+    )
+
+    assert kwargs == {
+        "download_root": "/models",
+        "device": "cuda",
+        "device_index": 2,
+    }
+
+
 def test_finalize_transcript_normalizes_segments(
     tmp_path: Path,
     monkeypatch,
@@ -260,7 +310,11 @@ def test_run_whisper_passes_language_and_initial_prompt(tmp_path: Path, monkeypa
     cleanup_calls = []
     monkeypatch.setitem(sys.modules, "whisperx", fake_whisperx)
     monkeypatch.setattr(transcription, "prepare_whisperx_runtime", lambda _config: None)
-    monkeypatch.setattr(transcription, "_resolve_device", lambda _device: "cpu")
+    monkeypatch.setattr(
+        transcription,
+        "_resolve_device",
+        lambda _device: transcription._ResolvedDevice("cpu"),
+    )
     monkeypatch.setattr(transcription, "cleanup_gpu_memory", lambda label: cleanup_calls.append(label))
 
     transcription.run_whisper(
@@ -307,7 +361,11 @@ def test_run_align_cleans_gpu_memory(tmp_path: Path, monkeypatch) -> None:
     fake_whisperx = types.SimpleNamespace(load_align_model=fake_load_align_model, align=fake_align)
     monkeypatch.setitem(sys.modules, "whisperx", fake_whisperx)
     monkeypatch.setattr(transcription, "prepare_whisperx_runtime", lambda _config: None)
-    monkeypatch.setattr(transcription, "_resolve_device", lambda _device: "cpu")
+    monkeypatch.setattr(
+        transcription,
+        "_resolve_device",
+        lambda _device: transcription._ResolvedDevice("cpu"),
+    )
     monkeypatch.setattr(transcription, "cleanup_gpu_memory", lambda label: cleanup_calls.append(label))
 
     output = transcription.run_align(tmp_path, WhisperXConfig(models_dir=tmp_path / "models"))

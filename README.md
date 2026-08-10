@@ -367,12 +367,14 @@ YOUDUB_ROOT/<author>/<upload_date> <title>/
 | 模型与配置 | `YOUDUB_MODELS_DIR`、`YOUDUB_CONFIG_PATH` | 模型目录和 JSON 配置文件 |
 | 下载 | `YOUDUB_COOKIES_PATH`、`YOUDUB_YTDLP_PROXY`、`YOUDUB_DOWNLOAD_MAX_HEIGHT` | cookies、兼容的下载候选代理和默认清晰度 |
 | Web | `YOUDUB_WEB_USERNAME`、`YOUDUB_WEB_PASSWORD`、`YOUDUB_WEB_PORT` | 登录和宿主机端口 |
-| WhisperX | `YOUDUB_WHISPER_MODEL`、`YOUDUB_WHISPER_DEVICE`、`YOUDUB_WHISPER_DIARIZATION` | 识别模型、设备和说话人分离 |
+| Demucs / WhisperX | `YOUDUB_DEMUCS_DEVICE`、`YOUDUB_WHISPER_MODEL`、`YOUDUB_WHISPER_DEVICE`、`YOUDUB_WHISPER_DIARIZATION` | 人声分离、识别模型、设备和说话人分离 |
 | 翻译 | `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` | OpenAI 兼容接口 |
 | 系统网络 | `YOUDUB_NETWORK_PROXY`、`YOUDUB_NETWORK_SSH_HOST` | 自动调度使用的 HTTP/SOCKS 候选代理或 SSH 动态转发 |
-| TTS | `YOUDUB_TTS_MODEL`、`YOUDUB_TTS_MODEL_DIR`、`YOUDUB_TTS_CACHE_MODEL` | VoxCPM2 模型、离线路径和缓存策略 |
+| TTS | `YOUDUB_TTS_MODEL`、`YOUDUB_TTS_MODEL_DIR`、`YOUDUB_TTS_DEVICE`、`YOUDUB_TTS_CACHE_MODEL` | VoxCPM2 模型、离线路径、设备和缓存策略 |
 | 合成 | `YOUDUB_BURN_SUBTITLES`、`YOUDUB_SYNTHESIS_CRF` | 字幕烧录和编码质量 |
 | 发布 | `BILI_SESSDATA`、`BILI_BILI_JCT`、`BILI_PROXY` | Bilibili 凭证和代理 |
+
+`YOUDUB_DEMUCS_DEVICE`、`YOUDUB_WHISPER_DEVICE` 和 `YOUDUB_TTS_DEVICE` 支持 `auto`、`cuda`、`cuda:N` 和 `cpu`。`auto`（以及未指定编号的 `cuda`）会在运行时选择当前空闲显存最多的 CUDA 卡；没有 CUDA 时 `auto` 回退到 CPU。
 
 `YOUDUB_DOWNLOAD_MAX_HEIGHT=0` 表示不限制下载高度。首次调试建议先限制为 `720` 或使用短视频，以减少下载、模型运行和合成时间。
 

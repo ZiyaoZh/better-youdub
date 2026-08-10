@@ -40,6 +40,8 @@ def test_task_config_empty_secret_defaults_fall_back_to_runtime_secrets(monkeypa
     assert "Skywarden/skywarden as 天卫" in task_config["translation"]["correction_prompt"]
     assert "Vortex as 漩涡" in task_config["translation"]["correction_prompt"]
     assert task_config["whisperx"]["hf_token"] == ""
+    assert task_config["demucs"]["device"] == "auto"
+    assert task_config["tts"]["device"] == "auto"
 
     options = runtime_options_from_task_config(config, {})
 
@@ -50,6 +52,22 @@ def test_task_config_empty_secret_defaults_fall_back_to_runtime_secrets(monkeypa
     assert "Vortex as 漩涡" in options.translation.correction_prompt
     assert options.whisperx.hf_token == "hf_env"
     assert options.tts.hf_token == "hf_env"
+
+
+def test_task_config_passes_demucs_and_tts_devices_to_runtime_options(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("YOUDUB_CONFIG_PATH", str(tmp_path / "config" / "youdub.json"))
+    config = AppConfig.from_env()
+
+    options = runtime_options_from_task_config(
+        config,
+        {
+            "demucs": {"device": "cuda:1"},
+            "tts": {"device": "cuda:2"},
+        },
+    )
+
+    assert options.demucs.device == "cuda:1"
+    assert options.tts.device == "cuda:2"
 
 
 def test_task_config_secret_overrides_runtime_secrets(monkeypatch, tmp_path: Path) -> None:

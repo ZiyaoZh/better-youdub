@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .config import AppConfig
+from .media import DemucsConfig
 from .publishing import BilibiliPublishConfig, PublishPackageConfig
 from .synthesis import SynthesisConfig
 from .translation import TranslationConfig
@@ -22,6 +23,7 @@ class RuntimeOptions:
     bilibili: BilibiliPublishConfig
     tts_quality: TTSQualityConfig
     redub_tts: RedubTTSConfig
+    demucs: DemucsConfig = field(default_factory=DemucsConfig)
 
 
 def runtime_options_from_env(config: AppConfig) -> RuntimeOptions:

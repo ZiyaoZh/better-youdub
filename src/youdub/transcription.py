@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .gpu import cleanup_gpu_memory
+from .gpu import ResolvedDevice as _ResolvedDevice
+from .gpu import cleanup_gpu_memory, resolve_device
 from .hf_runtime import prepare_huggingface_environment, run_huggingface_download
 
 
@@ -66,12 +67,8 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def _resolve_device(device: str) -> str:
-    if device != "auto":
-        return device
-    import torch
-
-    return "cuda" if torch.cuda.is_available() else "cpu"
+def _resolve_device(device: str) -> _ResolvedDevice:
+    return resolve_device(device)
 
 
 def _normalize_model_name(model_name: str) -> str:
@@ -345,7 +342,7 @@ def run_whisper(
     prepare_whisperx_runtime(config)
     import whisperx
 
-    device = _resolve_device(config.device)
+    resolved_device = _resolve_device(config.device)
     model_name = _normalize_model_name(config.model_name)
     download_root = config.models_dir / "ASR" / "whisper"
     download_root.mkdir(parents=True, exist_ok=True)
@@ -360,7 +357,8 @@ def run_whisper(
                 **_whisperx_load_model_kwargs(
                     whisperx.load_model,
                     download_root=str(download_root),
-                    device=device,
+                    device=resolved_device.name,
+                    device_index=resolved_device.index,
                     config=config,
                 ),
             ),
@@ -395,7 +393,7 @@ def run_align(
     prepare_whisperx_runtime(config)
     import whisperx
 
-    device = _resolve_device(config.device)
+    device = _resolve_device(config.device).torch_name
     align_model = None
     metadata = None
     aligned = None
@@ -438,7 +436,7 @@ def run_diarize(task_dir: Path, config: WhisperXConfig) -> Path:
             import whisperx
             from whisperx.diarize import DiarizationPipeline
 
-            device = _resolve_device(config.device)
+            device = _resolve_device(config.device).torch_name
             token = config.hf_token
             if not token:
                 raise RuntimeError(
@@ -523,6 +521,7 @@ def _whisperx_load_model_kwargs(
     *,
     download_root: str,
     device: str,
+    device_index: int | None,
     config: WhisperXConfig,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
@@ -530,13 +529,17 @@ def _whisperx_load_model_kwargs(
         "device": device,
     }
     asr_options = _asr_options(config)
-    if not asr_options:
-        return kwargs
     try:
         parameters = inspect.signature(load_model).parameters
     except (TypeError, ValueError):
         parameters = {}
-    if "asr_options" in parameters:
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    if device_index is not None and ("device_index" in parameters or accepts_kwargs):
+        kwargs["device_index"] = device_index
+    if "asr_options" in parameters or accepts_kwargs:
         kwargs["asr_options"] = asr_options
     return kwargs
 

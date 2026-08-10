@@ -50,9 +50,10 @@ def test_load_voxcpm_model_tries_direct_before_system_proxy(monkeypatch) -> None
 
     class FakeVoxCPM:
         @classmethod
-        def from_pretrained(cls, model_source: str, *, load_denoiser: bool):
+        def from_pretrained(cls, model_source: str, *, load_denoiser: bool, device: str):
             captured["model_source"] = model_source
             captured["load_denoiser"] = load_denoiser
+            captured["device"] = device
             captured["proxies"] = factories[-1]().proxies
             return object()
 
@@ -64,16 +65,27 @@ def test_load_voxcpm_model_tries_direct_before_system_proxy(monkeypatch) -> None
     )
     monkeypatch.setattr(tts, "_MODEL", None)
     monkeypatch.setattr(tts, "_MODEL_KEY", None)
+    requested_devices = []
+
+    def fake_resolve_device(device: str) -> types.SimpleNamespace:
+        requested_devices.append(device)
+        return types.SimpleNamespace(torch_name="cuda:2")
+
+    monkeypatch.setattr(tts, "resolve_device", fake_resolve_device)
     network_router.clear()
 
-    model = tts.load_voxcpm_model(TTSConfig(model="openbmb/VoxCPM2", load_denoiser=True, proxy=proxy))
+    model = tts.load_voxcpm_model(
+        TTSConfig(model="openbmb/VoxCPM2", load_denoiser=True, proxy=proxy, device="auto")
+    )
 
     assert model is tts._MODEL
     assert captured == {
         "model_source": "openbmb/VoxCPM2",
         "load_denoiser": True,
+        "device": "cuda:2",
         "proxies": {},
     }
+    assert requested_devices == ["auto"]
 
 
 def test_load_translation_entries_accepts_current_list_format(tmp_path: Path) -> None:
@@ -222,7 +234,7 @@ def test_unload_voxcpm_model_clears_cached_model(monkeypatch) -> None:
     cleanup_calls = []
     monkeypatch.setattr(tts, "cleanup_gpu_memory", lambda label: cleanup_calls.append(label))
     monkeypatch.setattr(tts, "_MODEL", object())
-    monkeypatch.setattr(tts, "_MODEL_KEY", ("model", False, None))
+    monkeypatch.setattr(tts, "_MODEL_KEY", ("model", False, None, "cpu"))
 
     assert tts.unload_voxcpm_model("test-unload") is True
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .locking import TaskLock
-from .media import extract_audio, separate_audio
+from .media import DemucsConfig, extract_audio, separate_audio
 from .models import PipelineStep, StepStatus, Task, TaskStatus
 from .publishing import (
     BilibiliPublishConfig,
@@ -37,7 +37,9 @@ class PipelineRunner:
         bilibili_publish_config: BilibiliPublishConfig | None = None,
         tts_quality_config: TTSQualityConfig | None = None,
         redub_tts_config: RedubTTSConfig | None = None,
+        demucs_config: DemucsConfig | None = None,
     ):
+        self.demucs_config = demucs_config
         self.whisperx_config = whisperx_config
         self.translation_config = translation_config
         self.tts_config = tts_config
@@ -60,7 +62,8 @@ class PipelineRunner:
             if step == PipelineStep.EXTRACT_AUDIO:
                 extract_audio(task.folder / "download.mp4", task.folder / "audio.wav")
             elif step == PipelineStep.SEPARATE_AUDIO:
-                separate_audio(task.folder / "audio.wav", task.folder)
+                demucs_config = self.demucs_config or DemucsConfig.from_env()
+                separate_audio(task.folder / "audio.wav", task.folder, device=demucs_config.device)
             elif step == PipelineStep.TRANSCRIBE:
                 run_all(task.folder, self._whisperx_config())
                 task.mark_step(PipelineStep.TRANSCRIBE_WHISPER, StepStatus.SUCCESS)
