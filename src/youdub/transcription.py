@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import inspect
 import unicodedata
@@ -11,7 +12,12 @@ from typing import Any
 
 from .gpu import ResolvedDevice as _ResolvedDevice
 from .gpu import cleanup_gpu_memory, resolve_device
-from .hf_runtime import prepare_huggingface_environment, run_huggingface_download
+from .hf_runtime import (
+    cached_huggingface_snapshot,
+    cached_huggingface_snapshot_at,
+    prepare_huggingface_environment,
+    run_huggingface_download,
+)
 
 
 WHISPER_OUTPUT = "transcript.whisper.json"
@@ -22,6 +28,7 @@ _TORCH_LOAD_PATCHED = False
 _HUGGINGFACE_HUB_PATCHED = False
 _DIARIZATION_LOCK = threading.Lock()
 RUNTIME_CACHE_DIR = Path("/tmp/youdub-cache")
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -82,6 +89,60 @@ def _clean_optional_text(value: str | None) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+_WHISPER_CACHE_FILES = ("config.json", "model.bin")
+_ALIGN_CACHE_MODEL_FILES = ("model.safetensors", "pytorch_model.bin")
+_ALIGN_CACHE_TOKENIZER_FILES = ("vocab.json", "tokenizer.json", "spiece.model")
+
+
+def _whisper_repository_id(model_name: str) -> str | None:
+    model_name = _clean_optional_text(model_name)
+    if not model_name or Path(model_name).exists():
+        return None
+    if "/" in model_name:
+        return model_name
+    return f"Systran/faster-whisper-{model_name}"
+
+
+def _cached_whisper_model_source(download_root: Path, model_name: str) -> Path | None:
+    model_name = _normalize_model_name(model_name)
+    repository_id = _whisper_repository_id(model_name)
+    if repository_id is None:
+        return None
+    return cached_huggingface_snapshot_at(
+        download_root,
+        repository_id,
+        required_files=_WHISPER_CACHE_FILES,
+    )
+
+
+def _cached_align_model_source(language: str) -> Path | None:
+    try:
+        from whisperx.alignment import DEFAULT_ALIGN_MODELS_HF
+    except Exception:
+        # Keep compatibility with lightweight/fake WhisperX modules and older
+        # releases which do not expose the model map from this module.
+        return None
+
+    model_name = DEFAULT_ALIGN_MODELS_HF.get(language)
+    if not isinstance(model_name, str) or not model_name.strip():
+        return None
+    snapshot = cached_huggingface_snapshot(model_name)
+    if snapshot is None:
+        return None
+    if not (snapshot / "config.json").is_file():
+        return None
+    if not any((snapshot / name).is_file() for name in _ALIGN_CACHE_MODEL_FILES):
+        return None
+    if not any((snapshot / name).is_file() for name in _ALIGN_CACHE_TOKENIZER_FILES):
+        return None
+    if not any(
+        (snapshot / name).is_file()
+        for name in ("preprocessor_config.json", "processor_config.json")
+    ):
+        return None
+    return snapshot
 
 
 def prepare_whisperx_runtime(config: WhisperXConfig) -> None:
@@ -350,22 +411,39 @@ def run_whisper(
     model = None
     result = None
     try:
+        load_kwargs = _whisperx_load_model_kwargs(
+            whisperx.load_model,
+            download_root=str(download_root),
+            device=resolved_device.name,
+            device_index=resolved_device.index,
+            config=config,
+        )
+        LOGGER.info(
+            "WhisperX loading model=%s device=%s%s",
+            model_name,
+            resolved_device.name
+            if resolved_device.index is None
+            else f"{resolved_device.name}:{resolved_device.index}",
+            " from local cache" if load_kwargs.get("local_files_only") else "",
+        )
         model = run_huggingface_download(
             config.proxy,
             lambda: whisperx.load_model(
                 model_name,
-                **_whisperx_load_model_kwargs(
-                    whisperx.load_model,
-                    download_root=str(download_root),
-                    device=resolved_device.name,
-                    device_index=resolved_device.index,
-                    config=config,
-                ),
+                **load_kwargs,
             ),
+            prefer_proxy=True,
         )
         result = _transcribe_with_options(model, audio_path, config)
         if result.get("language") == "nn":
             raise RuntimeError(f"No language detected in {audio_path}")
+
+        LOGGER.info(
+            "WhisperX transcription complete audio=%s segments=%d language=%s",
+            audio_path.name,
+            _segment_count(result),
+            result.get("language", "unknown"),
+        )
 
         return _write_json(task_dir / output_name, result)
     finally:
@@ -398,12 +476,30 @@ def run_align(
     metadata = None
     aligned = None
     try:
+        def load_align_model() -> tuple[Any, Any]:
+            local_source = _cached_align_model_source(language)
+            align_kwargs: dict[str, Any] = {
+                "language_code": language,
+                "device": device,
+            }
+            if local_source is not None:
+                align_kwargs["model_name"] = str(local_source)
+                LOGGER.info(
+                    "WhisperX align model language=%s using local cache=%s",
+                    language,
+                    local_source,
+                )
+            else:
+                LOGGER.info(
+                    "WhisperX align model language=%s not found in cache; downloading",
+                    language,
+                )
+            return whisperx.load_align_model(**align_kwargs)
+
         align_model, metadata = run_huggingface_download(
             config.proxy,
-            lambda: whisperx.load_align_model(
-                language_code=language,
-                device=device,
-            ),
+            load_align_model,
+            prefer_proxy=True,
         )
         aligned = whisperx.align(
             result["segments"],
@@ -414,6 +510,12 @@ def run_align(
             return_char_alignments=False,
         )
         aligned["language"] = language
+        LOGGER.info(
+            "WhisperX alignment complete audio=%s segments=%d language=%s",
+            audio_path.name,
+            _segment_count(aligned),
+            language,
+        )
         return _write_json(task_dir / output_name, aligned)
     finally:
         del align_model, metadata, aligned
@@ -447,6 +549,7 @@ def run_diarize(task_dir: Path, config: WhisperXConfig) -> Path:
                 pipeline = run_huggingface_download(
                     config.proxy,
                     lambda: DiarizationPipeline(use_auth_token=token, device=device),
+                    prefer_proxy=True,
                 )
                 diarize_segments = pipeline(
                     str(audio_path),
@@ -539,6 +642,11 @@ def _whisperx_load_model_kwargs(
     if device_index is not None and ("device_index" in parameters or accepts_kwargs):
         kwargs["device_index"] = device_index
 
+    if (
+        "local_files_only" in parameters or accepts_kwargs
+    ) and _cached_whisper_model_source(Path(download_root), config.model_name) is not None:
+        kwargs["local_files_only"] = True
+
     # WhisperX passes ``asr_options`` to faster-whisper's
     # ``TranscriptionOptions``.  That dataclass does not contain ``language``
     # in current releases; WhisperX accepts it as a separate load_model
@@ -561,6 +669,11 @@ def _whisperx_load_model_kwargs(
     if "asr_options" in parameters or accepts_kwargs:
         kwargs["asr_options"] = asr_options
     return kwargs
+
+
+def _segment_count(result: Any) -> int:
+    segments = result.get("segments") if isinstance(result, dict) else None
+    return len(segments) if isinstance(segments, (list, tuple)) else 0
 
 
 def _transcribe_with_options(model: Any, audio_path: Path, config: WhisperXConfig) -> dict[str, Any]:

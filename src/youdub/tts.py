@@ -423,7 +423,10 @@ def load_voxcpm_model(config: TTSConfig):
             device=device_name,
         )
 
-    _MODEL = run_huggingface_download(config.proxy, load_model)
+    # TTS keeps the general direct-first route policy; transcription models
+    # explicitly prefer the configured proxy because Hugging Face direct
+    # access may otherwise spend several retry rounds before falling back.
+    _MODEL = run_huggingface_download(config.proxy, load_model, prefer_proxy=False)
     _MODEL_KEY = model_key
     return _MODEL
 

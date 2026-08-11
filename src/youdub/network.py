@@ -62,12 +62,24 @@ class NetworkRouter:
             self._last_probe_monotonic = 0.0
             self._last_probe_at = None
 
-    def routes(self, service: str, proxy: str | None) -> tuple[NetworkRoute, ...]:
+    def routes(
+        self,
+        service: str,
+        proxy: str | None,
+        *,
+        prefer_proxy: bool = False,
+    ) -> tuple[NetworkRoute, ...]:
         clean_proxy = _clean_proxy(proxy)
         with self._lock:
             state = self._service_state(service)
             self._sync_proxy_state(state, clean_proxy)
             preferred = state["preferred_route"] if clean_proxy else "direct"
+            if (
+                prefer_proxy
+                and clean_proxy
+                and state["routes"]["proxy"]["status"] != "unhealthy"
+            ):
+                preferred = "proxy"
         direct = NetworkRoute("direct", None)
         if clean_proxy is None:
             return (direct,)
@@ -79,9 +91,11 @@ class NetworkRouter:
         service: str,
         proxy: str | None,
         operation: Callable[[NetworkRoute], _T],
+        *,
+        prefer_proxy: bool = False,
     ) -> _T:
         last_error: Exception | None = None
-        for route in self.routes(service, proxy):
+        for route in self.routes(service, proxy, prefer_proxy=prefer_proxy):
             started = time.monotonic()
             try:
                 result = operation(route)

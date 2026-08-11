@@ -35,14 +35,29 @@ def cached_huggingface_snapshot(
     *,
     required_files: tuple[str, ...] = (),
 ) -> Path | None:
+    hub_cache = _configured_huggingface_hub_cache()
+    if hub_cache is None:
+        return None
+    return cached_huggingface_snapshot_at(
+        hub_cache,
+        model_id,
+        required_files=required_files,
+    )
+
+
+def cached_huggingface_snapshot_at(
+    hub_cache: Path,
+    model_id: str,
+    *,
+    required_files: tuple[str, ...] = (),
+) -> Path | None:
+    """Resolve a complete Hub snapshot below an explicitly selected cache root."""
     model_id = model_id.strip().strip("/")
     model_parts = model_id.split("/")
     if not model_id or any(part in {"", ".", ".."} for part in model_parts):
         return None
 
-    hub_cache = _configured_huggingface_hub_cache()
-    if hub_cache is None:
-        return None
+    hub_cache = Path(hub_cache).expanduser()
 
     repository = hub_cache / f"models--{'--'.join(model_parts)}"
     try:
@@ -88,11 +103,17 @@ def huggingface_download_context(proxy: str | None, *, trust_env: bool = True) -
             _restore_proxy_environment(previous_proxy_environment)
 
 
-def run_huggingface_download(proxy: str | None, operation: Callable[[], _T]) -> _T:
+def run_huggingface_download(
+    proxy: str | None,
+    operation: Callable[[], _T],
+    *,
+    prefer_proxy: bool = True,
+) -> _T:
     return network_router.run(
         HUGGINGFACE_SERVICE,
         proxy,
         lambda route: _run_huggingface_route(route, operation),
+        prefer_proxy=prefer_proxy,
     )
 
 

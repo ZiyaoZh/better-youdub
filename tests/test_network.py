@@ -78,3 +78,15 @@ def test_network_router_discards_proxy_health_when_system_proxy_changes() -> Non
     assert routes[0].name == "direct"
     assert translation["routes"]["proxy"]["status"] == "unknown"
     assert translation["routes"]["proxy"]["successes"] == 0
+
+
+def test_network_router_can_prefer_proxy_without_bypassing_health_fallback() -> None:
+    router = NetworkRouter()
+    proxy = "socks5h://127.0.0.1:1081"
+
+    assert router.routes(network.HUGGINGFACE_SERVICE, proxy, prefer_proxy=True)[0].name == "proxy"
+
+    _, proxied = router.routes(network.HUGGINGFACE_SERVICE, proxy)
+    router.record_failure(network.HUGGINGFACE_SERVICE, proxied, "proxy unavailable")
+
+    assert router.routes(network.HUGGINGFACE_SERVICE, proxy, prefer_proxy=True)[0].name == "direct"

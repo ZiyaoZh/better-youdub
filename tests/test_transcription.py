@@ -112,6 +112,65 @@ def test_whisperx_load_model_kwargs_support_lazy_load_model_wrapper() -> None:
     }
 
 
+def test_whisperx_load_model_kwargs_uses_complete_local_cache(tmp_path: Path) -> None:
+    cache = tmp_path / "models" / "ASR" / "whisper"
+    repository = cache / "models--Systran--faster-whisper-large-v2"
+    snapshot = repository / "snapshots" / "abc123"
+    snapshot.mkdir(parents=True)
+    (repository / "refs").mkdir()
+    (repository / "refs" / "main").write_text("abc123\n", encoding="utf-8")
+    for name in ("config.json", "model.bin"):
+        (snapshot / name).write_text(name, encoding="utf-8")
+
+    def fake_load_model(
+        model_name: str,
+        *,
+        download_root: str,
+        device: str,
+        local_files_only: bool = False,
+    ) -> object:
+        return object()
+
+    kwargs = transcription._whisperx_load_model_kwargs(
+        fake_load_model,
+        download_root=str(cache),
+        device="cuda",
+        device_index=None,
+        config=WhisperXConfig(models_dir=tmp_path / "models"),
+    )
+
+    assert kwargs["local_files_only"] is True
+
+
+def test_cached_align_model_source_resolves_complete_local_snapshot(tmp_path: Path, monkeypatch) -> None:
+    hf_home = tmp_path / "huggingface"
+    repository = hf_home / "hub" / "models--jonatasgrosman--wav2vec2-large-xlsr-53-chinese-zh-cn"
+    snapshot = repository / "snapshots" / "abc123"
+    snapshot.mkdir(parents=True)
+    (repository / "refs").mkdir()
+    (repository / "refs" / "main").write_text("abc123\n", encoding="utf-8")
+    for name in (
+        "config.json",
+        "preprocessor_config.json",
+        "pytorch_model.bin",
+        "vocab.json",
+    ):
+        (snapshot / name).write_text(name, encoding="utf-8")
+    monkeypatch.setenv("HF_HOME", str(hf_home))
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+
+    fake_alignment = types.ModuleType("whisperx.alignment")
+    fake_alignment.DEFAULT_ALIGN_MODELS_HF = {
+        "zh": "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn"
+    }
+    fake_whisperx = types.ModuleType("whisperx")
+    fake_whisperx.__path__ = []
+    monkeypatch.setitem(sys.modules, "whisperx", fake_whisperx)
+    monkeypatch.setitem(sys.modules, "whisperx.alignment", fake_alignment)
+
+    assert transcription._cached_align_model_source("zh") == snapshot
+
+
 def test_finalize_transcript_normalizes_segments(
     tmp_path: Path,
     monkeypatch,

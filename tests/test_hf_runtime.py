@@ -4,6 +4,7 @@ import types
 
 from youdub.hf_runtime import (
     cached_huggingface_snapshot,
+    cached_huggingface_snapshot_at,
     huggingface_download_context,
     run_huggingface_download,
 )
@@ -30,6 +31,11 @@ def test_cached_huggingface_snapshot_resolves_complete_main_revision(monkeypatch
         "openbmb/VoxCPM2",
         required_files=("config.json", "missing.bin"),
     ) is None
+    assert cached_huggingface_snapshot_at(
+        hf_home / "hub",
+        "openbmb/VoxCPM2",
+        required_files=("config.json", "model.safetensors"),
+    ) == snapshot
 
 
 def test_huggingface_download_context_uses_proxy_and_disables_xet(monkeypatch) -> None:
@@ -130,6 +136,20 @@ def test_huggingface_download_automatically_falls_back_to_proxy(monkeypatch) -> 
             raise RuntimeError("direct unavailable")
         return "loaded"
 
-    assert run_huggingface_download(proxy, operation) == "loaded"
+    assert run_huggingface_download(proxy, operation, prefer_proxy=False) == "loaded"
     assert calls == [None, proxy]
     assert os.environ["HTTPS_PROXY"] == "http://existing-proxy:7890"
+
+
+def test_huggingface_download_prefers_configured_proxy(monkeypatch) -> None:
+    proxy = "socks5h://127.0.0.1:1081"
+    calls = []
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace())
+    network_router.clear()
+
+    def operation():
+        calls.append(os.getenv("HTTPS_PROXY"))
+        return "loaded"
+
+    assert run_huggingface_download(proxy, operation, prefer_proxy=True) == "loaded"
+    assert calls == [proxy]
