@@ -545,7 +545,12 @@ def _whisperx_load_model_kwargs(
     # argument instead.  Keep the language in asr_options for older APIs that
     # do not expose the dedicated argument.
     language = _clean_optional_text(config.language)
-    supports_language_argument = "language" in parameters
+    # WhisperX's public entry point is a lazy-loading ``(*args, **kwargs)``
+    # wrapper around ``whisperx.asr.load_model``.  Treat a wrapper accepting
+    # arbitrary keywords as supporting the modern dedicated language argument;
+    # otherwise the language would be forwarded through ``asr_options`` and
+    # rejected by faster-whisper's ``TranscriptionOptions``.
+    supports_language_argument = "language" in parameters or accepts_kwargs
     if language and supports_language_argument:
         kwargs["language"] = language
 

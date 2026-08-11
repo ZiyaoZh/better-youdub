@@ -88,6 +88,30 @@ def test_whisperx_load_model_kwargs_pass_language_separately() -> None:
     }
 
 
+def test_whisperx_load_model_kwargs_support_lazy_load_model_wrapper() -> None:
+    def fake_load_model(*args: object, **kwargs: object) -> object:
+        return object()
+
+    kwargs = transcription._whisperx_load_model_kwargs(
+        fake_load_model,
+        download_root="/models",
+        device="cuda",
+        device_index=None,
+        config=WhisperXConfig(
+            models_dir=Path("/models"),
+            language="zh",
+            initial_prompt="以下是普通话的句子。",
+        ),
+    )
+
+    assert kwargs == {
+        "download_root": "/models",
+        "device": "cuda",
+        "language": "zh",
+        "asr_options": {"initial_prompt": "以下是普通话的句子。"},
+    }
+
+
 def test_finalize_transcript_normalizes_segments(
     tmp_path: Path,
     monkeypatch,
