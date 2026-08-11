@@ -528,7 +528,6 @@ def _whisperx_load_model_kwargs(
         "download_root": download_root,
         "device": device,
     }
-    asr_options = _asr_options(config)
     try:
         parameters = inspect.signature(load_model).parameters
     except (TypeError, ValueError):
@@ -539,6 +538,21 @@ def _whisperx_load_model_kwargs(
     )
     if device_index is not None and ("device_index" in parameters or accepts_kwargs):
         kwargs["device_index"] = device_index
+
+    # WhisperX passes ``asr_options`` to faster-whisper's
+    # ``TranscriptionOptions``.  That dataclass does not contain ``language``
+    # in current releases; WhisperX accepts it as a separate load_model
+    # argument instead.  Keep the language in asr_options for older APIs that
+    # do not expose the dedicated argument.
+    language = _clean_optional_text(config.language)
+    supports_language_argument = "language" in parameters
+    if language and supports_language_argument:
+        kwargs["language"] = language
+
+    asr_options = _asr_options(
+        config,
+        include_language=not supports_language_argument,
+    )
     if "asr_options" in parameters or accepts_kwargs:
         kwargs["asr_options"] = asr_options
     return kwargs
@@ -562,11 +576,15 @@ def _transcribe_with_options(model: Any, audio_path: Path, config: WhisperXConfi
         return model.transcribe(str(audio_path), batch_size=config.batch_size)
 
 
-def _asr_options(config: WhisperXConfig) -> dict[str, Any]:
+def _asr_options(
+    config: WhisperXConfig,
+    *,
+    include_language: bool = True,
+) -> dict[str, Any]:
     options: dict[str, Any] = {}
     language = _clean_optional_text(config.language)
     initial_prompt = _clean_optional_text(config.initial_prompt)
-    if language:
+    if language and include_language:
         options["language"] = language
     if initial_prompt:
         options["initial_prompt"] = initial_prompt
