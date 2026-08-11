@@ -136,7 +136,7 @@ services:
       - ./data/logs:/data/logs
       - ./data/config:/data/config
       - ./data/cookies:/data/cookies
-      - ${YOUDUB_SSH_DIR:-${HOME}/.ssh}:/tmp/.ssh:ro
+      - ${YOUDUB_SSH_DIR:-${HOME}/.ssh}:/run/youdub-ssh-source:ro
       - ./models:/models
       - ./data/cache/huggingface:/cache/huggingface
       - ./data/cache/nltk:/cache/nltk

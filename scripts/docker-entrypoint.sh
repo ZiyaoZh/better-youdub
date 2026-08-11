@@ -78,6 +78,26 @@ if value is not None:
 PY
 }
 
+prepare_ssh_home() {
+  local source_dir="/run/youdub-ssh-source"
+  local target_dir="/tmp/.ssh"
+
+  if [[ ! -d "$source_dir" ]]; then
+    echo "SSH tunnel requested, but ${source_dir} is not mounted" >&2
+    return 1
+  fi
+
+  rm -rf -- "$target_dir"
+  install -d -m 700 "$target_dir"
+  cp -a "$source_dir/." "$target_dir/"
+  find "$target_dir" -type d -exec chmod 700 {} +
+  find "$target_dir" -type f -exec chmod 600 {} +
+
+  if [[ "$(id -u)" == "0" ]]; then
+    chown -R --no-dereference "$APP_USER" "$target_dir"
+  fi
+}
+
 start_network_ssh_tunnel() {
   local ssh_host="${YOUDUB_NETWORK_SSH_HOST:-${YOUDUB_TRANSLATION_SSH_HOST:-}}"
   local local_port="${YOUDUB_NETWORK_SSH_LOCAL_PORT:-${YOUDUB_TRANSLATION_SSH_LOCAL_PORT:-}}"
@@ -96,6 +116,8 @@ start_network_ssh_tunnel() {
   if [[ -z "$ssh_host" ]]; then
     return
   fi
+
+  prepare_ssh_home
 
   export YOUDUB_NETWORK_PROXY="${YOUDUB_NETWORK_PROXY:-${YOUDUB_TRANSLATION_PROXY:-socks5h://127.0.0.1:${local_port}}}"
 

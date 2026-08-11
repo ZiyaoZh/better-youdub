@@ -378,7 +378,7 @@ YOUDUB_ROOT/<author>/<upload_date> <title>/
 
 `YOUDUB_DOWNLOAD_MAX_HEIGHT=0` 表示不限制下载高度。首次调试建议先限制为 `720` 或使用短视频，以减少下载、模型运行和合成时间。
 
-Docker 启动时，如果配置了 `network.ssh_host` 或 `YOUDUB_NETWORK_SSH_HOST`，入口脚本会建立 SSH 动态转发，并将系统候选代理指向本地 SOCKS 端口。Compose 默认把 `${HOME}/.ssh` 以只读方式挂载到容器；非默认 SSH 目录可通过 `YOUDUB_SSH_DIR` 指定。旧的 `translation.ssh_host` 和 `YOUDUB_TRANSLATION_SSH_HOST` 仍可兼容读取。
+Docker 启动时，如果配置了 `network.ssh_host` 或 `YOUDUB_NETWORK_SSH_HOST`，入口脚本会建立 SSH 动态转发，并将系统候选代理指向本地 SOCKS 端口。Compose 默认把 `${HOME}/.ssh` 以只读方式挂载到容器；入口脚本会先将它复制到应用用户专用的临时 SSH 目录，以兼容宿主机和容器 UID 不同或 SSH 配置文件权限偏宽的情况。非默认 SSH 目录可通过 `YOUDUB_SSH_DIR` 指定。旧的 `translation.ssh_host` 和 `YOUDUB_TRANSLATION_SSH_HOST` 仍可兼容读取。
 
 ## 任务执行模型
 
