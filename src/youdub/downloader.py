@@ -120,6 +120,11 @@ def ytdlp_base_options(config: DownloadConfig) -> dict[str, Any]:
         "remote_components": ["ejs:github"],
         "extractor_args": {"youtube": {"player_js_variant": ["main"]}},
         "http_headers": {"User-Agent": DEFAULT_USER_AGENT},
+        # Let the route-aware wrapper handle reconnects instead of retrying
+        # inside yt-dlp with the same proxy session.
+        "retries": 0,
+        "fragment_retries": 0,
+        "extractor_retries": 0,
     }
 
     js_runtimes = supported_js_runtimes()
@@ -221,8 +226,6 @@ def _download_media(url: str, task_dir: Path, media_path: Path, config: Download
                 "merge_output_format": "mp4",
                 "outtmpl": str(staging_dir / "download.%(ext)s"),
                 "writethumbnail": True,
-                "retries": 10,
-                "fragment_retries": 10,
                 "overwrites": True,
             }
             if format_selector is not None:
@@ -239,7 +242,7 @@ def _download_media(url: str, task_dir: Path, media_path: Path, config: Download
             except Exception as exc:
                 last_error = exc
                 if not _is_format_unavailable(exc):
-                    continue
+                    raise
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
     if last_error is not None:
@@ -339,6 +342,8 @@ def _run_download_network(config: DownloadConfig, operation: Callable[[DownloadC
         VIDEO_SERVICE,
         config.proxy,
         lambda route: operation(_download_config_for_route(config, route)),
+        retry_cycles=1,
+        recheck_on_retry=True,
     )
 
 

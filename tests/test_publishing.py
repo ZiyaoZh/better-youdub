@@ -408,6 +408,7 @@ def test_upload_bilibili_switches_from_direct_to_proxy(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(publishing, "_BilibiliWebUploader", FakeWebUploader)
     monkeypatch.setattr(publishing.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(publishing.network_router, "probe_service", lambda *args, **kwargs: None)
 
     result = asyncio.run(
         publishing._upload_bilibili(

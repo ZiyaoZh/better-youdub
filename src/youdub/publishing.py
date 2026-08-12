@@ -221,6 +221,8 @@ async def _upload_bilibili(
     last_error: Exception | None = None
 
     for attempt in range(1, BILIBILI_UPLOAD_RETRIES + 1):
+        if attempt > 1:
+            network_router.probe_service(BILIBILI_SERVICE, config.proxy)
         route = network_router.routes(BILIBILI_SERVICE, config.proxy)[0]
         routed_config = replace(config, proxy=route.proxy or "")
         try:

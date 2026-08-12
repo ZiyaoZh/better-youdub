@@ -2,6 +2,7 @@ import os
 import sys
 import types
 
+from youdub import network
 from youdub.hf_runtime import (
     cached_huggingface_snapshot,
     cached_huggingface_snapshot_at,
@@ -73,8 +74,8 @@ def test_huggingface_download_context_uses_proxy_and_disables_xet(monkeypatch) -
             "http": "socks5h://127.0.0.1:1081",
             "https": "socks5h://127.0.0.1:1081",
         }
-        assert session.adapters["https://"].max_retries.total == 4
-        assert session.adapters["https://"].max_retries.read == 4
+        assert session.adapters["https://"].max_retries.total == 0
+        assert session.adapters["https://"].max_retries.read == 0
         assert constants.HF_HUB_DISABLE_XET is True
 
     assert factories[-1] is None
@@ -153,3 +154,25 @@ def test_huggingface_download_prefers_configured_proxy(monkeypatch) -> None:
 
     assert run_huggingface_download(proxy, operation, prefer_proxy=True) == "loaded"
     assert calls == [proxy]
+
+
+def test_huggingface_download_retries_direct_only_after_proxy_failure(monkeypatch) -> None:
+    proxy = "socks5h://127.0.0.1:1081"
+    calls = []
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace())
+    network_router.clear()
+    network_router.record_failure(
+        network.HUGGINGFACE_SERVICE,
+        network.NetworkRoute("proxy", proxy),
+        "health probe timeout",
+    )
+
+    def operation():
+        selected = os.getenv("HTTPS_PROXY")
+        calls.append(selected)
+        if selected == proxy:
+            raise RuntimeError("proxy download failed")
+        return "loaded directly"
+
+    assert run_huggingface_download(proxy, operation, prefer_proxy=True) == "loaded directly"
+    assert calls == [proxy, None]

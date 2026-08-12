@@ -74,11 +74,10 @@ class NetworkRouter:
             state = self._service_state(service)
             self._sync_proxy_state(state, clean_proxy)
             preferred = state["preferred_route"] if clean_proxy else "direct"
-            if (
-                prefer_proxy
-                and clean_proxy
-                and state["routes"]["proxy"]["status"] != "unhealthy"
-            ):
+            if prefer_proxy and clean_proxy:
+                # An explicit proxy preference must not be overturned by a
+                # stale probe timeout. The operation itself still records the
+                # failure and falls back to direct when the proxy is unusable.
                 preferred = "proxy"
         direct = NetworkRoute("direct", None)
         if clean_proxy is None:
@@ -93,24 +92,33 @@ class NetworkRouter:
         operation: Callable[[NetworkRoute], _T],
         *,
         prefer_proxy: bool = False,
+        retry_cycles: int = 0,
+        recheck_on_retry: bool = False,
+        probe_url: str | None = None,
     ) -> _T:
         last_error: Exception | None = None
-        for route in self.routes(service, proxy, prefer_proxy=prefer_proxy):
-            started = time.monotonic()
-            try:
-                result = operation(route)
-            except Exception as exc:
-                last_error = exc
-                self.record_failure(
-                    service,
-                    route,
-                    exc,
-                    latency_ms=_elapsed_ms(started),
-                    proxy_configured=bool(_clean_proxy(proxy)),
-                )
-                continue
-            self.record_success(service, route, latency_ms=_elapsed_ms(started))
-            return result
+        for cycle in range(max(0, retry_cycles) + 1):
+            if cycle and recheck_on_retry:
+                self.probe_service(service, proxy, probe_url)
+
+            # Recompute the route order for every retry cycle. A route failure
+            # in the previous cycle must be able to change the next choice.
+            for route in self.routes(service, proxy, prefer_proxy=prefer_proxy):
+                started = time.monotonic()
+                try:
+                    result = operation(route)
+                except Exception as exc:
+                    last_error = exc
+                    self.record_failure(
+                        service,
+                        route,
+                        exc,
+                        latency_ms=_elapsed_ms(started),
+                        proxy_configured=bool(_clean_proxy(proxy)),
+                    )
+                    continue
+                self.record_success(service, route, latency_ms=_elapsed_ms(started))
+                return result
         if last_error is None:
             raise RuntimeError(f"No network route is available for {service}")
         raise last_error
@@ -241,6 +249,45 @@ class NetworkRouter:
                 self._last_probe_at = _utc_now()
             return self.snapshot(proxy, translation_url)
 
+    def probe_service(
+        self,
+        service: str,
+        proxy: str | None,
+        translation_url: str | None = None,
+    ) -> None:
+        """Refresh one service before a network retry cycle."""
+        probes = {item.key: item for item in _service_probes(translation_url)}
+        probe = probes.get(service)
+        if probe is None:
+            raise ValueError(f"Unknown network service: {service}")
+
+        clean_proxy = _clean_proxy(proxy)
+        routes = [NetworkRoute("direct", None)]
+        if clean_proxy:
+            routes.append(NetworkRoute("proxy", clean_proxy))
+
+        with self._probe_lock:
+            with self._lock:
+                self._sync_proxy_state(self._service_state(service), clean_proxy)
+            results: dict[str, bool] = {}
+            for route in routes:
+                try:
+                    latency_ms = _probe_route(probe.url, route)
+                except Exception as exc:
+                    self._record_probe_failure(service, route, exc)
+                    results[route.name] = False
+                else:
+                    self._record_probe_success(service, route, latency_ms)
+                    results[route.name] = True
+
+            with self._lock:
+                state = self._service_state(service)
+                if results.get("direct"):
+                    state["preferred_route"] = "direct"
+                elif clean_proxy and results.get("proxy"):
+                    state["preferred_route"] = "proxy"
+                self._last_probe_at = _utc_now()
+
     def _record_probe_success(self, service: str, route: NetworkRoute, latency_ms: float) -> None:
         with self._lock:
             state = self._service_state(service)["routes"][route.name]
@@ -292,21 +339,20 @@ class NetworkRouter:
 
 def _probe_route(url: str, route: NetworkRoute) -> float:
     try:
-        import httpx
+        import requests
     except ModuleNotFoundError as exc:
-        raise RuntimeError("httpx is required for network health probes") from exc
+        raise RuntimeError("requests is required for network health probes") from exc
 
     started = time.monotonic()
-    with httpx.Client(
-        proxy=route.proxy,
-        trust_env=False,
-        timeout=_PROBE_TIMEOUT_SECONDS,
-        follow_redirects=True,
-    ) as client:
-        with client.stream(
-            "GET",
+    with requests.Session() as session:
+        session.trust_env = False
+        with session.get(
             url,
             headers={"Accept": "*/*", "Range": "bytes=0-0", "User-Agent": "better-youdub-health/1"},
+            proxies={"http": route.proxy, "https": route.proxy} if route.proxy else {},
+            timeout=_PROBE_TIMEOUT_SECONDS,
+            allow_redirects=True,
+            stream=True,
         ) as response:
             if response.status_code >= 500:
                 raise RuntimeError(f"HTTP {response.status_code}")

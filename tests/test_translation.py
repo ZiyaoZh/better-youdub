@@ -18,6 +18,7 @@ from youdub.translation import (
     _summary_response_schema,
     _normalize_summary_response,
     _translate_batch,
+    _RoutedOpenAIClient,
     build_tts_translation_entries,
     build_translation_entries,
     split_translation_text,
@@ -108,6 +109,47 @@ def test_create_openai_client_falls_back_from_direct_to_system_proxy(monkeypatch
     assert captured["openai"][0]["api_key"] == "sk-test"
     assert captured["openai"][0]["base_url"] == "https://api.example.test/v1"
     assert network_router.snapshot(proxy)["services"][1]["preferred_route"] == "proxy"
+
+
+def test_routed_openai_client_discards_failed_route_client_before_retry(monkeypatch) -> None:
+    created = []
+
+    class FakeHttpClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeCompletions:
+        def __init__(self, owner):
+            self.owner = owner
+
+        def create(self, **kwargs):
+            if self.owner.index == 0:
+                raise RuntimeError("stale connection")
+            return kwargs
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.index = len(created)
+            self.closed = False
+            self.chat = SimpleNamespace(completions=FakeCompletions(self))
+            created.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(Client=FakeHttpClient))
+    monkeypatch.setattr(network_router, "probe_service", lambda *args, **kwargs: None)
+    network_router.clear()
+
+    client = _RoutedOpenAIClient(
+        TranslationConfig(api_key="sk-test", model="gpt-test", max_retries=1),
+        FakeOpenAI,
+    )
+
+    assert client.chat.completions.create(model="gpt-test") == {"model": "gpt-test"}
+    assert len(created) == 2
+    assert created[0].closed is True
+    assert created[1].closed is False
 
 
 def test_split_translation_text_does_not_emit_punctuation_only_parts() -> None:

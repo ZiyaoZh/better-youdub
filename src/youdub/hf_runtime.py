@@ -4,6 +4,7 @@ import os
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -83,6 +84,7 @@ def huggingface_download_context(proxy: str | None, *, trust_env: bool = True) -
     with _HUGGINGFACE_DOWNLOAD_LOCK:
         previous_proxy_environment = _set_proxy_environment(proxy, clear=not trust_env)
         configure_http_backend = None
+        restore_internal_retries: Callable[[], None] = lambda: None
         try:
             try:
                 import huggingface_hub
@@ -91,14 +93,18 @@ def huggingface_download_context(proxy: str | None, *, trust_env: bool = True) -
                 return
 
             _sync_xet_setting_if_already_imported(huggingface_hub)
+            restore_internal_retries = _disable_huggingface_internal_retries()
             configure_http_backend = getattr(huggingface_hub, "configure_http_backend", None)
-            if callable(configure_http_backend):
-                configure_http_backend(backend_factory=lambda: _requests_session(proxy, trust_env=trust_env))
             try:
+                if callable(configure_http_backend):
+                    configure_http_backend(backend_factory=lambda: _requests_session(proxy, trust_env=trust_env))
                 yield
             finally:
-                if callable(configure_http_backend):
-                    configure_http_backend()
+                try:
+                    if callable(configure_http_backend):
+                        configure_http_backend()
+                finally:
+                    restore_internal_retries()
         finally:
             _restore_proxy_environment(previous_proxy_environment)
 
@@ -114,6 +120,8 @@ def run_huggingface_download(
         proxy,
         lambda route: _run_huggingface_route(route, operation),
         prefer_proxy=prefer_proxy,
+        retry_cycles=1,
+        recheck_on_retry=True,
     )
 
 
@@ -131,11 +139,10 @@ def _requests_session(proxy: str | None, *, trust_env: bool = True) -> Any:
     session.trust_env = trust_env
     adapter = HTTPAdapter(
         max_retries=Retry(
-            total=4,
-            connect=4,
-            read=4,
-            status=4,
-            backoff_factor=0.5,
+            total=0,
+            connect=0,
+            read=0,
+            status=0,
             status_forcelist=_RETRYABLE_STATUS_CODES,
             allowed_methods=frozenset({"GET", "HEAD"}),
         )
@@ -145,6 +152,41 @@ def _requests_session(proxy: str | None, *, trust_env: bool = True) -> Any:
     if proxy:
         session.proxies.update({"http": proxy, "https": proxy})
     return session
+
+
+def _disable_huggingface_internal_retries() -> Callable[[], None]:
+    """Make Hub connection failures return to the route-aware caller."""
+    try:
+        file_download = import_module("huggingface_hub.file_download")
+    except (ImportError, ModuleNotFoundError):
+        return lambda: None
+
+    original_http_backoff = getattr(file_download, "http_backoff", None)
+    original_http_get = getattr(file_download, "http_get", None)
+    if not callable(original_http_backoff) and not callable(original_http_get):
+        return lambda: None
+
+    if callable(original_http_backoff):
+        def one_attempt_backoff(*args: Any, **kwargs: Any) -> Any:
+            kwargs["max_retries"] = 0
+            return original_http_backoff(*args, **kwargs)
+
+        file_download.http_backoff = one_attempt_backoff
+
+    if callable(original_http_get):
+        def one_attempt_http_get(*args: Any, **kwargs: Any) -> Any:
+            kwargs["_nb_retries"] = 0
+            return original_http_get(*args, **kwargs)
+
+        file_download.http_get = one_attempt_http_get
+
+    def restore() -> None:
+        if callable(original_http_backoff):
+            file_download.http_backoff = original_http_backoff
+        if callable(original_http_get):
+            file_download.http_get = original_http_get
+
+    return restore
 
 
 def _set_proxy_environment(proxy: str | None, *, clear: bool = False) -> dict[str, str | None] | None:

@@ -688,8 +688,21 @@ class _RoutedOpenAIClient:
         return network_router.run(
             TRANSLATION_SERVICE,
             self._config.proxy,
-            lambda route: self._client_for_route(route).chat.completions.create(**kwargs),
+            lambda route: self._create_completion_for_route(route, kwargs),
+            retry_cycles=1,
+            recheck_on_retry=True,
+            probe_url=self._config.base_url,
         )
+
+    def _create_completion_for_route(self, route: NetworkRoute, kwargs: dict[str, Any]) -> Any:
+        client = self._client_for_route(route)
+        try:
+            return client.chat.completions.create(**kwargs)
+        except Exception:
+            # A failed request can leave a pooled connection unusable. Do not
+            # carry that client into the next route-check cycle.
+            self._discard_client(route)
+            raise
 
     def _client_for_route(self, route: NetworkRoute) -> Any:
         client = self._clients.get(route.name)
@@ -703,6 +716,7 @@ class _RoutedOpenAIClient:
             ) from exc
         client_kwargs: dict[str, Any] = {
             "api_key": self._config.api_key,
+            "max_retries": 0,
             "http_client": httpx.Client(proxy=route.proxy, trust_env=False),
         }
         if self._config.base_url:
@@ -710,6 +724,14 @@ class _RoutedOpenAIClient:
         client = self._client_factory(**client_kwargs)
         self._clients[route.name] = client
         return client
+
+    def _discard_client(self, route: NetworkRoute) -> None:
+        client = self._clients.pop(route.name, None)
+        if client is None:
+            return
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
 
 
 class _RoutedChat:
