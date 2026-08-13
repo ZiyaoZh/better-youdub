@@ -6,6 +6,7 @@ import json
 import os
 import time
 import traceback
+from dataclasses import replace
 from pathlib import Path
 
 from .config import AppConfig
@@ -24,6 +25,10 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--step", type=PipelineStep, required=True)
     parser.add_argument("--state", type=Path)
+    parser.add_argument(
+        "--cuda-device",
+        help="Concrete CUDA device selected by the WebUI scheduler for this worker",
+    )
     args = parser.parse_args()
 
     try:
@@ -32,6 +37,7 @@ def main() -> int:
             raise ValueError("Worker input must be a task object")
         task = Task.from_dict(data)
         options = runtime_options_from_task_config(AppConfig.from_env(), task.config)
+        options = _options_with_cuda_device(options, args.step, args.cuda_device)
         if args.step == PipelineStep.PUBLISH_BILIBILI and not options.bilibili.dry_run and not options.bilibili.confirm:
             options = dry_run_bilibili_options(options)
         cancellation = _WorkerCancellation(args.state)
@@ -48,11 +54,40 @@ def main() -> int:
             cancellation=cancellation,
         )
         result = _run_step_with_adopted_lock(runner, task, args.step)
-        _write_result(args.output, {"task": result.to_dict()})
+        _write_result(
+            args.output,
+            {"task": result.to_dict(), "cuda_device": args.cuda_device},
+        )
         return 0
     except BaseException as exc:
-        _write_result(args.output, {"error": str(exc), "traceback": traceback.format_exc()})
+        _write_result(
+            args.output,
+            {
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+                "cuda_device": args.cuda_device,
+            },
+        )
         return 1
+
+
+def _options_with_cuda_device(options, step: PipelineStep, cuda_device: str | None):
+    """Apply the scheduler's concrete selection only to the active GPU step."""
+    if not cuda_device:
+        return options
+    if step == PipelineStep.SEPARATE_AUDIO:
+        return replace(options, demucs=replace(options.demucs, device=cuda_device))
+    if step in {
+        PipelineStep.TRANSCRIBE,
+        PipelineStep.TRANSCRIBE_WHISPER,
+        PipelineStep.TRANSCRIBE_ALIGN,
+        PipelineStep.TRANSCRIBE_DIARIZE,
+        PipelineStep.TRANSCRIBE_TTS,
+    }:
+        return replace(options, whisperx=replace(options.whisperx, device=cuda_device))
+    if step in {PipelineStep.TTS, PipelineStep.REDUB_TTS}:
+        return replace(options, tts=replace(options.tts, device=cuda_device))
+    return options
 
 
 def _write_result(path: Path, payload: dict[str, object]) -> None:

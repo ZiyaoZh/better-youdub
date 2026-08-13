@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -32,6 +33,7 @@ def _client(monkeypatch, tmp_path: Path) -> TestClient:
     web_module._TASK_ALIASES.clear()
     web_module._TERMINATING.clear()
     web_module._RUNTIMES.clear()
+    web_module._GPU_DEVICE_LEASES.clear()
     web_module.network_router.clear()
     monkeypatch.setenv("YOUDUB_ROOT", str(tmp_path / "videos"))
     monkeypatch.setenv("YOUDUB_TASKS_PATH", str(tmp_path / "tasks" / "tasks.json"))
@@ -1648,6 +1650,87 @@ def test_web_runs_non_dubbing_gpu_steps_on_gpu_worker_pool(monkeypatch, tmp_path
         for task in tasks:
             _wait_for_task_idle(client, task["id"])
     assert set(started) == {task["id"] for task in tasks}
+
+
+def test_web_retries_transient_cuda_failure_on_a_reselected_device(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "gpu-retry.mp4"
+    source.write_bytes(b"video")
+    payload = client.post("/api/tasks/local", json={"source": str(source), "title": "GPU retry"}).json()
+    task = web_module._store().get(payload["id"])
+    runtime = web_module._create_task_runtime(task.id)
+    attempts: list[str | None] = []
+    selected_devices = iter((("cuda:1", 1), ("cuda:2", 2)))
+    released: list[int | None] = []
+
+    monkeypatch.setattr(web_module, "_gpu_device_request", lambda _task, _step: "auto")
+    monkeypatch.setattr(web_module, "_lease_gpu_device", lambda _request, excluded_indices: next(selected_devices))
+    monkeypatch.setattr(web_module, "_release_gpu_device", lambda index: released.append(index))
+    monkeypatch.setattr(web_module, "_gpu_retry_delay_seconds", lambda: 0.0)
+
+    def fake_run(command, **_kwargs):
+        cuda_device = command[command.index("--cuda-device") + 1]
+        attempts.append(cuda_device)
+        output = Path(command[command.index("--output") + 1])
+        if len(attempts) == 1:
+            output.write_text(
+                json.dumps({"error": "CUDA failed with error invalid argument", "cuda_device": cuda_device}),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 1, "", "CUDA failed with error invalid argument")
+        output.write_text(
+            json.dumps({"task": task.to_dict(), "cuda_device": cuda_device}),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(web_module, "run_managed_command", fake_run)
+
+    result = web_module._run_gpu_step_in_worker(task, PipelineStep.TRANSCRIBE, runtime)
+
+    assert result.id == task.id
+    assert attempts == ["cuda:1", "cuda:2"]
+    assert released == [1, 2]
+
+
+def test_web_does_not_retry_non_cuda_gpu_worker_failure(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "no-gpu-retry.mp4"
+    source.write_bytes(b"video")
+    payload = client.post("/api/tasks/local", json={"source": str(source), "title": "No GPU retry"}).json()
+    task = web_module._store().get(payload["id"])
+    runtime = web_module._create_task_runtime(task.id)
+    attempts: list[list[str]] = []
+
+    monkeypatch.setattr(web_module, "_gpu_device_request", lambda _task, _step: "auto")
+    monkeypatch.setattr(web_module, "_lease_gpu_device", lambda _request, excluded_indices: ("cuda:1", 1))
+    monkeypatch.setattr(web_module, "_release_gpu_device", lambda _index: None)
+
+    def fake_run(command, **_kwargs):
+        attempts.append(command)
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(json.dumps({"error": "audio file is missing"}), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 1, "", "audio file is missing")
+
+    monkeypatch.setattr(web_module, "run_managed_command", fake_run)
+
+    try:
+        web_module._run_gpu_step_in_worker(task, PipelineStep.TRANSCRIBE, runtime)
+    except RuntimeError as exc:
+        assert "after 1 attempt(s)" in str(exc)
+    else:
+        raise AssertionError("Expected GPU worker failure")
+
+    assert len(attempts) == 1
+
+
+def test_web_preserves_explicit_cuda_device_for_gpu_worker(monkeypatch) -> None:
+    monkeypatch.setattr(web_module, "resolve_device", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError()))
+
+    selected, lease_index = web_module._lease_gpu_device("cuda:3", excluded_indices={3})
+
+    assert selected == "cuda:3"
+    assert lease_index is None
 
 
 def test_web_queues_dubbing_steps_on_single_dubbing_worker(monkeypatch, tmp_path: Path) -> None:

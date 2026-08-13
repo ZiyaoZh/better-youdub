@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import gc
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
+_DEVICE_SELECTION_LOCK = threading.Lock()
+_NEXT_TIE_BREAKER = 0
 
 
 @dataclass(frozen=True)
@@ -38,8 +41,19 @@ class CudaMemorySnapshot:
         }
 
 
-def resolve_device(device: str) -> ResolvedDevice:
+def resolve_device(
+    device: str,
+    *,
+    excluded_indices: set[int] | frozenset[int] | None = None,
+) -> ResolvedDevice:
+    """Resolve a requested device, optionally avoiding CUDA device indices.
+
+    ``excluded_indices`` is advisory.  It lets a scheduler move a retried GPU
+    job away from the device that failed, but falls back to every visible GPU
+    when no other candidate exists.
+    """
     requested = device.strip().lower()
+    excluded_indices = set(excluded_indices or ())
     explicit_index = _parse_cuda_device_index(requested)
     if requested == "cpu":
         return ResolvedDevice("cpu")
@@ -68,7 +82,11 @@ def resolve_device(device: str) -> ResolvedDevice:
             )
         return ResolvedDevice("cuda", explicit_index)
 
-    selected_index = _device_with_most_free_memory(cuda, device_count)
+    selected_index = _device_with_most_free_memory(
+        cuda,
+        device_count,
+        excluded_indices=excluded_indices,
+    )
     LOGGER.info("Selected CUDA device %s for requested device %s", selected_index, requested)
     return ResolvedDevice("cuda", selected_index)
 
@@ -82,7 +100,13 @@ def _parse_cuda_device_index(device: str) -> int | None:
     return int(value)
 
 
-def _device_with_most_free_memory(cuda: Any, device_count: int) -> int:
+def _device_with_most_free_memory(
+    cuda: Any,
+    device_count: int,
+    *,
+    excluded_indices: set[int] | None = None,
+) -> int:
+    excluded_indices = excluded_indices or set()
     available: list[tuple[int, int]] = []
     for index in range(device_count):
         try:
@@ -90,12 +114,29 @@ def _device_with_most_free_memory(cuda: Any, device_count: int) -> int:
         except Exception:
             LOGGER.warning("Unable to query free memory for CUDA device %s", index, exc_info=True)
             continue
-        available.append((int(free_bytes), index))
+        if index not in excluded_indices:
+            available.append((int(free_bytes), index))
+
+    if not available and excluded_indices:
+        LOGGER.warning(
+            "No unexcluded CUDA device is available; retry will reuse a previous device"
+        )
+        return _device_with_most_free_memory(cuda, device_count)
 
     if not available:
         LOGGER.warning("Unable to query CUDA device memory; falling back to device 0")
         return 0
-    return max(available)[1]
+    most_free_bytes = max(free_bytes for free_bytes, _index in available)
+    candidates = sorted(
+        index for free_bytes, index in available if free_bytes == most_free_bytes
+    )
+    # Concurrent auto-selected jobs otherwise all choose the highest-index GPU
+    # whenever multiple cards have the same reported free memory.
+    with _DEVICE_SELECTION_LOCK:
+        global _NEXT_TIE_BREAKER
+        selected = candidates[_NEXT_TIE_BREAKER % len(candidates)]
+        _NEXT_TIE_BREAKER += 1
+    return selected
 
 
 def cuda_memory_snapshot(label: str = "") -> CudaMemorySnapshot | None:

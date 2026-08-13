@@ -367,14 +367,16 @@ YOUDUB_ROOT/<author>/<upload_date> <title>/
 | 模型与配置 | `YOUDUB_MODELS_DIR`、`YOUDUB_CONFIG_PATH` | 模型目录和 JSON 配置文件 |
 | 下载 | `YOUDUB_COOKIES_PATH`、`YOUDUB_YTDLP_PROXY`、`YOUDUB_DOWNLOAD_MAX_HEIGHT` | cookies、兼容的下载候选代理和默认清晰度 |
 | Web | `YOUDUB_WEB_USERNAME`、`YOUDUB_WEB_PASSWORD`、`YOUDUB_WEB_PORT` | 登录和宿主机端口 |
-| Demucs / WhisperX | `YOUDUB_DEMUCS_DEVICE`、`YOUDUB_WHISPER_MODEL`、`YOUDUB_WHISPER_DEVICE`、`YOUDUB_WHISPER_DIARIZATION` | 人声分离、识别模型、设备和说话人分离 |
+| GPU 调度 | `YOUDUB_DEMUCS_DEVICE`、`YOUDUB_WHISPER_MODEL`、`YOUDUB_WHISPER_DEVICE`、`YOUDUB_WHISPER_DIARIZATION`、`YOUDUB_GPU_MAX_ATTEMPTS` | 人声分离、识别模型、设备、说话人分离和 CUDA 瞬态错误重试 |
 | 翻译 | `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL` | OpenAI 兼容接口 |
 | 系统网络 | `YOUDUB_NETWORK_PROXY`、`YOUDUB_NETWORK_SSH_HOST` | 自动调度使用的 HTTP/SOCKS 候选代理或 SSH 动态转发 |
 | TTS | `YOUDUB_TTS_MODEL`、`YOUDUB_TTS_MODEL_DIR`、`YOUDUB_TTS_DEVICE`、`YOUDUB_TTS_CACHE_MODEL` | VoxCPM2 模型、离线路径、设备和缓存策略 |
 | 合成 | `YOUDUB_BURN_SUBTITLES`、`YOUDUB_SYNTHESIS_CRF` | 字幕烧录和编码质量 |
 | 发布 | `BILI_SESSDATA`、`BILI_BILI_JCT`、`BILI_PROXY` | Bilibili 凭证和代理 |
 
-`YOUDUB_DEMUCS_DEVICE`、`YOUDUB_WHISPER_DEVICE` 和 `YOUDUB_TTS_DEVICE` 支持 `auto`、`cuda`、`cuda:N` 和 `cpu`。`auto`（以及未指定编号的 `cuda`）会在运行时选择当前空闲显存最多的 CUDA 卡；没有 CUDA 时 `auto` 回退到 CPU。
+`YOUDUB_DEMUCS_DEVICE`、`YOUDUB_WHISPER_DEVICE` 和 `YOUDUB_TTS_DEVICE` 支持 `auto`、`cuda`、`cuda:N` 和 `cpu`。`auto`（以及未指定编号的 `cuda`）会在运行时选择当前空闲显存最多的 CUDA 卡；显存相同的卡会轮转选择，避免并发任务集中到同一张卡；没有 CUDA 时 `auto` 回退到 CPU。
+
+Web UI 对 Demucs、WhisperX（包括对配音的识别）和 TTS/局部重配均在独立 GPU 子进程中执行。若子进程报出可识别的 CUDA 瞬态错误（例如 `CUDA failed with error invalid argument`、cuDNN/cuBLAS 状态错误或非法内存访问），默认会在清理旧子进程后再执行一次。使用 `auto` 或未编号 `cuda` 时，重试会避开首次选中的卡；指定 `cuda:N` 时保留该显式选择并在同一卡重试。`YOUDUB_GPU_MAX_ATTEMPTS` 默认是 `2`（首次加一次重试），`YOUDUB_GPU_RETRY_DELAY_SECONDS` 默认是 `1`；模型、音频、配置等非 CUDA 错误不会自动重试。
 
 `YOUDUB_DOWNLOAD_MAX_HEIGHT=0` 表示不限制下载高度。首次调试建议先限制为 `720` 或使用短视频，以减少下载、模型运行和合成时间。
 
@@ -386,7 +388,7 @@ Docker 启动时，如果配置了 `network.ssh_host` 或 `YOUDUB_NETWORK_SSH_HO
 - 每个任务目录使用 `.task.lock` 做非阻塞互斥，同一任务不能同时下载或运行多个步骤。
 - Web 后台将普通步骤、GPU 步骤和 TTS 步骤分配到不同执行器。
 - TTS 和局部重配使用单 worker 串行执行，避免共享模型并发占用显存。
-- GPU 识别与分离步骤最多并发 3 个，普通步骤最多并发 5 个。
+- GPU 识别与分离步骤最多并发 3 个，普通步骤最多并发 5 个。Web 的 `auto` GPU 分配会记录进程内租约，避免这三个 worker 同时选择同一张空闲卡；CUDA 瞬态失败时会重新选卡后重试一次。
 - 当前存储锁和写入串行化只保证单 Web 进程内的一致性，不支持多个 Web 实例共享同一个 `tasks.json`。
 
 远程低带宽场景下，任务列表只读取分页摘要，任务详情按需加载；产物区提供下载链接，但不会自动内嵌播放最终视频。网络页仅传输小型 JSON 状态，离开页面或浏览器隐藏时停止探测。

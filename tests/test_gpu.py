@@ -35,6 +35,17 @@ class _FakeCuda:
         self.calls.append("ipc_collect")
 
 
+class _DeviceSelectionCuda:
+    def is_available(self) -> bool:
+        return True
+
+    def device_count(self) -> int:
+        return 3
+
+    def mem_get_info(self, _index: int) -> tuple[int, int]:
+        return (10, 20)
+
+
 def test_cleanup_gpu_memory_calls_torch_cuda_cleanup(monkeypatch) -> None:
     fake_cuda = _FakeCuda()
     fake_torch = types.SimpleNamespace(cuda=fake_cuda)
@@ -50,3 +61,29 @@ def test_cuda_memory_snapshot_is_none_without_cuda(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=fake_cuda))
 
     assert gpu.cuda_memory_snapshot("test") is None
+
+
+def test_resolve_device_rotates_equal_memory_auto_choices(monkeypatch) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        types.SimpleNamespace(cuda=_DeviceSelectionCuda()),
+    )
+    monkeypatch.setattr(gpu, "_NEXT_TIE_BREAKER", 0)
+
+    selected = [gpu.resolve_device("auto").index for _ in range(4)]
+
+    assert selected == [0, 1, 2, 0]
+
+
+def test_resolve_device_avoids_excluded_gpu_when_possible(monkeypatch) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        types.SimpleNamespace(cuda=_DeviceSelectionCuda()),
+    )
+    monkeypatch.setattr(gpu, "_NEXT_TIE_BREAKER", 0)
+
+    selected = gpu.resolve_device("cuda", excluded_indices={0, 1})
+
+    assert selected == gpu.ResolvedDevice("cuda", 2)

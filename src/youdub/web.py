@@ -4,6 +4,7 @@ import base64
 import binascii
 import copy
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -32,7 +33,7 @@ from pydantic import BaseModel
 from .config import AppConfig
 from .cancellation import CancellationContext, TaskCancelled, run_managed_command
 from .downloader import DownloadResult, download_url_to_artifacts, supported_js_runtimes
-from .gpu import cleanup_gpu_memory
+from .gpu import cleanup_gpu_memory, resolve_device
 from .ingest import create_pending_url_task, create_task_from_download_artifacts, create_task_from_local_media
 from .locking import TASK_LOCK_NAME, TaskLock, TaskLockBusy, task_is_locked
 from .models import PipelineStep, StepStatus, Task, TaskStatus, utc_now
@@ -60,6 +61,7 @@ from .task_config import (
 )
 
 ALLOWED_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".flv", ".wmv"}
+LOGGER = logging.getLogger(__name__)
 ARTIFACTS: dict[str, tuple[str, str]] = {
     "download-video": ("download.mp4", "video/mp4"),
     "final-video": ("video.mp4", "video/mp4"),
@@ -137,6 +139,8 @@ _GPU_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="youdub-gpu
 _DUBBING_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="youdub-dubbing")
 _LOCK = threading.RLock()
 _RESOURCE_CLEANUP_LOCK = threading.Lock()
+_GPU_DEVICE_LEASE_LOCK = threading.RLock()
+_GPU_DEVICE_LEASES: dict[int, int] = {}
 _RUNNING: dict[str, Future[Any]] = {}
 _TASK_ALIASES: dict[str, str] = {}
 _TERMINATING: set[str] = set()
@@ -163,6 +167,17 @@ MAX_TASK_LIST_LIMIT = 100
 TASK_TERMINATED_MESSAGE = "任务已终止"
 SCHEDULED_PUBLISH_FAILED_MESSAGE = "定时发布调度失败"
 SCHEDULED_PUBLISH_RETRY_SECONDS = 30.0
+DEFAULT_GPU_MAX_ATTEMPTS = 2
+DEFAULT_GPU_RETRY_DELAY_SECONDS = 1.0
+_CUDA_RETRY_MARKERS = (
+    "cuda failed with error",
+    "cuda runtime error",
+    "cuda error:",
+    "cudnn_status",
+    "cublas_status",
+    "an illegal memory access was encountered",
+    "device-side assert",
+)
 BEIJING_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
 
 
@@ -2217,9 +2232,18 @@ def _run_gpu_step_in_worker(task: Task, step: PipelineStep, runtime: TaskRuntime
         raise RuntimeError("GPU worker requires a registered task runtime")
     input_path, output_path = _write_worker_task_input(task, "pipeline")
     state_path = input_path.with_suffix(".state.json")
+    requested_device = _gpu_device_request(task, step)
+    max_attempts = _gpu_max_attempts()
+    failed_device_indices: set[int] = set()
+    attempts: list[str] = []
     try:
-        result = run_managed_command(
-            [
+        for attempt in range(1, max_attempts + 1):
+            runtime.cancellation.checkpoint(f"gpu:{step.value}:attempt:{attempt}")
+            cuda_device, lease_index = _lease_gpu_device(
+                requested_device,
+                excluded_indices=failed_device_indices,
+            )
+            command = [
                 sys.executable,
                 "-m",
                 "youdub.pipeline_worker",
@@ -2231,22 +2255,70 @@ def _run_gpu_step_in_worker(task: Task, step: PipelineStep, runtime: TaskRuntime
                 step.value,
                 "--state",
                 str(state_path),
-            ],
-            cwd=task.folder,
-            cancellation=runtime.cancellation,
-            cleanup_paths=(input_path, output_path),
-        )
-        payload = _read_gpu_worker_result(output_path)
-        if result.returncode != 0:
-            error = payload.get("error") if isinstance(payload, dict) else None
-            raise RuntimeError(f"GPU worker failed for {step.value}: {error or result.stderr}")
-        task_payload = payload.get("task") if isinstance(payload, dict) else None
-        if not isinstance(task_payload, dict):
-            raise RuntimeError(f"GPU worker returned no task result for {step.value}")
-        _record_worker_state(runtime, state_path)
-        if step == PipelineStep.PUBLISH_BILIBILI and runtime.irreversible_operation:
-            runtime.irreversible_details["worker_result_received"] = True
-        return Task.from_dict(task_payload)
+            ]
+            if cuda_device is not None:
+                command.extend(("--cuda-device", cuda_device))
+            try:
+                result = run_managed_command(
+                    command,
+                    cwd=task.folder,
+                    cancellation=runtime.cancellation,
+                    cleanup_paths=(input_path, output_path),
+                )
+                if result.returncode == 0:
+                    payload = _read_gpu_worker_result(output_path)
+                else:
+                    try:
+                        payload = _read_gpu_worker_result(output_path)
+                    except RuntimeError:
+                        # A CUDA process can abort before its exception handler
+                        # writes the structured result.  stderr still carries
+                        # enough information to classify a transient failure.
+                        payload = {}
+            finally:
+                _release_gpu_device(lease_index)
+
+            if result.returncode == 0:
+                task_payload = payload.get("task") if isinstance(payload, dict) else None
+                if not isinstance(task_payload, dict):
+                    raise RuntimeError(f"GPU worker returned no task result for {step.value}")
+                _record_worker_state(runtime, state_path)
+                if step == PipelineStep.PUBLISH_BILIBILI and runtime.irreversible_operation:
+                    runtime.irreversible_details["worker_result_received"] = True
+                if attempts:
+                    LOGGER.warning(
+                        "GPU step recovered after CUDA retry step=%s attempts=%s final_device=%s",
+                        step.value,
+                        attempts,
+                        cuda_device or "unchanged",
+                    )
+                return Task.from_dict(task_payload)
+
+            error = _gpu_worker_error(payload, result.stderr)
+            selected_index = _cuda_device_index(cuda_device or _payload_cuda_device(payload))
+            attempts.append(f"attempt={attempt},device={cuda_device or 'unchanged'},error={_error_summary(error)}")
+            retryable = (
+                _step_uses_gpu(step)
+                and _is_retryable_cuda_error(error)
+                and attempt < max_attempts
+            )
+            if not retryable:
+                detail = "; ".join(attempts)
+                raise RuntimeError(
+                    f"GPU worker failed for {step.value} after {attempt} attempt(s): {detail}"
+                )
+            if selected_index is not None:
+                failed_device_indices.add(selected_index)
+            LOGGER.warning(
+                "Retrying GPU step after transient CUDA failure step=%s attempt=%s/%s device=%s error=%s",
+                step.value,
+                attempt,
+                max_attempts,
+                cuda_device or "unchanged",
+                _error_summary(error),
+            )
+            runtime.cancellation.wait(_gpu_retry_delay_seconds(), f"gpu:{step.value}:retry-backoff")
+        raise RuntimeError(f"GPU worker failed for {step.value}: retry loop ended unexpectedly")
     except TaskCancelled:
         _record_worker_state(runtime, state_path)
         raise
@@ -2255,6 +2327,100 @@ def _run_gpu_step_in_worker(task: Task, step: PipelineStep, runtime: TaskRuntime
         input_path.unlink(missing_ok=True)
         output_path.unlink(missing_ok=True)
         state_path.unlink(missing_ok=True)
+
+
+def _gpu_device_request(task: Task, step: PipelineStep) -> str:
+    options = runtime_options_from_task_config(_config(), task.config)
+    if step == PipelineStep.SEPARATE_AUDIO:
+        return options.demucs.device
+    if step in {
+        PipelineStep.TRANSCRIBE,
+        PipelineStep.TRANSCRIBE_WHISPER,
+        PipelineStep.TRANSCRIBE_ALIGN,
+        PipelineStep.TRANSCRIBE_DIARIZE,
+        PipelineStep.TRANSCRIBE_TTS,
+    }:
+        return options.whisperx.device
+    if step in DUBBING_STEPS:
+        return options.tts.device
+    return "cpu"
+
+
+def _gpu_max_attempts() -> int:
+    try:
+        return max(1, int(os.getenv("YOUDUB_GPU_MAX_ATTEMPTS", str(DEFAULT_GPU_MAX_ATTEMPTS))))
+    except ValueError:
+        return DEFAULT_GPU_MAX_ATTEMPTS
+
+
+def _gpu_retry_delay_seconds() -> float:
+    try:
+        return max(0.0, float(os.getenv("YOUDUB_GPU_RETRY_DELAY_SECONDS", str(DEFAULT_GPU_RETRY_DELAY_SECONDS))))
+    except ValueError:
+        return DEFAULT_GPU_RETRY_DELAY_SECONDS
+
+
+def _is_reselectable_cuda_request(device: str) -> bool:
+    return device.strip().lower() in {"auto", "cuda"}
+
+
+def _lease_gpu_device(
+    requested_device: str,
+    *,
+    excluded_indices: set[int],
+) -> tuple[str | None, int | None]:
+    requested = requested_device.strip().lower()
+    explicit_index = _cuda_device_index(requested)
+    if explicit_index is not None:
+        return f"cuda:{explicit_index}", None
+    if not _is_reselectable_cuda_request(requested):
+        return None, None
+    with _GPU_DEVICE_LEASE_LOCK:
+        excluded = set(_GPU_DEVICE_LEASES)
+        excluded.update(excluded_indices)
+        resolved = resolve_device(requested, excluded_indices=excluded)
+        if resolved.name != "cuda" or resolved.index is None:
+            return None, None
+        _GPU_DEVICE_LEASES[resolved.index] = _GPU_DEVICE_LEASES.get(resolved.index, 0) + 1
+        return resolved.torch_name, resolved.index
+
+
+def _release_gpu_device(index: int | None) -> None:
+    if index is None:
+        return
+    with _GPU_DEVICE_LEASE_LOCK:
+        remaining = _GPU_DEVICE_LEASES.get(index, 0) - 1
+        if remaining > 0:
+            _GPU_DEVICE_LEASES[index] = remaining
+        else:
+            _GPU_DEVICE_LEASES.pop(index, None)
+
+
+def _gpu_worker_error(payload: dict[str, Any], stderr: str) -> str:
+    error = payload.get("error") if isinstance(payload.get("error"), str) else ""
+    trace = payload.get("traceback") if isinstance(payload.get("traceback"), str) else ""
+    return "\n".join(part for part in (error, trace, stderr) if part)
+
+
+def _payload_cuda_device(payload: dict[str, Any]) -> str | None:
+    device = payload.get("cuda_device")
+    return device if isinstance(device, str) else None
+
+
+def _cuda_device_index(device: str | None) -> int | None:
+    if not device or not device.startswith("cuda:"):
+        return None
+    index = device.removeprefix("cuda:")
+    return int(index) if index.isdigit() else None
+
+
+def _is_retryable_cuda_error(error: str) -> bool:
+    normalized = error.lower()
+    return any(marker in normalized for marker in _CUDA_RETRY_MARKERS)
+
+
+def _error_summary(error: str, limit: int = 240) -> str:
+    return " ".join(error.split())[:limit]
 
 
 def _write_worker_task_input(task: Task, prefix: str) -> tuple[Path, Path]:
