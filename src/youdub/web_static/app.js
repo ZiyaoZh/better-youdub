@@ -183,6 +183,7 @@ const STEP_CONFIG_SECTIONS = {
 
 const ACTIVE_POLL_INTERVAL_MS = 5000
 const IDLE_POLL_INTERVAL_MS = 15000
+const TERMINATION_DETAIL_POLL_INTERVAL_MS = 500
 const NETWORK_POLL_INTERVAL_MS = 60000
 const TASK_ROW_HEIGHT_PX = 66
 const TASK_PAGE_SIZE_MIN = 4
@@ -356,6 +357,8 @@ function statusLabel(status) {
     "pending-upload": "待上传",
     terminating: "终止中",
     terminated: "已终止",
+    "termination-failed": "终止失败",
+    "publish-outcome-unknown": "发布结果未知",
     failed: "失败",
     skipped: "跳过",
   }[status] || status || "等待"
@@ -366,6 +369,8 @@ function statusClass(status) {
   if (status === "failed") return "status-failed"
   if (status === "terminated") return "status-failed"
   if (status === "terminating") return "status-terminating"
+  if (status === "termination-failed") return "status-failed"
+  if (status === "publish-outcome-unknown") return "status-failed"
   if (status === "queued") return "status-queued"
   if (status === "scheduled-publish") return "status-queued"
   if (status === "running") return "status-running"
@@ -373,7 +378,8 @@ function statusClass(status) {
 }
 
 function taskActive(task) {
-  return Boolean(task?.queued || task?.running)
+  const terminationState = task?.termination?.state || task?.termination_state
+  return Boolean(task?.queued || task?.running || terminationState === "termination_failed")
 }
 
 function taskNeedsActivePolling(task) {
@@ -595,6 +601,22 @@ async function refreshSelectedTask() {
   if (!state.selectedId) return
   try {
     const task = await api(`/api/tasks/${state.selectedId}`)
+    const index = state.tasks.findIndex((item) => item.id === task.id)
+    if (index >= 0) {
+      state.tasks[index] = {
+        ...state.tasks[index],
+        status: task.status,
+        display_status: task.display_status,
+        queued: task.queued,
+        running: task.running,
+        terminating: task.terminating,
+        termination_state: task.termination?.state || null,
+        updated_at: task.updated_at,
+        error: task.error,
+        active_step: Object.entries(task.steps || {}).find(([, status]) => status === "running" || status === "queued")?.[0] || null,
+      }
+      renderTasks()
+    }
     renderDetail(task)
   } catch (error) {
     if (!/not found/i.test(error.message)) return
@@ -705,7 +727,7 @@ function renderDetail(task, options = {}) {
   $("runAllButton").disabled = taskActive(task) || (!hasDownload && !isUrlSource(task.source))
   $("workflowConfigButton").disabled = taskActive(task)
   $("workflowConfigButton").onclick = () => openTaskConfig(task, "workflow")
-  $("terminateButton").disabled = !taskActive(task) || task.terminating
+  $("terminateButton").disabled = !taskActive(task) || task.terminating || task?.termination?.state === "termination_failed"
   $("terminateButton").textContent = task.terminating ? "终止中" : "终止任务"
   $("deleteButton").disabled = taskActive(task)
   $("cleanTaskResourcesButton").disabled = taskActive(task)
@@ -1176,8 +1198,9 @@ async function runAll() {
 
 async function terminateSelected() {
   if (!state.selectedId) return
-  if (!window.confirm("终止正在进行的任务？当前步骤可能需要等待外部命令返回后才会停止。")) return
-  await api(`/api/tasks/${state.selectedId}/terminate`, {method: "POST"})
+  if (!window.confirm("请求终止当前任务？资源释放前任务会保持终止中。")) return
+  const task = await api(`/api/tasks/${state.selectedId}/terminate`, {method: "POST"})
+  renderDetail(task)
   await refreshTasks()
 }
 
@@ -1368,11 +1391,18 @@ function debounce(callback, delay) {
 
 function scheduleTaskPolling() {
   if (taskPollTimer !== null) window.clearTimeout(taskPollTimer)
-  const delay = state.tasks.some(taskNeedsActivePolling) ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS
+  const selected = state.tasks.find((task) => task.id === state.selectedId)
+  const delay = selected?.terminating
+    ? TERMINATION_DETAIL_POLL_INTERVAL_MS
+    : state.tasks.some(taskNeedsActivePolling) ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS
   taskPollTimer = window.setTimeout(async () => {
     if (!document.hidden && state.activeView === "tasks") {
-      await refreshTasks().catch(() => undefined)
-      await refreshSystem().catch(() => undefined)
+      if (selected?.terminating && state.selectedId) {
+        await refreshSelectedTask().catch(() => undefined)
+      } else {
+        await refreshTasks().catch(() => undefined)
+        await refreshSystem().catch(() => undefined)
+      }
     }
     scheduleTaskPolling()
   }, delay)

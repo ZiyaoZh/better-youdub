@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .cancellation import CancellationContext, TaskCancelled
 from .tts import (
     TTSConfig,
     TTS_SEGMENTS_DIR,
@@ -44,7 +45,10 @@ def redub_tts(
     task_dir: Path,
     tts_config: TTSConfig,
     redub_config: RedubTTSConfig | None = None,
+    *,
+    cancellation: CancellationContext | None = None,
 ) -> Path:
+    _checkpoint(cancellation, "redub:start")
     redub_config = redub_config or RedubTTSConfig.from_env()
     plan = load_redub_plan(task_dir)
     if redub_config.round > redub_config.max_rounds:
@@ -54,7 +58,7 @@ def redub_tts(
     segments = [item for item in plan.get("segments", []) if isinstance(item, dict)]
     entries = load_translation_entries(task_dir / "translation.json")
     if not segments:
-        return write_tts_mix(entries, task_dir / TTS_SEGMENTS_DIR, task_dir, tts_config)
+        return write_tts_mix(entries, task_dir / TTS_SEGMENTS_DIR, task_dir, tts_config, cancellation=cancellation)
 
     tts_dir = task_dir / TTS_SEGMENTS_DIR
     vocals_dir = task_dir / VOCAL_SEGMENTS_DIR
@@ -70,6 +74,7 @@ def redub_tts(
         model = load_voxcpm_model(tts_config)
         fallback = choose_fallback_reference(vocals_dir, tts_config.min_reference_ms)
         for item in segments:
+            _checkpoint(cancellation, f"redub:segment:{item.get('tts_index', 'unknown')}")
             tts_index = int(item["tts_index"])
             if tts_index < 1 or tts_index > len(entries):
                 _append_history(task_dir, _history_record(redub_config, item, "failed", error="tts_index_out_of_range"))
@@ -81,6 +86,7 @@ def redub_tts(
             if not reference_path.exists() or audio_duration_ms(reference_path) < tts_config.min_reference_ms:
                 reference_path = fallback
             try:
+                _checkpoint(cancellation, f"redub:generate:{tts_index}")
                 wav = model.generate(
                     text=tts_synthesis_text(entries[tts_index - 1], tts_config),
                     reference_wav_path=str(reference_path),
@@ -101,6 +107,11 @@ def redub_tts(
                         strategy=_strategy_for_history(item, tts_config),
                     ),
                 )
+                _checkpoint(cancellation, f"redub:segment-complete:{tts_index}")
+            except TaskCancelled:
+                if previous_path.exists():
+                    replace_tts_segment(previous_path, active_path)
+                raise
             except Exception as exc:
                 if previous_path.exists():
                     replace_tts_segment(previous_path, active_path)
@@ -117,7 +128,8 @@ def redub_tts(
                     ),
                 )
                 raise
-        return write_tts_mix(entries, tts_dir, task_dir, tts_config)
+        _checkpoint(cancellation, "redub:mix")
+        return write_tts_mix(entries, tts_dir, task_dir, tts_config, cancellation=cancellation)
     finally:
         del model
         if not tts_config.cache_model:
@@ -132,6 +144,11 @@ def load_redub_plan(task_dir: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"Expected redub plan object in {path}")
     return data
+
+
+def _checkpoint(cancellation: CancellationContext | None, name: str) -> None:
+    if cancellation is not None:
+        cancellation.checkpoint(name)
 
 
 def backup_tts_segment(active_path: Path, version_dir: Path) -> Path:

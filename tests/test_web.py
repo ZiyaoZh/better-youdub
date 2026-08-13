@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import types
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -30,6 +31,7 @@ def _client(monkeypatch, tmp_path: Path) -> TestClient:
     web_module._RUNNING.clear()
     web_module._TASK_ALIASES.clear()
     web_module._TERMINATING.clear()
+    web_module._RUNTIMES.clear()
     web_module.network_router.clear()
     monkeypatch.setenv("YOUDUB_ROOT", str(tmp_path / "videos"))
     monkeypatch.setenv("YOUDUB_TASKS_PATH", str(tmp_path / "tasks" / "tasks.json"))
@@ -107,11 +109,17 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert 'id="cleanTaskResourcesButton"' in index
     assert "/assets/app.js?v=" in index
     assert "/assets/styles.css?v=" in index
+    assert "20260812-task-cancellation" in index
     app_js = client.get("/assets/app.js").text
     assert "完整链路包含局部重配" in app_js
     assert "待上传" in app_js
     assert "终止中" in app_js
     assert "已终止" in app_js
+    assert "终止失败" in app_js
+    assert "发布结果未知" in app_js
+    assert "TERMINATION_DETAIL_POLL_INTERVAL_MS = 500" in app_js
+    assert "资源释放前任务会保持终止中" in app_js
+    assert "termination?.state" in app_js
     assert "/api/system" in app_js
     assert "CPU" in app_js
     assert "任务网络代理" not in app_js
@@ -1735,6 +1743,59 @@ def test_web_terminates_queued_dubbing_task(monkeypatch, tmp_path: Path) -> None
     assert started == [first["id"]]
 
 
+def test_web_run_all_cancels_queued_inner_future_without_waiting_for_executor(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task_payload = client.post("/api/tasks/local", json={"source": str(source), "title": "Queued inner"}).json()
+    task = web_module._store().get(task_payload["id"])
+    runtime = web_module._create_task_runtime(task.id)
+    blocker_started = threading.Event()
+    blocker_release = threading.Event()
+    completed = threading.Event()
+    raised: list[BaseException] = []
+
+    def block_executor() -> None:
+        blocker_started.set()
+        blocker_release.wait(timeout=2)
+
+    def wait_for_inner() -> None:
+        try:
+            web_module._run_step_for_run_all_on_executor(
+                executor,
+                task.id,
+                PipelineStep.TTS,
+                None,
+            )
+        except BaseException as exc:
+            raised.append(exc)
+        finally:
+            completed.set()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(block_executor)
+        assert blocker_started.wait(timeout=1)
+        thread = threading.Thread(target=wait_for_inner)
+        thread.start()
+        deadline = time.monotonic() + 1
+        while runtime.inner_future is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert runtime.inner_future is not None
+
+        started = time.monotonic()
+        web_module._request_task_termination(task.id)
+        assert runtime.inner_future.cancel() is True
+        assert completed.wait(timeout=0.5)
+        assert time.monotonic() - started < 0.5
+        assert raised and isinstance(raised[0], web_module.TaskTerminationRequested)
+        assert runtime.inner_future is None
+        blocker_release.set()
+        thread.join(timeout=1)
+
+    web_module._RUNTIMES.pop(task.id, None)
+    web_module._clear_task_termination(task.id)
+
+
 def test_web_terminate_running_run_all_stops_after_current_step(monkeypatch, tmp_path: Path) -> None:
     client = _client(monkeypatch, tmp_path)
     source = tmp_path / "sample.mp4"
@@ -1781,6 +1842,48 @@ def test_web_terminate_running_run_all_stops_after_current_step(monkeypatch, tmp
     assert payload["error"] == web_module.TASK_TERMINATED_MESSAGE
     assert payload["steps"]["extract-audio"] == "failed"
     assert "separate-audio" not in payload["steps"]
+
+
+def test_web_terminate_request_keeps_running_task_in_terminating_state(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"video")
+    task = client.post("/api/tasks/local", json={"source": str(source), "title": "Termination state"}).json()
+    started = threading.Event()
+    release = threading.Event()
+
+    class FakeRunner:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def run_step(self, current, step: PipelineStep, task_lock=None):
+            started.set()
+            release.wait(timeout=2)
+            current.status = TaskStatus.SUCCESS
+            current.mark_step(step, StepStatus.SUCCESS)
+            return current
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+    response = client.post(f"/api/tasks/{task['id']}/run", json={"step": "extract-audio"})
+    assert response.status_code == 200
+    assert started.wait(timeout=1)
+
+    try:
+        terminated = client.post(f"/api/tasks/{task['id']}/terminate")
+        assert terminated.status_code == 200
+        payload = terminated.json()
+        assert payload["display_status"] == "terminating"
+        assert payload["termination"]["state"] == "cancel_requested"
+        assert payload["termination"]["accepted"] is True
+        assert payload["termination"]["cancel_requested_at"]
+        assert payload["status"] == "running"
+    finally:
+        release.set()
+
+    payload = _wait_for_task_idle(client, task["id"])
+    assert payload["display_status"] == "terminated"
+    assert payload["termination"]["state"] == "terminated"
+    assert payload["termination"]["released_at"]
 
 
 def test_web_url_task_accepts_cookies_content_without_echoing_it(monkeypatch, tmp_path: Path) -> None:

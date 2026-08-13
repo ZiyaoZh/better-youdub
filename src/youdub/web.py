@@ -7,13 +7,16 @@ import json
 import os
 import secrets
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, TimeoutError
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
@@ -27,7 +30,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .config import AppConfig
-from .downloader import download_url_to_artifacts, supported_js_runtimes
+from .cancellation import CancellationContext, TaskCancelled, run_managed_command
+from .downloader import DownloadResult, download_url_to_artifacts, supported_js_runtimes
 from .gpu import cleanup_gpu_memory
 from .ingest import create_pending_url_task, create_task_from_download_artifacts, create_task_from_local_media
 from .locking import TASK_LOCK_NAME, TaskLock, TaskLockBusy, task_is_locked
@@ -136,6 +140,7 @@ _RESOURCE_CLEANUP_LOCK = threading.Lock()
 _RUNNING: dict[str, Future[Any]] = {}
 _TASK_ALIASES: dict[str, str] = {}
 _TERMINATING: set[str] = set()
+_RUNTIMES: dict[str, "TaskRuntime"] = {}
 _PUBLISH_SCHEDULER = PublishScheduler(lambda task_id: _dispatch_scheduled_publish(task_id))
 
 GPU_STEPS = {
@@ -161,8 +166,42 @@ SCHEDULED_PUBLISH_RETRY_SECONDS = 30.0
 BEIJING_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
 
 
-class TaskTerminationRequested(RuntimeError):
+class TaskTerminationRequested(TaskCancelled):
     pass
+
+
+class PublishOutcomeUnknown(RuntimeError):
+    """Raised after the final Bilibili submit loses its confirmable result."""
+
+
+@dataclass
+class TaskRuntime:
+    task_id: str
+    execution_id: str
+    cancellation: CancellationContext
+    started_at: str = field(default_factory=utc_now)
+    outer_future: Future[Any] | None = None
+    inner_future: Future[Any] | None = None
+    current_step: PipelineStep | None = None
+    last_checkpoint: str | None = None
+    current_process_pid: int | None = None
+    current_process_start_ticks: str | None = None
+    cancel_requested_at: str | None = None
+    ended_at: str | None = None
+    termination_method: str | None = None
+    irreversible_operation: str | None = None
+    irreversible_details: dict[str, Any] = field(default_factory=dict)
+
+    def set_checkpoint(self, checkpoint: str | None) -> None:
+        self.last_checkpoint = checkpoint
+
+    def set_process(self, pid: int | None) -> None:
+        self.current_process_pid = pid
+        self.current_process_start_ticks = _process_start_ticks(pid) if pid is not None else None
+
+    def set_irreversible_operation(self, operation: str, details: dict[str, Any] | None = None) -> None:
+        self.irreversible_operation = operation
+        self.irreversible_details = dict(details or {})
 
 
 class UrlTaskRequest(BaseModel):
@@ -216,6 +255,7 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         _restore_scheduled_publishes()
+        _recover_interrupted_terminations()
         try:
             yield
         finally:
@@ -404,15 +444,12 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=409, detail="Task is already running")
             if _task_publish_scheduled(task):
                 raise HTTPException(status_code=409, detail="Task is already scheduled")
-            if task_is_locked(task.folder):
+            if _task_has_active_work(task):
                 raise HTTPException(status_code=409, detail="Task is already running")
             if payload.step == PipelineStep.PUBLISH_BILIBILI and _defer_publish_if_needed(task):
                 return _task_payload(task)
             _mark_task_scheduled(task, payload.step)
-            _track_running(
-                task_id,
-                _submit_step_job(task.id, payload.step, f"web-run-step:{payload.step.value}"),
-            )
+            _submit_step_job(task.id, payload.step, f"web-run-step:{payload.step.value}")
         return _task_payload(task)
 
     @app.post("/api/tasks/{task_id}/run-all")
@@ -443,17 +480,30 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=409, detail="Task is not running")
             if scheduled:
                 _PUBLISH_SCHEDULER.cancel(task.id)
-                task = _mark_task_terminated(_store().get(task.id), PipelineStep.PUBLISH_BILIBILI)
-                _store().update(task)
+                task = _store().get(task.id)
                 if future is None:
+                    _store().update(_mark_task_terminated(task, PipelineStep.PUBLISH_BILIBILI))
                     return _task_payload(task)
             _request_task_termination(task_id, task.id)
-            canceled = future.cancel()
-            task = _mark_task_terminated(_store().get(task.id))
-            _store().update(task)
-            if canceled or future.done():
+            runtime = _runtime_for_task(task.id)
+            canceled_outer = future.cancel()
+            canceled_inner = runtime.inner_future.cancel() if runtime and runtime.inner_future is not None else False
+            if runtime is not None:
+                runtime.cancel_requested_at = utc_now()
+                runtime.termination_method = "future-cancel" if canceled_outer or canceled_inner else "cooperative-cancel"
+                runtime.cancellation.request_cancel()
+            task = _store().get(task.id)
+            if canceled_outer or future.done():
+                if _termination_state(task) != "publish_outcome_unknown":
+                    _mark_task_terminated(task)
+                _store().update(task)
                 _clear_running_future(task_id, future)
-        return _task_payload(task)
+            else:
+                _mark_task_termination_requested(task, runtime)
+                _store().update(task)
+        payload = _task_payload(_get_task(task.id))
+        payload["termination"]["accepted"] = True
+        return payload
 
     @app.get("/api/tasks/{task_id}/resources")
     def task_resources(task_id: str) -> dict[str, Any]:
@@ -480,6 +530,7 @@ def create_app() -> FastAPI:
                 (future is not None and not future.done())
                 or _task_publish_scheduled(task)
                 or task_is_locked(task.folder)
+                or _task_termination_unresolved(task)
             ):
                 raise HTTPException(status_code=409, detail="Cannot delete a running task")
             _store().delete(task.id)
@@ -497,7 +548,7 @@ def create_app() -> FastAPI:
     @app.put("/api/tasks/{task_id}/config")
     def save_task_config(task_id: str, payload: TaskConfigUpdate) -> dict[str, Any]:
         task = _get_task(task_id)
-        if task_is_locked(task.folder) or _task_running(task.id) or _task_publish_scheduled(task):
+        if _task_has_active_work(task):
             raise HTTPException(status_code=409, detail="Cannot edit a running task")
         task.config = normalize_task_config_update(_config(), task.config, payload.config)
         _normalize_scheduled_publish_config(task.config)
@@ -517,7 +568,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=409, detail="Cannot paste parameters into the source task")
         if identity is None or source.identity != identity or target.identity != identity:
             raise HTTPException(status_code=403, detail="Parameter paste requires tasks with the same identity")
-        if task_is_locked(target.folder) or _task_running(target.id) or _task_publish_scheduled(target):
+        if _task_has_active_work(target):
             raise HTTPException(status_code=409, detail="Cannot edit a running task")
         target.config = copy.deepcopy(source.config)
         _normalize_scheduled_publish_config(target.config)
@@ -530,7 +581,7 @@ def create_app() -> FastAPI:
     @app.post("/api/tasks/{task_id}/download-cookies")
     def save_task_download_cookies(task_id: str, payload: CookieUpdate) -> dict[str, Any]:
         task = _get_task(task_id)
-        if task_is_locked(task.folder) or _task_running(task.id) or _task_publish_scheduled(task):
+        if _task_has_active_work(task):
             raise HTTPException(status_code=409, detail="Cannot edit a running task")
         content = _clean_text(payload.content)
         if not content:
@@ -789,9 +840,15 @@ def _task_resource_payload(task: Task) -> dict[str, Any]:
 
 def _task_has_active_work(task: Task) -> bool:
     with _LOCK:
+        if _task_termination_unresolved(task):
+            return True
         if _unfinished_future_for_task(task.id) is not None or _task_publish_scheduled(task):
             return True
         return task_is_locked(task.folder)
+
+
+def _task_termination_unresolved(task: Task) -> bool:
+    return _termination_state(task) == "termination_failed"
 
 
 def _cleanup_task_resource_files(task: Task) -> dict[str, Any]:
@@ -802,7 +859,7 @@ def _cleanup_task_resource_files(task: Task) -> dict[str, Any]:
     task_lock: TaskLock | None = None
     with _LOCK:
         task = _get_task(task.id)
-        if _unfinished_future_for_task(task.id) is not None or _task_publish_scheduled(task):
+        if _task_has_active_work(task):
             raise HTTPException(status_code=409, detail="Cannot clean resources for an active task")
         try:
             task_lock = TaskLock(task.folder, "resource-cleanup").acquire(blocking=False)
@@ -1197,6 +1254,7 @@ def _task_payload(task: Task) -> dict[str, Any]:
     data["queued"] = _task_queued(task.id)
     data["running"] = _task_running(task.id)
     data["terminating"] = _task_terminating(task.id)
+    data["termination"] = _task_termination_payload(task)
     data["artifacts"] = _artifact_summary(task)
     data["config"] = public_task_config(_config(), task.config)
     data["step_completion"] = _step_completion_summary(task)
@@ -1214,6 +1272,7 @@ def _task_list_payload(task: Task) -> dict[str, Any]:
         "queued": _task_queued(task.id),
         "running": _task_running(task.id),
         "terminating": _task_terminating(task.id),
+        "termination_state": _termination_state(task),
         "created_at": task.created_at,
         "updated_at": task.updated_at,
         "error": task.error,
@@ -1232,7 +1291,13 @@ def _active_step(task: Task) -> str | None:
 def _task_display_status(task: Task) -> str:
     if _task_terminating(task.id):
         return "terminating"
-    if task.status == TaskStatus.FAILED and task.error == TASK_TERMINATED_MESSAGE:
+    if _termination_state(task) == "publish_outcome_unknown":
+        return "publish-outcome-unknown"
+    if _termination_state(task) == "termination_failed":
+        return "termination-failed"
+    if _termination_state(task) == "terminated" or (
+        task.status == TaskStatus.FAILED and task.error == TASK_TERMINATED_MESSAGE
+    ):
         return "terminated"
     if _task_publish_scheduled(task):
         return "scheduled-publish"
@@ -1270,7 +1335,34 @@ def _task_running(task_id: str) -> bool:
 
 
 def _task_terminating(task_id: str) -> bool:
-    return _termination_requested(task_id) and _unfinished_future_for_task(task_id) is not None
+    try:
+        task = _store().get(_TASK_ALIASES.get(task_id, task_id))
+    except KeyError:
+        return False
+    return _termination_state(task) in {"cancel_requested", "terminating"} and _task_running(task_id)
+
+
+def _termination_state(task: Task) -> str | None:
+    state = task.termination.get("state") if isinstance(task.termination, dict) else None
+    return state if isinstance(state, str) else None
+
+
+def _task_termination_payload(task: Task) -> dict[str, Any]:
+    payload = dict(task.termination) if isinstance(task.termination, dict) else {}
+    runtime = _runtime_for_task(task.id)
+    if runtime is not None:
+        payload.update(
+            {
+                "execution_id": runtime.execution_id,
+                "current_step": runtime.current_step.value if runtime.current_step is not None else None,
+                "last_checkpoint": runtime.last_checkpoint,
+                "process_pid": runtime.current_process_pid,
+                "process_start_ticks": runtime.current_process_start_ticks,
+                "started_at": runtime.started_at,
+                "cancel_requested_at": runtime.cancel_requested_at or payload.get("cancel_requested_at"),
+            }
+        )
+    return payload
 
 
 def _task_queued(task_id: str) -> bool:
@@ -1325,14 +1417,15 @@ def _schedule_run_all_for_task(task: Task, label: str) -> None:
             raise HTTPException(status_code=409, detail="Task is already running")
         if _task_publish_scheduled(task):
             raise HTTPException(status_code=409, detail="Task is already scheduled")
-        if task_is_locked(task.folder):
+        if _task_has_active_work(task):
             raise HTTPException(status_code=409, detail="Task is already running")
         first_step = _first_run_all_step(task)
         if first_step == PipelineStep.PUBLISH_BILIBILI and _defer_publish_if_needed(task):
             return
         _validate_scheduled_publish_task(task)
         _mark_task_scheduled(task, first_step)
-        _track_running(task.id, _EXECUTOR.submit(_run_all_job, task.id, label))
+        runtime = _create_task_runtime(task.id)
+        _track_running(task.id, _EXECUTOR.submit(_run_all_job, task.id, label), runtime=runtime)
 
 
 def _schedule_download_for_task(task: Task, label: str, *, force: bool = False) -> None:
@@ -1342,20 +1435,27 @@ def _schedule_download_for_task(task: Task, label: str, *, force: bool = False) 
             raise HTTPException(status_code=409, detail="Task is already running")
         if _task_publish_scheduled(task):
             raise HTTPException(status_code=409, detail="Task is already scheduled")
-        if task_is_locked(task.folder):
+        if _task_has_active_work(task):
             raise HTTPException(status_code=409, detail="Task is already running")
         _mark_task_scheduled(task, PipelineStep.INGEST)
+        runtime = _create_task_runtime(task.id)
         _track_running(
             task.id,
             _EXECUTOR.submit(_download_url_job, task.id, label, force=force),
+            runtime=runtime,
         )
 
 
 def _submit_step_job(task_id: str, step: PipelineStep, label: str) -> Future[Any]:
-    return _executor_for_step(step).submit(_run_step_job, task_id, step, label)
+    runtime = _create_task_runtime(task_id)
+    future = _executor_for_step(step).submit(_run_step_job, task_id, step, label)
+    return _track_running(task_id, future, runtime=runtime)
 
 
-def _track_running(task_id: str, future: Future[Any]) -> Future[Any]:
+def _track_running(task_id: str, future: Future[Any], *, runtime: TaskRuntime | None = None) -> Future[Any]:
+    runtime = runtime or _create_task_runtime(task_id)
+    runtime.outer_future = future
+    _RUNTIMES[task_id] = runtime
     _RUNNING[task_id] = future
     future.add_done_callback(lambda completed: _clear_running_future(task_id, completed))
     if future.done():
@@ -1368,12 +1468,20 @@ def _clear_running_future(task_id: str, future: Future[Any]) -> None:
         for runtime_id in _runtime_task_ids(task_id):
             if _RUNNING.get(runtime_id) is future:
                 _RUNNING.pop(runtime_id, None)
+            runtime = _RUNTIMES.get(runtime_id)
+            if runtime is not None and runtime.outer_future is future:
+                runtime.ended_at = utc_now()
+                _RUNTIMES.pop(runtime_id, None)
         _clear_task_termination(task_id)
 
 
 def _request_task_termination(*task_ids: str) -> None:
     for task_id in task_ids:
         _TERMINATING.update(_runtime_task_ids(task_id))
+        runtime = _runtime_for_task(task_id)
+        if runtime is not None:
+            runtime.cancel_requested_at = runtime.cancel_requested_at or utc_now()
+            runtime.cancellation.request_cancel()
 
 
 def _clear_task_termination(task_id: str) -> None:
@@ -1386,8 +1494,62 @@ def _termination_requested(task_id: str) -> bool:
 
 
 def _raise_if_termination_requested(task_id: str) -> None:
+    runtime = _runtime_for_task(task_id)
+    if runtime is not None:
+        try:
+            runtime.cancellation.checkpoint("web:termination-check")
+        except TaskCancelled as exc:
+            raise TaskTerminationRequested() from exc
     if _termination_requested(task_id):
         raise TaskTerminationRequested()
+
+
+def _create_task_runtime(task_id: str) -> TaskRuntime:
+    execution_id = uuid.uuid4().hex
+    runtime = TaskRuntime(
+        task_id=task_id,
+        execution_id=execution_id,
+        cancellation=CancellationContext(task_id=task_id, execution_id=execution_id),
+    )
+    runtime.cancellation = CancellationContext(
+        task_id=task_id,
+        execution_id=execution_id,
+        on_checkpoint=runtime.set_checkpoint,
+        on_process_change=lambda pid: _record_runtime_process(runtime, pid),
+        on_irreversible_operation=runtime.set_irreversible_operation,
+    )
+    _RUNTIMES[task_id] = runtime
+    return runtime
+
+
+def _record_runtime_process(runtime: TaskRuntime, pid: int | None) -> None:
+    runtime.set_process(pid)
+    if runtime.cancel_requested_at is None:
+        return
+    try:
+        task = _store().get(_TASK_ALIASES.get(runtime.task_id, runtime.task_id))
+    except KeyError:
+        return
+    if _termination_state(task) not in {"cancel_requested", "terminating"}:
+        return
+    termination = dict(task.termination)
+    termination.update(
+        {
+            "process_pid": runtime.current_process_pid,
+            "process_start_ticks": runtime.current_process_start_ticks,
+        }
+    )
+    task.termination = termination
+    task.updated_at = utc_now()
+    _store().update(task)
+
+
+def _runtime_for_task(task_id: str) -> TaskRuntime | None:
+    for runtime_id in _runtime_task_ids(task_id):
+        runtime = _RUNTIMES.get(runtime_id)
+        if runtime is not None:
+            return runtime
+    return None
 
 
 def _runtime_task_ids(task_id: str) -> set[str]:
@@ -1413,6 +1575,87 @@ def _mark_task_terminated(task: Task, step: PipelineStep | None = None) -> Task:
         if step_status in {StepStatus.QUEUED, StepStatus.RUNNING}:
             task.steps[step_key] = StepStatus.FAILED
     task.updated_at = utc_now()
+    termination = dict(task.termination)
+    termination.update({"state": "terminated", "released_at": task.updated_at})
+    task.termination = termination
+    return task
+
+
+def _mark_task_termination_requested(
+    task: Task,
+    runtime: TaskRuntime | None,
+    *,
+    state: str = "cancel_requested",
+) -> Task:
+    termination = dict(task.termination)
+    termination.update(
+        {
+            "state": state,
+            "execution_id": runtime.execution_id if runtime is not None else termination.get("execution_id"),
+            "cancel_requested_at": runtime.cancel_requested_at if runtime is not None else utc_now(),
+            "current_step": runtime.current_step.value if runtime and runtime.current_step else termination.get("current_step"),
+            "termination_method": runtime.termination_method if runtime is not None else "cooperative-cancel",
+            "process_pid": runtime.current_process_pid if runtime is not None else termination.get("process_pid"),
+            "process_start_ticks": runtime.current_process_start_ticks if runtime is not None else termination.get("process_start_ticks"),
+        }
+    )
+    task.termination = termination
+    task.updated_at = utc_now()
+    return task
+
+
+def _termination_result_task(
+    task: Task,
+    step: PipelineStep | None,
+    runtime: TaskRuntime | None,
+) -> Task:
+    result = Task.from_dict(task.to_dict())
+    if (
+        step == PipelineStep.PUBLISH_BILIBILI
+        and runtime is not None
+        and runtime.irreversible_operation
+    ):
+        return _mark_publish_outcome_unknown(result, runtime)
+    return _mark_task_terminated(result, step)
+
+
+def _keep_task_terminating(task: Task, step: PipelineStep | None, runtime: TaskRuntime | None) -> Task:
+    """Persist cancellation acceptance without claiming its resources are released."""
+    task.status = TaskStatus.RUNNING
+    task.error = None
+    if step is not None:
+        task.mark_step(step, StepStatus.RUNNING)
+    return _mark_task_termination_requested(task, runtime, state="terminating")
+
+
+def _mark_publish_outcome_unknown(task: Task, runtime: TaskRuntime) -> Task:
+    task.status = TaskStatus.FAILED
+    task.error = "Bilibili 最终提交结果未知，请先在创作中心确认后再继续操作"
+    task.mark_step(PipelineStep.PUBLISH_BILIBILI, StepStatus.FAILED)
+    task.termination = {
+        **task.termination,
+        "state": "publish_outcome_unknown",
+        "execution_id": runtime.execution_id,
+        "irreversible_operation": runtime.irreversible_operation,
+        "last_phase": runtime.irreversible_details.get("last_phase") or runtime.irreversible_operation,
+        "upload_id": runtime.irreversible_details.get("upload_id"),
+        "cancel_requested_at": runtime.cancel_requested_at,
+        "released_at": utc_now(),
+    }
+    task.updated_at = utc_now()
+    return task
+
+
+def _mark_task_termination_failed(task: Task, reason: str) -> Task:
+    task.status = TaskStatus.FAILED
+    task.error = reason
+    task.termination = {
+        **task.termination,
+        "state": "termination_failed",
+        "failed_at": utc_now(),
+        "reason": reason,
+    }
+    task.updated_at = utc_now()
     return task
 
 
@@ -1435,6 +1678,7 @@ def _step_requires_dubbing_exclusivity(step: PipelineStep) -> bool:
 def _mark_task_scheduled(task: Task, step: PipelineStep | None = None) -> None:
     task.status = TaskStatus.QUEUED
     task.error = None
+    task.termination = {}
     if step is not None:
         task.mark_step(step, StepStatus.QUEUED)
     _store().update(task)
@@ -1518,6 +1762,120 @@ def _restore_scheduled_publishes() -> None:
         _PUBLISH_SCHEDULER.schedule(task.id, run_at)
 
 
+def _recover_interrupted_terminations() -> None:
+    """Finish an interrupted termination without trusting a released parent lock."""
+    for task in _store().load_all():
+        state = _termination_state(task)
+        if state not in {"cancel_requested", "terminating"}:
+            continue
+        pid = _termination_worker_pid(task)
+        expected_start_ticks = task.termination.get("process_start_ticks")
+        if pid is not None and isinstance(expected_start_ticks, str):
+            actual_start_ticks = _process_start_ticks(pid)
+            if actual_start_ticks == expected_start_ticks:
+                _terminate_orphaned_process_group(pid)
+                if _process_group_active(pid):
+                    _store().update(
+                        _mark_task_termination_failed(
+                            task,
+                            "服务重启后未能确认终止遗留 worker 进程组",
+                        )
+                    )
+                else:
+                    _store().update(_mark_task_terminated(task))
+                continue
+            if actual_start_ticks is not None:
+                _store().update(
+                    _mark_task_termination_failed(
+                        task,
+                        "服务重启后 worker PID 已被复用，无法安全终止",
+                    )
+                )
+                continue
+            # The leader may already be gone while its process group retains
+            # descendants. Its former PID remains the original PGID.
+            if _process_group_active(pid):
+                _terminate_orphaned_process_group(pid)
+                if _process_group_active(pid):
+                    _store().update(
+                        _mark_task_termination_failed(
+                            task,
+                            "服务重启后未能终止遗留 worker 子进程组",
+                        )
+                    )
+                else:
+                    _store().update(_mark_task_terminated(task))
+                continue
+        if task_is_locked(task.folder):
+            _store().update(
+                _mark_task_termination_failed(
+                    task,
+                    "服务重启后任务锁仍被占用，无法确认执行资源已释放",
+                )
+            )
+            continue
+        _store().update(_mark_task_terminated(task))
+
+
+def _termination_worker_pid(task: Task) -> int | None:
+    value = task.termination.get("process_pid") if isinstance(task.termination, dict) else None
+    if not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _process_start_ticks(pid: int | None) -> str | None:
+    if pid is None or pid <= 0:
+        return None
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", maxsplit=1)[1].split()
+    except (FileNotFoundError, IndexError, OSError):
+        return None
+    # /proc stat field 22 is starttime; this suffix starts at field 3.
+    return fields[19] if len(fields) > 19 else None
+
+
+def _process_group_active(process_group_id: int) -> bool:
+    proc_root = Path("/proc")
+    try:
+        candidates = tuple(proc_root.iterdir())
+    except OSError:
+        return False
+    for candidate in candidates:
+        if not candidate.name.isdigit():
+            continue
+        try:
+            fields = candidate.joinpath("stat").read_text(encoding="utf-8").rsplit(")", maxsplit=1)[1].split()
+        except (FileNotFoundError, IndexError, OSError):
+            continue
+        if len(fields) > 2 and fields[0] != "Z" and fields[2] == str(process_group_id):
+            return True
+    return False
+
+
+def _terminate_orphaned_process_group(process_group_id: int, *, grace_seconds: float = 2.0) -> None:
+    try:
+        os.killpg(process_group_id, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        return
+    deadline = time.monotonic() + grace_seconds
+    while _process_group_active(process_group_id) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if not _process_group_active(process_group_id):
+        return
+    try:
+        os.killpg(process_group_id, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except OSError:
+        return
+    deadline = time.monotonic() + 1.0
+    while _process_group_active(process_group_id) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 def _dispatch_scheduled_publish(task_id: str) -> None:
     with _LOCK:
         try:
@@ -1542,10 +1900,7 @@ def _dispatch_scheduled_publish(task_id: str) -> None:
                 time.time() + SCHEDULED_PUBLISH_RETRY_SECONDS,
             )
             return
-        _track_running(
-            task.id,
-            _submit_step_job(task.id, PipelineStep.PUBLISH_BILIBILI, "web-scheduled-publish"),
-        )
+        _submit_step_job(task.id, PipelineStep.PUBLISH_BILIBILI, "web-scheduled-publish")
 
 
 def _mark_scheduled_publish_failed(task_id: str) -> None:
@@ -1577,7 +1932,9 @@ def _download_url_job(
 ) -> str:
     store = _store()
     task = store.get(task_id)
+    runtime = _runtime_for_task(task_id)
     acquired_here = False
+    termination_result: Task | None = None
     try:
         _raise_if_termination_requested(task_id)
         if task_lock is None:
@@ -1593,11 +1950,15 @@ def _download_url_job(
         _raise_if_termination_requested(task_id)
 
         config = _config()
-        result = download_url_to_artifacts(
-            _validated_url(task.source),
-            config.root,
-            download_config_from_task_config(config, task.config),
-        )
+        if _should_isolate_download(runtime):
+            result = _download_in_worker(task, runtime)
+        else:
+            result = download_url_to_artifacts(
+                _validated_url(task.source),
+                config.root,
+                download_config_from_task_config(config, task.config),
+                cancellation=runtime.cancellation if runtime is not None else None,
+            )
         _raise_if_termination_requested(task_id)
         incoming = create_task_from_download_artifacts(
             source=result.media_path,
@@ -1611,10 +1972,11 @@ def _download_url_job(
         _raise_if_termination_requested(task.id)
         _cleanup_pending_task_dir(config.root, task_lock.task_dir, task.folder)
         return task.id
-    except TaskTerminationRequested:
+    except (TaskTerminationRequested, TaskCancelled):
         try:
             task = store.get(_TASK_ALIASES.get(task_id, task_id))
-            store.update(_mark_task_terminated(task, PipelineStep.INGEST))
+            termination_result = _termination_result_task(task, PipelineStep.INGEST, runtime)
+            store.update(_keep_task_terminating(task, PipelineStep.INGEST, runtime))
         except KeyError:
             pass
         raise
@@ -1631,6 +1993,10 @@ def _download_url_job(
     finally:
         if acquired_here and task_lock is not None:
             task_lock.release()
+        # A run-all caller owns its lock and publishes the terminal outcome
+        # only after the complete chain has released it.
+        if termination_result is not None and (acquired_here or task_lock is None):
+            store.update(termination_result)
 
 
 def _merge_downloaded_task(store: TaskStore, existing: Task, incoming: Task) -> Task:
@@ -1673,6 +2039,10 @@ def _alias_running_future(source_id: str, target_id: str) -> None:
     future = _RUNNING.get(source_id)
     if future is not None:
         _RUNNING[target_id] = future
+    runtime = _RUNTIMES.get(source_id)
+    if runtime is not None:
+        runtime.task_id = target_id
+        _RUNTIMES[target_id] = runtime
     if source_id in _TERMINATING:
         _TERMINATING.add(target_id)
 
@@ -1696,7 +2066,11 @@ def _run_step_job(
 ) -> None:
     store = _store()
     task = store.get(task_id)
+    runtime = _runtime_for_task(task_id)
+    if runtime is not None:
+        runtime.current_step = step
     acquired_here = False
+    termination_result: Task | None = None
     try:
         _raise_if_termination_requested(task_id)
         if isinstance(task_lock, str):
@@ -1713,34 +2087,210 @@ def _run_step_job(
         options = runtime_options_from_task_config(_config(), task.config)
         if step == PipelineStep.PUBLISH_BILIBILI and not options.bilibili.dry_run and not options.bilibili.confirm:
             options = dry_run_bilibili_options(options)
-        task = PipelineRunner(
-            demucs_config=options.demucs,
-            whisperx_config=options.whisperx,
-            translation_config=options.translation,
-            tts_config=options.tts,
-            synthesis_config=options.synthesis,
-            publish_config=options.publish,
-            bilibili_publish_config=options.bilibili,
-            tts_quality_config=options.tts_quality,
-            redub_tts_config=options.redub_tts,
-        ).run_step(task, step, task_lock=task_lock)
-        _raise_if_termination_requested(task_id)
-    except TaskTerminationRequested:
-        task = _mark_task_terminated(task, step)
+        if _should_isolate_step(step, runtime):
+            task = _run_gpu_step_in_worker(task, step, runtime)
+        else:
+            task = PipelineRunner(
+                demucs_config=options.demucs,
+                whisperx_config=options.whisperx,
+                translation_config=options.translation,
+                tts_config=options.tts,
+                synthesis_config=options.synthesis,
+                publish_config=options.publish,
+                bilibili_publish_config=options.bilibili,
+                tts_quality_config=options.tts_quality,
+                redub_tts_config=options.redub_tts,
+                cancellation=runtime.cancellation if runtime is not None else None,
+            ).run_step(task, step, task_lock=task_lock)
+        if step != PipelineStep.PUBLISH_BILIBILI or not _publish_result_confirmed(runtime):
+            _raise_if_termination_requested(task_id)
+    except (TaskTerminationRequested, TaskCancelled):
+        termination_result = _termination_result_task(task, step, runtime)
+        task = _keep_task_terminating(task, step, runtime)
         raise
     except Exception as exc:
-        task.status = TaskStatus.FAILED
-        task.error = str(exc)
-        task.mark_step(step, StepStatus.FAILED)
+        if (
+            step == PipelineStep.PUBLISH_BILIBILI
+            and runtime is not None
+            and runtime.irreversible_operation
+            and not runtime.irreversible_details.get("response_confirmed")
+        ):
+            termination_result = _mark_publish_outcome_unknown(Task.from_dict(task.to_dict()), runtime)
+            raise PublishOutcomeUnknown() from exc
+        else:
+            task.status = TaskStatus.FAILED
+            task.error = str(exc)
+            task.mark_step(step, StepStatus.FAILED)
         raise
     finally:
         try:
             store.update(task)
         finally:
+            if runtime is not None:
+                runtime.current_step = None
             if _step_uses_gpu(step):
                 cleanup_gpu_memory(f"web-step:{step.value}")
             if release_lock and isinstance(task_lock, TaskLock):
                 task_lock.release()
+            if termination_result is not None and (release_lock or not isinstance(task_lock, TaskLock)):
+                store.update(termination_result)
+
+
+def _should_isolate_step(step: PipelineStep, runtime: TaskRuntime | None) -> bool:
+    if runtime is None:
+        return False
+    # Keep dependency injection viable for tests and integrations that replace
+    # the runner; normal WebUI execution always uses the spawn-safe worker.
+    return getattr(PipelineRunner, "__module__", "") == "youdub.pipeline" and step in {
+        *GPU_STEPS,
+        PipelineStep.TRANSLATE,
+        PipelineStep.PREPARE_PUBLISH,
+        PipelineStep.PUBLISH_BILIBILI,
+    }
+
+
+def _publish_result_confirmed(runtime: TaskRuntime | None) -> bool:
+    return bool(
+        runtime is not None
+        and runtime.irreversible_operation == "bilibili:add_archive"
+        and runtime.irreversible_details.get("response_confirmed")
+        and runtime.irreversible_details.get("worker_result_received")
+    )
+
+
+def _should_isolate_download(runtime: TaskRuntime | None) -> bool:
+    return runtime is not None and getattr(download_url_to_artifacts, "__module__", "") == "youdub.downloader"
+
+
+def _download_in_worker(task: Task, runtime: TaskRuntime) -> DownloadResult:
+    input_path, output_path = _write_worker_task_input(task, "download")
+    try:
+        result = run_managed_command(
+            [
+                sys.executable,
+                "-m",
+                "youdub.download_worker",
+                "--input",
+                str(input_path),
+                "--output",
+                str(output_path),
+            ],
+            cwd=task.folder,
+            cancellation=runtime.cancellation,
+            cleanup_paths=(input_path, output_path),
+        )
+        payload = _read_gpu_worker_result(output_path)
+        if result.returncode != 0:
+            error = payload.get("error") if isinstance(payload, dict) else None
+            raise RuntimeError(f"Download worker failed: {error or result.stderr}")
+        return _download_result_from_worker(payload)
+    finally:
+        input_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
+
+
+def _download_result_from_worker(payload: dict[str, Any]) -> DownloadResult:
+    try:
+        task_dir = Path(str(payload["task_dir"]))
+        info_path = Path(str(payload["info_path"]))
+        media_path = Path(str(payload["media_path"]))
+        cover = payload.get("cover_path")
+        cover_path = Path(str(cover)) if isinstance(cover, str) and cover else None
+        source_key = str(payload["source_key"])
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+    except (KeyError, OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Download worker did not produce valid artifacts") from exc
+    if not isinstance(info, dict):
+        raise RuntimeError("Download worker metadata is not an object")
+    return DownloadResult(
+        task_dir=task_dir,
+        info_path=info_path,
+        media_path=media_path,
+        cover_path=cover_path,
+        info=info,
+        source_key=source_key,
+    )
+
+
+def _run_gpu_step_in_worker(task: Task, step: PipelineStep, runtime: TaskRuntime | None) -> Task:
+    if runtime is None:
+        raise RuntimeError("GPU worker requires a registered task runtime")
+    input_path, output_path = _write_worker_task_input(task, "pipeline")
+    state_path = input_path.with_suffix(".state.json")
+    try:
+        result = run_managed_command(
+            [
+                sys.executable,
+                "-m",
+                "youdub.pipeline_worker",
+                "--input",
+                str(input_path),
+                "--output",
+                str(output_path),
+                "--step",
+                step.value,
+                "--state",
+                str(state_path),
+            ],
+            cwd=task.folder,
+            cancellation=runtime.cancellation,
+            cleanup_paths=(input_path, output_path),
+        )
+        payload = _read_gpu_worker_result(output_path)
+        if result.returncode != 0:
+            error = payload.get("error") if isinstance(payload, dict) else None
+            raise RuntimeError(f"GPU worker failed for {step.value}: {error or result.stderr}")
+        task_payload = payload.get("task") if isinstance(payload, dict) else None
+        if not isinstance(task_payload, dict):
+            raise RuntimeError(f"GPU worker returned no task result for {step.value}")
+        _record_worker_state(runtime, state_path)
+        if step == PipelineStep.PUBLISH_BILIBILI and runtime.irreversible_operation:
+            runtime.irreversible_details["worker_result_received"] = True
+        return Task.from_dict(task_payload)
+    except TaskCancelled:
+        _record_worker_state(runtime, state_path)
+        raise
+    finally:
+        _record_worker_state(runtime, state_path)
+        input_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
+        state_path.unlink(missing_ok=True)
+
+
+def _write_worker_task_input(task: Task, prefix: str) -> tuple[Path, Path]:
+    input_file = tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=task.folder,
+        prefix=f".{prefix}-worker-",
+        suffix=".input.json",
+        delete=False,
+    )
+    input_path = Path(input_file.name)
+    output_path = input_path.with_suffix(".output.json")
+    with input_file:
+        json.dump(task.to_dict(), input_file, ensure_ascii=False)
+    return input_path, output_path
+
+
+def _read_gpu_worker_result(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("GPU worker did not produce a valid result") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("GPU worker result must be an object")
+    return data
+
+
+def _record_worker_state(runtime: TaskRuntime, state_path: Path) -> None:
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    operation = state.get("irreversible_operation") if isinstance(state, dict) else None
+    if isinstance(operation, str) and operation:
+        runtime.set_irreversible_operation(operation, state)
 
 
 def _run_all_job(task_id: str, task_lock: TaskLock | None = None) -> None:
@@ -1749,6 +2299,7 @@ def _run_all_job(task_id: str, task_lock: TaskLock | None = None) -> None:
         task_lock = None
     else:
         label = "web-run-all"
+    termination_result: Task | None = None
     try:
         task_id, task_lock = _download_for_run_all_if_needed(task_id, task_lock, label)
         _raise_if_termination_requested(task_id)
@@ -1760,18 +2311,31 @@ def _run_all_job(task_id: str, task_lock: TaskLock | None = None) -> None:
             if step == PipelineStep.PUBLISH_BILIBILI and _defer_publish_if_needed(task):
                 return
             _run_step_for_run_all(task_id, step, task_lock)
+            if step == PipelineStep.PUBLISH_BILIBILI and _publish_result_confirmed(_runtime_for_task(task_id)):
+                return
             _raise_if_termination_requested(task_id)
         task = _store().get(task_id)
         task.status = TaskStatus.SUCCESS
         task.error = None
         _store().update(task)
-    except TaskTerminationRequested:
+    except (TaskTerminationRequested, TaskCancelled):
         task = _store().get(_TASK_ALIASES.get(task_id, task_id))
-        _store().update(_mark_task_terminated(task))
+        runtime = _runtime_for_task(task_id)
+        termination_result = _termination_result_task(task, None, runtime)
+        _store().update(_keep_task_terminating(task, None, runtime))
+        raise
+    except PublishOutcomeUnknown:
+        task = _store().get(_TASK_ALIASES.get(task_id, task_id))
+        runtime = _runtime_for_task(task_id)
+        if runtime is None:
+            raise
+        termination_result = _mark_publish_outcome_unknown(Task.from_dict(task.to_dict()), runtime)
         raise
     finally:
         if task_lock is not None:
             task_lock.release()
+        if termination_result is not None:
+            _store().update(termination_result)
 
 
 def _run_step_for_run_all(task_id: str, step: PipelineStep, task_lock: TaskLock | None) -> None:
@@ -1791,13 +2355,46 @@ def _run_step_for_run_all_on_executor(
     task_lock: TaskLock | None,
 ) -> None:
     _mark_run_all_step_queued(task_id, step)
-    executor.submit(
+    runtime = _runtime_for_task(task_id)
+    if runtime is not None:
+        runtime.current_step = step
+    future = executor.submit(
         _run_step_job,
         task_id,
         step,
         task_lock=task_lock,
         release_lock=False,
-    ).result()
+    )
+    if runtime is not None:
+        runtime.inner_future = future
+    try:
+        while True:
+            try:
+                future.result(timeout=0.1)
+                return
+            except TimeoutError:
+                if _termination_requested(task_id):
+                    _wait_for_inner_future_termination(future)
+                    raise TaskTerminationRequested()
+                continue
+            except CancelledError as exc:
+                raise TaskTerminationRequested() from exc
+    finally:
+        if runtime is not None and runtime.inner_future is future:
+            runtime.inner_future = None
+
+
+def _wait_for_inner_future_termination(future: Future[Any]) -> None:
+    """Keep the parent lock until a started inner worker has released resources."""
+    while not future.done():
+        try:
+            future.result(timeout=0.1)
+        except TimeoutError:
+            continue
+        except (CancelledError, TaskCancelled, TaskTerminationRequested):
+            return
+        except Exception:
+            return
 
 
 def _mark_run_all_step_queued(task_id: str, step: PipelineStep) -> None:

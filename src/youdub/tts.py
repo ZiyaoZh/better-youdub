@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .cancellation import CancellationContext
 from .gpu import cleanup_gpu_memory, resolve_device
 from .hf_runtime import run_huggingface_download
 
@@ -71,7 +72,13 @@ class TTSConfig:
     device: str = "auto"
 
 
-def generate_tts(task_dir: Path, config: TTSConfig) -> Path:
+def generate_tts(
+    task_dir: Path,
+    config: TTSConfig,
+    *,
+    cancellation: CancellationContext | None = None,
+) -> Path:
+    _checkpoint(cancellation, "tts:start")
     entries = load_translation_entries(task_dir / TRANSLATION_INPUT)
     vocals_dir = split_reference_audio(
         task_dir / VOCALS_INPUT,
@@ -84,7 +91,7 @@ def generate_tts(task_dir: Path, config: TTSConfig) -> Path:
     tts_dir.mkdir(parents=True, exist_ok=True)
 
     if not entries:
-        write_tts_mix(entries, tts_dir, task_dir, config)
+        write_tts_mix(entries, tts_dir, task_dir, config, cancellation=cancellation)
         return task_dir / TTS_OUTPUT
 
     model = None
@@ -96,6 +103,7 @@ def generate_tts(task_dir: Path, config: TTSConfig) -> Path:
         active_manifest_keys: set[str] = set()
 
         for index, entry in enumerate(entries, start=1):
+            _checkpoint(cancellation, f"tts:segment:{index}")
             manifest_key = f"{index:04d}"
             active_manifest_keys.add(manifest_key)
             output_path = tts_dir / f"{index:04d}.wav"
@@ -108,6 +116,7 @@ def generate_tts(task_dir: Path, config: TTSConfig) -> Path:
                 manifest_record,
             ):
                 continue
+            _checkpoint(cancellation, f"tts:generate:{index}")
             wav = model.generate(
                 text=tts_synthesis_text(entry, config),
                 reference_wav_path=str(reference_path),
@@ -117,13 +126,15 @@ def generate_tts(task_dir: Path, config: TTSConfig) -> Path:
             _soundfile().write(str(output_path), wav, int(model.tts_model.sample_rate))
             manifest_segments[manifest_key] = manifest_record
             _write_tts_manifest(task_dir, manifest)
+            _checkpoint(cancellation, f"tts:segment-complete:{index}")
 
         stale_manifest_keys = set(manifest_segments) - active_manifest_keys
         if stale_manifest_keys:
             for key in stale_manifest_keys:
                 manifest_segments.pop(key, None)
             _write_tts_manifest(task_dir, manifest)
-        return write_tts_mix(entries, tts_dir, task_dir, config)
+        _checkpoint(cancellation, "tts:mix")
+        return write_tts_mix(entries, tts_dir, task_dir, config, cancellation=cancellation)
     finally:
         del model
         if not config.cache_model:
@@ -238,7 +249,14 @@ def choose_fallback_reference(vocals_dir: Path, min_reference_ms: int) -> Path:
     return longest
 
 
-def write_tts_mix(entries: list[dict[str, Any]], tts_dir: Path, task_dir: Path, config: TTSConfig | None = None) -> Path:
+def write_tts_mix(
+    entries: list[dict[str, Any]],
+    tts_dir: Path,
+    task_dir: Path,
+    config: TTSConfig | None = None,
+    *,
+    cancellation: CancellationContext | None = None,
+) -> Path:
     output_path = task_dir / TTS_OUTPUT
     timings_path = task_dir / TTS_TIMINGS_OUTPUT
     cache_dir = task_dir / "segments" / "stretched"
@@ -259,6 +277,7 @@ def write_tts_mix(entries: list[dict[str, Any]], tts_dir: Path, task_dir: Path, 
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     for index, entry in enumerate(entries, start=1):
+        _checkpoint(cancellation, f"tts:mix-segment:{index}")
         segment_path = tts_dir / f"{index:04d}.wav"
         raw_audio, segment_rate = _read_audio(segment_path)
         if segment_rate != sample_rate:
@@ -595,3 +614,8 @@ def _clean_text(value: Any) -> str:
     if not isinstance(value, str):
         return ""
     return value.strip()
+
+
+def _checkpoint(cancellation: CancellationContext | None, name: str) -> None:
+    if cancellation is not None:
+        cancellation.checkpoint(name)

@@ -111,6 +111,7 @@ class TaskStore:
             updated_at=existing.updated_at,
             error=existing.error,
             config=dict(existing.config or incoming.config),
+            termination=dict(existing.termination),
             resources_cleaned_at=existing.resources_cleaned_at,
             resources_cleaned_bytes=existing.resources_cleaned_bytes,
         )

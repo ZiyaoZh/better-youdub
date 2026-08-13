@@ -6,6 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .cancellation import CancellationContext, run_managed_command
 from .gpu import resolve_device
 
 
@@ -35,20 +36,38 @@ def require_binary(name: str) -> str:
     return path
 
 
-def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
+def run_command(
+    command: list[str],
+    *,
+    cancellation: CancellationContext | None = None,
+    cleanup_paths: tuple[Path, ...] = (),
+) -> subprocess.CompletedProcess[str]:
+    if cancellation is None:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    else:
+        result = run_managed_command(
+            command,
+            cancellation=cancellation,
+            cleanup_paths=cleanup_paths,
+        )
     if result.returncode != 0:
         raise CommandError(command, result.returncode, result.stderr)
     return result
 
 
-def extract_audio(video_path: Path, audio_path: Path, sample_rate: int = 44100) -> Path:
+def extract_audio(
+    video_path: Path,
+    audio_path: Path,
+    sample_rate: int = 44100,
+    *,
+    cancellation: CancellationContext | None = None,
+) -> Path:
     require_binary("ffmpeg")
     if not video_path.exists():
         raise FileNotFoundError(video_path)
@@ -70,7 +89,10 @@ def extract_audio(video_path: Path, audio_path: Path, sample_rate: int = 44100) 
         "2",
         str(audio_path),
     ]
-    run_command(command)
+    if cancellation is None:
+        run_command(command)
+    else:
+        run_command(command, cancellation=cancellation, cleanup_paths=(audio_path,))
     return audio_path
 
 
@@ -80,6 +102,8 @@ def separate_audio(
     model_name: str = "htdemucs_ft",
     segment_seconds: int = 6,
     device: str = "auto",
+    *,
+    cancellation: CancellationContext | None = None,
 ) -> tuple[Path, Path]:
     require_binary("demucs")
     if not audio_path.exists():
@@ -102,7 +126,14 @@ def separate_audio(
         str(demucs_root),
         str(audio_path),
     ]
-    run_command(command)
+    if cancellation is None:
+        run_command(command)
+    else:
+        run_command(
+            command,
+            cancellation=cancellation,
+            cleanup_paths=(demucs_root, output_dir / "audio_vocals.wav", output_dir / "audio_instruments.wav"),
+        )
 
     source_dir = demucs_root / model_name / audio_path.stem
     source_vocals = source_dir / "vocals.wav"

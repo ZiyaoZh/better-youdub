@@ -4,6 +4,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .cancellation import CancellationContext, run_managed_command
 from .media import CommandError, require_binary
 
 DOWNLOAD_VIDEO = "download.mp4"
@@ -48,7 +49,12 @@ class SynthesisConfig:
             raise ValueError("Audio bitrate is required")
 
 
-def synthesize_video(task_dir: Path, config: SynthesisConfig | None = None) -> Path:
+def synthesize_video(
+    task_dir: Path,
+    config: SynthesisConfig | None = None,
+    *,
+    cancellation: CancellationContext | None = None,
+) -> Path:
     config = config or SynthesisConfig()
     config.validate()
     task_dir = task_dir.resolve()
@@ -64,8 +70,12 @@ def synthesize_video(task_dir: Path, config: SynthesisConfig | None = None) -> P
         return final_video
 
     mixed_audio = task_dir / MIXED_AUDIO
-    _mix_audio(tts_path, instruments_path, mixed_audio, config)
-    _render_video(video_path, mixed_audio, subtitles_path, final_video, task_dir, config)
+    if cancellation is None:
+        _mix_audio(tts_path, instruments_path, mixed_audio, config)
+        _render_video(video_path, mixed_audio, subtitles_path, final_video, task_dir, config)
+    else:
+        _mix_audio(tts_path, instruments_path, mixed_audio, config, cancellation=cancellation)
+        _render_video(video_path, mixed_audio, subtitles_path, final_video, task_dir, config, cancellation=cancellation)
     if not final_video.exists() or final_video.stat().st_size <= 0:
         raise RuntimeError(f"FFmpeg finished without producing {final_video}")
     return final_video
@@ -167,6 +177,8 @@ def _mix_audio(
     instruments_path: Path,
     mixed_audio: Path,
     config: SynthesisConfig,
+    *,
+    cancellation: CancellationContext | None = None,
 ) -> Path:
     command = [
         "ffmpeg",
@@ -192,7 +204,10 @@ def _mix_audio(
         config.audio_bitrate,
         str(mixed_audio.resolve()),
     ]
-    _run_command(command)
+    if cancellation is None:
+        _run_command(command)
+    else:
+        _run_command(command, cancellation=cancellation, cleanup_paths=(mixed_audio,))
     return mixed_audio
 
 
@@ -203,6 +218,8 @@ def _render_video(
     final_video: Path,
     task_dir: Path,
     config: SynthesisConfig,
+    *,
+    cancellation: CancellationContext | None = None,
 ) -> Path:
     command = [
         "ffmpeg",
@@ -241,7 +258,15 @@ def _render_video(
             str(final_video.resolve()),
         ]
     )
-    _run_command(command, cwd=task_dir.resolve())
+    if cancellation is None:
+        _run_command(command, cwd=task_dir.resolve())
+    else:
+        _run_command(
+            command,
+            cwd=task_dir.resolve(),
+            cancellation=cancellation,
+            cleanup_paths=(final_video,),
+        )
     return final_video
 
 
@@ -260,16 +285,30 @@ def _require_file(path: Path) -> Path:
     return path
 
 
-def _run_command(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def _run_command(
+    command: list[str],
+    cwd: Path | None = None,
+    *,
+    cancellation: CancellationContext | None = None,
+    cleanup_paths: tuple[Path, ...] = (),
+) -> subprocess.CompletedProcess[str]:
     require_binary(command[0])
-    result = subprocess.run(
-        command,
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
+    if cancellation is None:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    else:
+        result = run_managed_command(
+            command,
+            cwd=cwd,
+            cancellation=cancellation,
+            cleanup_paths=cleanup_paths,
+        )
     if result.returncode != 0:
         raise CommandError(command, result.returncode, result.stderr)
     return result

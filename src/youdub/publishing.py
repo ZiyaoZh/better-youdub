@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from .cancellation import CancellationContext, TaskCancelled
 from .media import CommandError, require_binary
 from .network import BILIBILI_SERVICE, network_router
 
@@ -41,6 +42,10 @@ BILIBILI_UPLOAD_PROFILE = "ugcupos/bup"
 BILIBILI_DEFAULT_PREUPLOAD_QUERY = "zone=cs&upcdn=bldsa&probe_version=20221109"
 
 LOGGER = logging.getLogger(__name__)
+
+
+class BilibiliPublishOutcomeUnknown(RuntimeError):
+    """The final submit may have reached Bilibili but did not yield a response."""
 
 
 @dataclass(frozen=True)
@@ -177,9 +182,15 @@ def ensure_cover(task_dir: Path) -> Path:
     return output
 
 
-def publish_to_bilibili(task_dir: Path, config: BilibiliPublishConfig | None = None) -> Path:
+def publish_to_bilibili(
+    task_dir: Path,
+    config: BilibiliPublishConfig | None = None,
+    *,
+    cancellation: CancellationContext | None = None,
+) -> Path:
     config = config or BilibiliPublishConfig.from_env()
     config.validate_for_upload()
+    _checkpoint(cancellation, "bilibili:start")
     task_dir = task_dir.resolve()
     publish_path = task_dir / PUBLISH_JSON
     if not publish_path.exists():
@@ -206,7 +217,10 @@ def publish_to_bilibili(task_dir: Path, config: BilibiliPublishConfig | None = N
         if existing.get("bvid") or existing.get("aid"):
             return result_path
 
-    result = asyncio.run(_upload_bilibili(task_dir, package, config))
+    if cancellation is None:
+        result = asyncio.run(_upload_bilibili(task_dir, package, config))
+    else:
+        result = asyncio.run(_upload_bilibili(task_dir, package, config, cancellation=cancellation))
     return _write_json(result_path, result)
 
 
@@ -214,6 +228,8 @@ async def _upload_bilibili(
     task_dir: Path,
     package: dict[str, Any],
     config: BilibiliPublishConfig,
+    *,
+    cancellation: CancellationContext | None = None,
 ) -> dict[str, Any]:
     source = config.source or package.get("source_url") or None
     video_path = (task_dir / str(package["video_path"])).resolve()
@@ -221,12 +237,13 @@ async def _upload_bilibili(
     last_error: Exception | None = None
 
     for attempt in range(1, BILIBILI_UPLOAD_RETRIES + 1):
+        _checkpoint(cancellation, f"bilibili:attempt:{attempt}")
         if attempt > 1:
             network_router.probe_service(BILIBILI_SERVICE, config.proxy)
         route = network_router.routes(BILIBILI_SERVICE, config.proxy)[0]
         routed_config = replace(config, proxy=route.proxy or "")
         try:
-            async with _BilibiliWebUploader(routed_config) as uploader:
+            async with _BilibiliWebUploader(routed_config, cancellation=cancellation) as uploader:
                 LOGGER.info("Bilibili upload started")
                 cover_url = await uploader.upload_cover(cover_path)
                 uploaded, upload_debug = await uploader.upload_video_file(video_path)
@@ -246,6 +263,10 @@ async def _upload_bilibili(
                 )
                 network_router.record_success(BILIBILI_SERVICE, route)
                 return result
+        except TaskCancelled:
+            raise
+        except BilibiliPublishOutcomeUnknown:
+            raise
         except Exception as exc:
             last_error = exc
             network_router.record_failure(
@@ -256,7 +277,7 @@ async def _upload_bilibili(
             )
             LOGGER.exception("Bilibili upload attempt %s/%s failed", attempt, BILIBILI_UPLOAD_RETRIES)
             if attempt < BILIBILI_UPLOAD_RETRIES:
-                await asyncio.sleep(BILIBILI_UPLOAD_RETRY_DELAY_SECONDS)
+                await _wait_for_cancellation(cancellation, BILIBILI_UPLOAD_RETRY_DELAY_SECONDS, "bilibili:retry-backoff")
 
     raise RuntimeError(f"Bilibili upload failed after {BILIBILI_UPLOAD_RETRIES} attempts") from last_error
 
@@ -271,8 +292,9 @@ def _bilibili_headers_without_brotli(headers: Any) -> dict[str, Any]:
 
 
 class _BilibiliWebUploader:
-    def __init__(self, config: BilibiliPublishConfig) -> None:
+    def __init__(self, config: BilibiliPublishConfig, *, cancellation: CancellationContext | None = None) -> None:
         self.config = config
+        self.cancellation = cancellation
         self._bili: Any = None
         self._upos: Any = None
         self._probe_query: str | None = None
@@ -339,6 +361,7 @@ class _BilibiliWebUploader:
             await self._upos.close()
 
     async def upload_cover(self, image_path: Path) -> str:
+        _checkpoint(self.cancellation, "bilibili:cover")
         _require_file(image_path)
         mime, _ = mimetypes.guess_type(str(image_path))
         if not mime or not mime.startswith("image/"):
@@ -362,6 +385,7 @@ class _BilibiliWebUploader:
         return _normalize_bilibili_url(url)
 
     async def upload_video_file(self, video_path: Path) -> tuple[_BilibiliUploadedVideo, dict[str, Any]]:
+        _checkpoint(self.cancellation, "bilibili:upload-start")
         _require_file(video_path)
         file_size = video_path.stat().st_size
         if file_size <= 0:
@@ -376,6 +400,7 @@ class _BilibiliWebUploader:
 
         with video_path.open("rb") as file:
             for chunk_index in range(chunk_count):
+                _checkpoint(self.cancellation, f"bilibili:chunk:{chunk_index + 1}")
                 start = chunk_index * chunk_size
                 chunk = file.read(chunk_size)
                 if not chunk:
@@ -423,6 +448,7 @@ class _BilibiliWebUploader:
                     etag = hashlib.md5(chunk).hexdigest()  # noqa: S324 - UPOS multipart ETag fallback.
                 parts.append({"partNumber": chunk_index + 1, "eTag": etag})
                 LOGGER.info("Bilibili upload chunk %s/%s completed", chunk_index + 1, chunk_count)
+                _checkpoint(self.cancellation, f"bilibili:chunk-complete:{chunk_index + 1}")
 
         end_upload = await self._request_json(
             self._upos,
@@ -468,6 +494,7 @@ class _BilibiliWebUploader:
         uploaded: _BilibiliUploadedVideo,
         cover_url: str,
     ) -> dict[str, Any]:
+        _checkpoint(self.cancellation, "bilibili:before-final-submit")
         tags = [str(tag).strip() for tag in list(package["tags"])[:10] if str(tag).strip()]
         if not tags:
             raise ValueError("Bilibili upload requires at least one tag")
@@ -505,13 +532,31 @@ class _BilibiliWebUploader:
             "watermark": {"state": 1 if config.watermark else 0},
             "csrf": self._csrf,
         }
-        payload = await self._request_json(
-            self._bili,
-            "POST",
-            "https://member.bilibili.com/x/vu/web/add/v3",
-            params={"csrf": self._csrf, "ts": _milliseconds()},
-            json=_drop_none(body),
-        )
+        if self.cancellation is not None:
+            self.cancellation.mark_irreversible_operation(
+                "bilibili:add_archive",
+                upload_id=uploaded.upload_id,
+                last_phase="bilibili:add_archive",
+            )
+        try:
+            payload = await self._request_json(
+                self._bili,
+                "POST",
+                "https://member.bilibili.com/x/vu/web/add/v3",
+                params={"csrf": self._csrf, "ts": _milliseconds()},
+                json=_drop_none(body),
+            )
+        except Exception as exc:
+            raise BilibiliPublishOutcomeUnknown(
+                "Bilibili final submit did not return a confirmable result"
+            ) from exc
+        if self.cancellation is not None:
+            self.cancellation.mark_irreversible_operation(
+                "bilibili:add_archive",
+                upload_id=uploaded.upload_id,
+                last_phase="bilibili:add_archive:response-confirmed",
+                response_confirmed=True,
+            )
         _bilibili_code_ok(payload)
         return payload
 
@@ -580,6 +625,7 @@ class _BilibiliWebUploader:
         return self._probe_query
 
     async def _request_json(self, session: Any, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        _checkpoint(self.cancellation, f"bilibili:http:{method.lower()}")
         proxy = _bilibili_proxy(self.config)
         if proxy is not None and not self._proxy_uses_connector and "proxy" not in kwargs:
             kwargs["proxy"] = proxy
@@ -606,6 +652,23 @@ class _BilibiliWebUploader:
                 f"Bilibili HTTP request timed out {proxy_hint}: {method} {url}. "
                 "If this container cannot reach member.bilibili.com directly, set BILI_PROXY or HTTPS_PROXY."
             ) from exc
+
+
+def _checkpoint(cancellation: CancellationContext | None, name: str) -> None:
+    if cancellation is not None:
+        cancellation.checkpoint(name)
+
+
+async def _wait_for_cancellation(
+    cancellation: CancellationContext | None,
+    seconds: float,
+    name: str,
+) -> None:
+    _checkpoint(cancellation, name)
+    if cancellation is None:
+        await asyncio.sleep(seconds)
+    else:
+        await asyncio.to_thread(cancellation.wait, seconds, name)
 
 
 def _bilibili_cookie(config: BilibiliPublishConfig) -> str:

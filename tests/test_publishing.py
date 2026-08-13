@@ -425,3 +425,45 @@ def test_upload_bilibili_switches_from_direct_to_proxy(tmp_path: Path, monkeypat
     assert result["bvid"] == "BV1real"
     assert result["aid"] == 456
     assert result["video"]["chunks"] == 1
+
+
+def test_upload_bilibili_does_not_retry_unconfirmed_final_submit(tmp_path: Path, monkeypatch) -> None:
+    _write_publish_inputs(tmp_path)
+    monkeypatch.setattr(publishing, "_run_command", lambda command: Path(command[-1]).write_bytes(b"jpg"))
+    package = json.loads(prepare_publish_package(tmp_path).read_text(encoding="utf-8"))
+    attempts: list[str] = []
+
+    class FakeWebUploader:
+        def __init__(self, config: BilibiliPublishConfig, **kwargs: object) -> None:
+            attempts.append(config.proxy or "direct")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        async def upload_cover(self, image_path: Path) -> str:
+            return "https://i0.hdslb.com/cover.jpg"
+
+        async def upload_video_file(self, video_path: Path):
+            return (
+                publishing._BilibiliUploadedVideo("video", 789, "upload-id", "upos://bucket/video.mp4"),
+                {"chunks": 1},
+            )
+
+        async def add_archive(self, **kwargs):
+            raise publishing.BilibiliPublishOutcomeUnknown("response lost after final submit")
+
+    monkeypatch.setattr(publishing, "_BilibiliWebUploader", FakeWebUploader)
+
+    with pytest.raises(publishing.BilibiliPublishOutcomeUnknown, match="response lost"):
+        asyncio.run(
+            publishing._upload_bilibili(
+                tmp_path,
+                package,
+                BilibiliPublishConfig(sessdata="sess", bili_jct="jct", confirm=True),
+            )
+        )
+
+    assert attempts == ["direct"]

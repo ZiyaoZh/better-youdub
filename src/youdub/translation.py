@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .cancellation import CancellationContext, TaskCancelled
 from .network import TRANSLATION_SERVICE, NetworkRoute, network_router
 
 
@@ -116,14 +117,20 @@ class TranslationResponseError(ValueError):
     """Raised when a model response cannot be normalized into the expected JSON payload."""
 
 
-def translate_task(task_dir: Path, config: TranslationConfig) -> Path:
+def translate_task(
+    task_dir: Path,
+    config: TranslationConfig,
+    *,
+    cancellation: CancellationContext | None = None,
+) -> Path:
     config.validate()
+    _checkpoint(cancellation, "translation:start")
     info = _read_json_object(task_dir / "download.info.json")
     transcript = _read_json_list(task_dir / "transcript.json")
 
     client = _create_openai_client(config)
-    summary = ensure_summary(task_dir, info, transcript, client, config)
-    context = ensure_translation_context(task_dir, info, summary, transcript, client, config)
+    summary = ensure_summary(task_dir, info, transcript, client, config, cancellation=cancellation)
+    context = ensure_translation_context(task_dir, info, summary, transcript, client, config, cancellation=cancellation)
     translated_segments = ensure_segment_translations(
         task_dir,
         info,
@@ -132,7 +139,9 @@ def translate_task(task_dir: Path, config: TranslationConfig) -> Path:
         transcript,
         client,
         config,
+        cancellation=cancellation,
     )
+    _checkpoint(cancellation, "translation:complete")
     final_entries = build_tts_translation_entries(translated_segments)
     return _write_json(task_dir / FINAL_OUTPUT, final_entries)
 
@@ -167,7 +176,10 @@ def ensure_summary(
     transcript: list[dict[str, Any]],
     client: Any,
     config: TranslationConfig,
+    *,
+    cancellation: CancellationContext | None = None,
 ) -> dict[str, Any]:
+    _checkpoint(cancellation, "translation:summary")
     summary_path = task_dir / SUMMARY_OUTPUT
     source_hash = _summary_source_hash(info, transcript, config)
     prompt_hash = _summary_prompt_hash(config)
@@ -214,6 +226,7 @@ def ensure_summary(
         schema_name="summary_translation",
         schema=_summary_response_schema(),
         normalize=_normalize_summary_response,
+        cancellation=cancellation,
     )
 
     title = _clean_text(result.get("title")) or _title_from_info(info)
@@ -243,7 +256,10 @@ def ensure_translation_context(
     transcript: list[dict[str, Any]],
     client: Any,
     config: TranslationConfig,
+    *,
+    cancellation: CancellationContext | None = None,
 ) -> dict[str, Any]:
+    _checkpoint(cancellation, "translation:context")
     context_path = task_dir / CONTEXT_OUTPUT
     source_hash = _translation_context_source_hash(info, summary, transcript, config)
     prompt_hash = _translation_context_prompt_hash(config)
@@ -295,9 +311,12 @@ def ensure_translation_context(
             schema_name="translation_context",
             schema=_translation_context_response_schema(),
             normalize=_normalize_translation_context_response,
+            cancellation=cancellation,
         )
         status = "success"
         error = None
+    except TaskCancelled:
+        raise
     except Exception as exc:
         result = {"content_summary": "", "glossary": [], "corrections": []}
         status = "failed"
@@ -327,7 +346,10 @@ def ensure_segment_translations(
     transcript: list[dict[str, Any]],
     client: Any,
     config: TranslationConfig,
+    *,
+    cancellation: CancellationContext | None = None,
 ) -> list[dict[str, Any]]:
+    _checkpoint(cancellation, "translation:segments")
     output_path = task_dir / SEGMENTS_OUTPUT
     context_hash = _stable_hash(_translation_context_for_prompt(context))
     prompt_hash = _segment_translation_prompt_hash(config)
@@ -358,7 +380,8 @@ def ensure_segment_translations(
             pending.append(record)
 
     for batch in _chunked(pending, config.batch_size):
-        translated = _translate_batch(client, info, summary, context, batch, config)
+        _checkpoint(cancellation, "translation:batch")
+        translated = _translate_batch(client, info, summary, context, batch, config, cancellation=cancellation)
         for item in translated:
             segment_id = item["segment_id"]
             if segment_id not in {segment["segment_id"] for segment in batch}:
@@ -372,6 +395,7 @@ def ensure_segment_translations(
             output_path,
             _segment_cache_payload(complete, context_hash, prompt_hash, config),
         )
+        _checkpoint(cancellation, "translation:batch-complete")
 
     missing = [
         segment["segment_id"]
@@ -578,6 +602,8 @@ def _translate_batch(
     context: dict[str, Any],
     batch: list[dict[str, Any]],
     config: TranslationConfig,
+    *,
+    cancellation: CancellationContext | None = None,
 ) -> list[dict[str, Any]]:
     title = str(summary.get("title") or _title_from_info(info))
     author = str(summary.get("author") or _author_from_info(info))
@@ -629,6 +655,7 @@ def _translate_batch(
         schema_name="segment_translation_batch",
         schema=_segment_translation_response_schema(),
         normalize=lambda raw: _normalize_segment_translation_response(raw, batch),
+        cancellation=cancellation,
     )
 
 
@@ -639,10 +666,13 @@ def _chat_json(
     schema_name: str,
     schema: dict[str, Any],
     normalize: Callable[[Any], Any],
+    *,
+    cancellation: CancellationContext | None = None,
 ) -> Any:
     last_error: Exception | None = None
     for response_format in _response_format_candidates(schema_name, schema, config.force_json_output):
         for attempt in range(1, config.max_retries + 1):
+            _checkpoint(cancellation, f"translation:request:{schema_name}:{attempt}")
             request_messages = _messages_for_attempt(messages, attempt, schema_name)
             request_kwargs = _chat_request_kwargs(
                 config=config,
@@ -653,13 +683,15 @@ def _chat_json(
                 response = client.chat.completions.create(**request_kwargs)
                 raw = _parse_json_response(response)
                 return normalize(raw)
+            except TaskCancelled:
+                raise
             except Exception as exc:
                 last_error = exc
                 if response_format is not None and _response_format_unsupported(exc):
                     break
                 if attempt >= config.max_retries:
                     continue
-                _sleep_before_retry(config, attempt)
+                _sleep_before_retry(config, attempt, cancellation=cancellation)
 
     if last_error is None:
         raise RuntimeError(f"Translation request failed before sending: {schema_name}")
@@ -802,11 +834,24 @@ def _messages_for_attempt(
     ]
 
 
-def _sleep_before_retry(config: TranslationConfig, attempt: int) -> None:
+def _sleep_before_retry(
+    config: TranslationConfig,
+    attempt: int,
+    *,
+    cancellation: CancellationContext | None = None,
+) -> None:
     delay = config.retry_backoff_seconds * (config.retry_backoff_multiplier ** max(attempt - 1, 0))
     delay = min(delay, config.retry_max_backoff_seconds)
     if delay > 0:
-        time.sleep(delay)
+        if cancellation is None:
+            time.sleep(delay)
+        else:
+            cancellation.wait(delay, "translation:retry-backoff")
+
+
+def _checkpoint(cancellation: CancellationContext | None, name: str) -> None:
+    if cancellation is not None:
+        cancellation.checkpoint(name)
 
 
 def _response_text(response: Any) -> str:

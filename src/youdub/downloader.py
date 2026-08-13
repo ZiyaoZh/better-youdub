@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol, TypeVar
 from urllib.parse import urlparse
 
+from .cancellation import CancellationContext
 from .ingest import (
     DOWNLOAD_INFO_NAME,
     source_key_from_download_info,
@@ -65,8 +66,15 @@ class DownloadResult:
     source_key: str
 
 
-def download_url_to_artifacts(url: str, root: Path, config: DownloadConfig | None = None) -> DownloadResult:
+def download_url_to_artifacts(
+    url: str,
+    root: Path,
+    config: DownloadConfig | None = None,
+    *,
+    cancellation: CancellationContext | None = None,
+) -> DownloadResult:
     config = config or DownloadConfig()
+    _checkpoint(cancellation, "download:start")
     url = url.strip()
     if not url:
         raise ValueError("URL is required")
@@ -78,7 +86,9 @@ def download_url_to_artifacts(url: str, root: Path, config: DownloadConfig | Non
         info = _run_download_network(
             download_config,
             lambda routed_config: _extract_info(url, routed_config),
+            cancellation=cancellation,
         )
+        _checkpoint(cancellation, "download:metadata-complete")
         sanitized_info = _sanitize_info(info, download_config)
         source_key = source_key_from_download_info(sanitized_info)
         task_dir = task_folder_from_download_info(sanitized_info, root)
@@ -92,7 +102,14 @@ def download_url_to_artifacts(url: str, root: Path, config: DownloadConfig | Non
             if download_config.force or not _has_nonempty_file(media_path):
                 _run_download_network(
                     download_config,
-                    lambda routed_config: _download_media(url, task_dir, media_path, routed_config),
+                    lambda routed_config: _download_media(
+                        url,
+                        task_dir,
+                        media_path,
+                        routed_config,
+                        cancellation=cancellation,
+                    ),
+                    cancellation=cancellation,
                 )
 
             if not _has_nonempty_file(media_path):
@@ -214,9 +231,17 @@ def _sanitize_info(info: dict[str, Any], config: DownloadConfig) -> dict[str, An
     return sanitized
 
 
-def _download_media(url: str, task_dir: Path, media_path: Path, config: DownloadConfig) -> None:
+def _download_media(
+    url: str,
+    task_dir: Path,
+    media_path: Path,
+    config: DownloadConfig,
+    *,
+    cancellation: CancellationContext | None = None,
+) -> None:
     last_error: Exception | None = None
     for format_selector in format_candidates(config.max_height):
+        _checkpoint(cancellation, "download:format-candidate")
         staging_dir = _create_staging_dir(task_dir)
         try:
             staged_media = staging_dir / DOWNLOAD_VIDEO_NAME
@@ -231,6 +256,7 @@ def _download_media(url: str, task_dir: Path, media_path: Path, config: Download
             if format_selector is not None:
                 options["format"] = format_selector
             try:
+                _checkpoint(cancellation, "download:yt-dlp")
                 with _youtube_dl_factory(config)(options) as ydl:
                     ydl.download([url])
                 _normalize_downloaded_media(staging_dir, staged_media)
@@ -238,6 +264,7 @@ def _download_media(url: str, task_dir: Path, media_path: Path, config: Download
                     raise RuntimeError("yt-dlp did not produce a non-empty staged media file")
                 staged_media.replace(media_path)
                 _publish_staged_cover(staging_dir, task_dir)
+                _checkpoint(cancellation, "download:format-complete")
                 return
             except Exception as exc:
                 last_error = exc
@@ -337,7 +364,13 @@ def _clean_proxy(proxy: str | None) -> str | None:
     return ""
 
 
-def _run_download_network(config: DownloadConfig, operation: Callable[[DownloadConfig], _T]) -> _T:
+def _run_download_network(
+    config: DownloadConfig,
+    operation: Callable[[DownloadConfig], _T],
+    *,
+    cancellation: CancellationContext | None = None,
+) -> _T:
+    _checkpoint(cancellation, "download:route")
     return network_router.run(
         VIDEO_SERVICE,
         config.proxy,
@@ -345,6 +378,11 @@ def _run_download_network(config: DownloadConfig, operation: Callable[[DownloadC
         retry_cycles=1,
         recheck_on_retry=True,
     )
+
+
+def _checkpoint(cancellation: CancellationContext | None, name: str) -> None:
+    if cancellation is not None:
+        cancellation.checkpoint(name)
 
 
 def _download_config_for_route(config: DownloadConfig, route: NetworkRoute) -> DownloadConfig:

@@ -62,6 +62,7 @@ class Task:
     updated_at: str = field(default_factory=utc_now)
     error: str | None = None
     config: dict[str, Any] = field(default_factory=dict)
+    termination: dict[str, Any] = field(default_factory=dict)
     resources_cleaned_at: str | None = None
     resources_cleaned_bytes: int = 0
 
@@ -80,6 +81,7 @@ class Task:
             "updated_at": self.updated_at,
             "error": self.error,
             "config": self.config,
+            "termination": self.termination,
             "resources_cleaned_at": self.resources_cleaned_at,
             "resources_cleaned_bytes": self.resources_cleaned_bytes,
         }
@@ -103,6 +105,7 @@ class Task:
             updated_at=data.get("updated_at", utc_now()),
             error=data.get("error"),
             config=data.get("config") if isinstance(data.get("config"), dict) else {},
+            termination=data.get("termination") if isinstance(data.get("termination"), dict) else {},
             resources_cleaned_at=data.get("resources_cleaned_at"),
             resources_cleaned_bytes=max(0, int(data.get("resources_cleaned_bytes") or 0)),
         )
