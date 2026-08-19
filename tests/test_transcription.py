@@ -247,21 +247,11 @@ def test_run_whisper_passes_language_and_initial_prompt(tmp_path: Path, monkeypa
             }
             return {"language": "zh", "segments": []}
 
-    def fake_load_model(
-        model_name,
-        *,
-        download_root,
-        device,
-        compute_type,
-        threads,
-        asr_options=None,
-    ):
+    def fake_load_model(model_name, *, download_root, device, asr_options=None):
         calls["load_model"] = {
             "model_name": model_name,
             "download_root": download_root,
             "device": device,
-            "compute_type": compute_type,
-            "threads": threads,
             "asr_options": asr_options,
         }
         return FakeModel()
@@ -272,7 +262,6 @@ def test_run_whisper_passes_language_and_initial_prompt(tmp_path: Path, monkeypa
     monkeypatch.setattr(transcription, "prepare_whisperx_runtime", lambda _config: None)
     monkeypatch.setattr(transcription, "_resolve_device", lambda _device: "cpu")
     monkeypatch.setattr(transcription, "cleanup_gpu_memory", lambda label: cleanup_calls.append(label))
-    monkeypatch.setenv("YOUDUB_WHISPER_CPU_THREADS", "6")
 
     transcription.run_whisper(
         tmp_path,
@@ -290,8 +279,6 @@ def test_run_whisper_passes_language_and_initial_prompt(tmp_path: Path, monkeypa
         "language": "zh",
         "initial_prompt": "以下是普通话的句子。",
     }
-    assert calls["load_model"]["compute_type"] == "int8"
-    assert calls["load_model"]["threads"] == 6
     assert calls["transcribe"] == {
         "audio_path": str(tmp_path / "audio_tts.wav"),
         "batch_size": 7,
@@ -299,75 +286,6 @@ def test_run_whisper_passes_language_and_initial_prompt(tmp_path: Path, monkeypa
         "initial_prompt": "以下是普通话的句子。",
     }
     assert cleanup_calls == ["whisperx-whisper"]
-
-
-def test_run_whisper_reloads_on_cpu_with_int8_after_cuda_oom(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    (tmp_path / "audio_vocals.wav").write_bytes(b"audio")
-    load_calls = []
-
-    class FakeModel:
-        def __init__(self, device: str) -> None:
-            self.device = device
-
-        def transcribe(self, _audio_path: str, *, batch_size: int) -> dict[str, object]:
-            assert batch_size == 4
-            if self.device == "cuda":
-                raise RuntimeError("CUDA out of memory while allocating a tensor")
-            return {"language": "en", "segments": []}
-
-    def fake_load_model(
-        _model_name,
-        *,
-        download_root,
-        device,
-        compute_type="float16",
-        threads=None,
-        asr_options=None,
-    ):
-        load_calls.append((device, compute_type, threads))
-        return FakeModel(device)
-
-    monkeypatch.setitem(sys.modules, "whisperx", types.SimpleNamespace(load_model=fake_load_model))
-    monkeypatch.setattr(transcription, "prepare_whisperx_runtime", lambda _config: None)
-    monkeypatch.setattr(transcription, "_resolve_device", lambda _device: "cuda")
-    monkeypatch.setattr(transcription, "cleanup_gpu_memory", lambda _label: None)
-    monkeypatch.setattr("youdub.gpu.cleanup_gpu_memory", lambda _label: None)
-    monkeypatch.setenv("YOUDUB_WHISPER_CPU_THREADS", "8")
-
-    output = transcription.run_whisper(
-        tmp_path,
-        WhisperXConfig(models_dir=tmp_path / "models", batch_size=4),
-    )
-
-    assert output == tmp_path / transcription.WHISPER_OUTPUT
-    assert load_calls == [("cuda", "float16", None), ("cpu", "int8", 8)]
-
-
-def test_cpu_runtime_options_do_not_depend_on_load_model_signature(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    def wrapped_load_model(*_args, **_kwargs):
-        raise AssertionError("This function is only used for signature inspection")
-
-    monkeypatch.setenv("YOUDUB_WHISPER_CPU_THREADS", "7")
-
-    kwargs = transcription._whisperx_load_model_kwargs(
-        wrapped_load_model,
-        download_root=str(tmp_path),
-        device="cpu",
-        config=WhisperXConfig(models_dir=tmp_path),
-    )
-
-    assert kwargs == {
-        "download_root": str(tmp_path),
-        "device": "cpu",
-        "compute_type": "int8",
-        "threads": 7,
-    }
 
 
 def test_run_align_cleans_gpu_memory(tmp_path: Path, monkeypatch) -> None:

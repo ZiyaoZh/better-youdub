@@ -4,8 +4,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .gpu import run_with_cuda_oom_fallback
-
 
 class CommandError(RuntimeError):
     def __init__(self, command: list[str], returncode: int, stderr: str):
@@ -75,29 +73,19 @@ def separate_audio(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     demucs_root = output_dir / "demucs"
-
-    def run_demucs(device: str) -> None:
-        command = [
-            "demucs",
-            "--two-stems",
-            "vocals",
-            "--name",
-            model_name,
-            "--segment",
-            str(segment_seconds),
-            "--out",
-            str(demucs_root),
-        ]
-        if device == "cpu":
-            command.extend(["--device", "cpu"])
-        command.append(str(audio_path))
-        run_command(command)
-
-    run_with_cuda_oom_fallback(
-        run_demucs,
-        device="auto",
-        label="demucs-separate-audio",
-    )
+    command = [
+        "demucs",
+        "--two-stems",
+        "vocals",
+        "--name",
+        model_name,
+        "--segment",
+        str(segment_seconds),
+        "--out",
+        str(demucs_root),
+        str(audio_path),
+    ]
+    run_command(command)
 
     source_dir = demucs_root / model_name / audio_path.stem
     source_vocals = source_dir / "vocals.wav"

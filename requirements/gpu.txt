@@ -16,4 +16,4 @@ soundfile
 audiostretchy
 huggingface-hub<1.0
 whisperx @ git+https://github.com/m-bain/whisperx.git@d32ec3e3012ec4c0934f4088424c32f3f038b249
-voxcpm>=2.0.3
+voxcpm
