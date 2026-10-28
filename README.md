@@ -154,6 +154,20 @@ export YOUDUB_GID="$(id -g)"
 docker compose -f compose.gpu.yml up --build -d
 ```
 
+如果宿主机能访问 YouTube，但容器解析到错误地址，可使用 `compose.dns.yml` 为 GPU
+服务指定 DNS。在 `.env` 中设置：
+
+```dotenv
+COMPOSE_FILE=compose.gpu.yml:compose.dns.yml
+YOUDUB_DNS_SERVER=实际可用的上游DNS地址
+```
+
+DNS 地址必须能从容器访问。使用宿主机的 `systemd-resolved` 时，可以从
+`/run/systemd/resolve/resolv.conf` 查看上游地址；宿主机的 `127.0.0.53` 不能直接作为
+桥接容器的 DNS。随后运行 `docker compose up -d`，或显式运行
+`docker compose -f compose.gpu.yml -f compose.dns.yml up -d`。后续重建也应保留该覆盖
+文件；只传 `-f compose.gpu.yml` 会忽略 `.env` 中的 `COMPOSE_FILE`。
+
 首次构建和首次运行会下载较大的 Python 依赖及模型。启动完成后打开：
 
 ```text

@@ -1,0 +1,6 @@
+# Use together with compose.gpu.yml when Docker's default
+# upstream DNS differs from the working resolver on the host.
+services:
+  youdub-gpu:
+    dns:
+      - ${YOUDUB_DNS_SERVER:?Set YOUDUB_DNS_SERVER to a resolver reachable from the container}
