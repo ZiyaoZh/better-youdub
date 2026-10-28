@@ -128,3 +128,29 @@ def test_task_folder_from_download_info_avoids_foreign_collision(tmp_path: Path)
     folder = task_folder_from_download_info(info, tmp_path / "videos")
 
     assert folder.name == "20240102 Sample Title__demo123"
+
+
+def test_same_video_task_types_have_independent_identity_and_outputs(tmp_path):
+    import json
+    from youdub.models import TaskType, Task
+    from youdub.ingest import create_task_from_download_artifacts
+    from youdub.storage import TaskStore
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    info = tmp_path / "source.info.json"
+    info.write_text(json.dumps({"id": "same-video", "extractor_key": "YouTube", "title": "Same video", "uploader": "Demo"}))
+    root = tmp_path / "videos"
+    dub = create_task_from_download_artifacts(source, info, root)
+    sub = create_task_from_download_artifacts(source, info, root, task_type=TaskType.SUB)
+    assert dub.id != sub.id and dub.folder != sub.folder
+    assert dub.source_key != sub.source_key
+    (dub.folder / "video.mp4").write_bytes(b"dubbed-output")
+    assert not (sub.folder / "video.mp4").exists()
+    store = TaskStore(tmp_path / "tasks.json")
+    store.upsert(dub)
+    store.upsert(sub)
+    assert store.get(sub.id).task_type == TaskType.SUB
+    assert store.upsert(sub).task_type == TaskType.SUB
+    legacy = dub.to_dict()
+    legacy.pop("task_type")
+    assert Task.from_dict(legacy).task_type == TaskType.DUB

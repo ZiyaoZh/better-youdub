@@ -669,7 +669,7 @@ function renderTasks() {
     item.type = "button"
     item.className = `task-item ${task.id === state.selectedId ? "active" : ""}`
     item.innerHTML = `
-      <span class="task-title">${escapeHtml(task.title || task.source || task.id)}</span>
+      <span class="task-title">${task.task_type === "sub" ? "熟肉" : "中配"} · ${escapeHtml(task.title || task.source || task.id)}</span>
       <span class="task-meta">
         <span class="status-badge ${statusClass(effectiveStatus)}">${statusLabel(effectiveStatus)}</span>
         <span>${fmtTime(task.updated_at)}</span>
@@ -712,7 +712,7 @@ async function selectTask(taskId) {
 function renderDetail(task, options = {}) {
   $("emptyDetail").classList.add("hidden")
   $("taskDetail").classList.remove("hidden")
-  $("detailTitle").textContent = task.title || task.id
+  $("detailTitle").textContent = `${task.task_type === "sub" ? "熟肉" : "中配"} · ${task.title || task.id}`
   $("detailSource").textContent = task.source || ""
   const effectiveStatus = effectiveTaskStatus(task)
   $("detailStatus").className = `status-badge ${statusClass(effectiveStatus)}`
@@ -818,6 +818,7 @@ function renderSteps(task) {
   grid.appendChild(renderDownloadConfigCard(task))
   const hasDownload = taskHasArtifact(task, "download-video")
   for (const [step, label] of STEPS) {
+    if (task.task_type === "sub" && ["tts", "transcribe-tts", "inspect-tts", "redub-tts"].includes(step)) continue
     const status = task.steps?.[step] || "pending"
     const configKey = STEP_CONFIG_SECTIONS[step]
     const card = document.createElement("div")
@@ -991,6 +992,7 @@ function renderTaskConfig(task, options = {}) {
   const values = config[activeSection.key] || {}
   fields.innerHTML = ""
   for (const [key, label, type, meta = {}] of activeSection.fields) {
+    if (task.task_type === "sub" && activeSection.key === "workflow" && key === "enable_tts_redub") continue
     const value = meta.transient ? transientConfigValue(activeSection.key, key) : values[key]
     fields.appendChild(renderConfigField(activeSection.key, key, label, type, meta, value))
   }
@@ -1308,6 +1310,7 @@ async function submitUrl(event) {
       method: "POST",
       body: JSON.stringify({
         url: $("urlInput").value,
+        task_type: $("taskTypeInput").value,
       }),
     })
     $("urlInput").value = ""

@@ -298,3 +298,33 @@ def test_pipeline_marks_bilibili_publish_dry_run_success(tmp_path: Path, monkeyp
     assert result.error is None
     assert result.steps[PipelineStep.PUBLISH_BILIBILI.value] == StepStatus.SUCCESS
     assert (tmp_path / "bilibili.dry-run.json").exists()
+
+
+def test_sub_task_skips_dubbing_and_generates_original_timing_subtitles(tmp_path, monkeypatch):
+    import json
+    from youdub.models import TaskType
+
+    task = Task(id="sub", title="sub", source="demo", folder=tmp_path, task_type=TaskType.SUB)
+    (tmp_path / "translation.json").write_text(json.dumps([
+        {"segment_id": 0, "start": 0, "end": 2, "text": "Hello!", "translation": "你好", "source_reviewed": True}
+    ]))
+    runner = PipelineRunner()
+    for step in (PipelineStep.TTS, PipelineStep.TRANSCRIBE_TTS, PipelineStep.INSPECT_TTS, PipelineStep.REDUB_TTS):
+        with pytest.raises(ValueError, match="熟肉"):
+            runner.run_step(task, step)
+    runner.run_step(task, PipelineStep.SUBTITLE)
+    assert "你好\nHello!" in (tmp_path / "subtitles.srt").read_text()
+    calls = []
+    monkeypatch.setattr(pipeline, "synthesize_subtitled_video", lambda *args: calls.append(args))
+    runner.run_step(task, PipelineStep.SYNTHESIZE)
+    assert calls[0][0] == tmp_path
+
+
+def test_sub_task_enables_source_correction_before_translation(tmp_path, monkeypatch):
+    from youdub.models import TaskType
+    task = Task(id="sub", title="sub", source="demo", folder=tmp_path, task_type=TaskType.SUB)
+    config = TranslationConfig(api_key="test", model="test")
+    calls = []
+    monkeypatch.setattr(pipeline, "translate_task", lambda *args, **kwargs: calls.append(kwargs))
+    PipelineRunner(translation_config=config).run_step(task, PipelineStep.TRANSLATE)
+    assert calls == [{"correct_source": True}]

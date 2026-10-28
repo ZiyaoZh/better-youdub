@@ -621,3 +621,91 @@ def test_segment_translation_cache_changes_when_prompt_changes(tmp_path, monkeyp
     assert second[0]["translation"] == "飞镖猴B。"
     assert cache["segments"][0]["translation"] == "飞镖猴B。"
     assert len(client.chat.completions.calls) == 2
+
+
+def test_source_correction_preserves_original_and_times_and_reuses_cache(tmp_path):
+    import json
+    from youdub.translation import ensure_corrected_transcript, build_tts_translation_entries
+    transcript = [{"start": 1.2, "end": 3.4, "speaker": "A", "text": "the tax shooter"}]
+    config = TranslationConfig(api_key="test", model="test")
+    client = _FakeClient([_response('{"segments":[{"segment_id":0,"text":"The Tack Shooter."}]}')])
+    corrected = ensure_corrected_transcript(tmp_path, {"title": "Bloons TD 6"}, transcript, client, config)
+    assert corrected[0] == {"segment_id": 0, "start": 1.2, "end": 3.4, "speaker": "A",
+                            "text": "The Tack Shooter.", "original_text": "the tax shooter"}
+    assert transcript[0]["text"] == "the tax shooter"
+    assert json.loads((tmp_path / "transcript.corrected.json").read_text())["status"] == "success"
+    assert ensure_corrected_transcript(tmp_path, {"title": "Bloons TD 6"}, transcript, client, config) == corrected
+    assert len(client.chat.completions.calls) == 1
+    result = build_tts_translation_entries([{**corrected[0], "translation": "图钉塔"}])[0]
+    assert result["source_text"] == "The Tack Shooter."
+    assert result["original_text"] == "the tax shooter"
+    assert result["source_reviewed"] is True
+
+
+def test_source_correction_rejects_missing_duplicate_and_empty_responses():
+    import pytest
+    from youdub.translation import _normalize_corrected_segments, TranslationResponseError
+    batch = [{"segment_id": 0, "text": "Hello"}]
+    for items in ([], [{"segment_id": 1, "text": "Hello"}], [{"segment_id": 0, "text": ""}],
+                  [{"segment_id": 0, "text": "Hello"}] * 2, [{"segment_id": 0, "text": "你好"}]):
+        with pytest.raises(TranslationResponseError):
+            _normalize_corrected_segments({"segments": items}, batch)
+    result = _normalize_corrected_segments({"segments": [{"segment_id": 0, "text": "Hello!", "start": 999}]},
+                                           [{"segment_id": 0, "text": "Hello", "start": 1}])
+    assert result[0]["start"] == 1
+
+
+def test_source_correction_resumes_completed_batches_and_invalidates_on_source_change(tmp_path):
+    import pytest
+    from youdub.translation import ensure_corrected_transcript
+    config = TranslationConfig(api_key="test", model="test", batch_size=1, max_retries=1, force_json_output=False)
+    transcript = [{"start": 0, "end": 1, "text": "first"}, {"start": 1, "end": 2, "text": "second"}]
+    first = _FakeClient([_response('{"segments":[{"segment_id":0,"text":"First."}]}'), RuntimeError("offline")])
+    with pytest.raises(RuntimeError):
+        ensure_corrected_transcript(tmp_path, {}, transcript, first, config)
+    resumed = _FakeClient([_response('{"segments":[{"segment_id":1,"text":"Second."}]}')])
+    result = ensure_corrected_transcript(tmp_path, {}, transcript, resumed, config)
+    assert [item["text"] for item in result] == ["First.", "Second."]
+    assert len(resumed.chat.completions.calls) == 1
+    transcript[0]["text"] = "new"
+    changed = _FakeClient([_response('{"segments":[{"segment_id":0,"text":"New."}]}'),
+                           _response('{"segments":[{"segment_id":1,"text":"Second."}]}')])
+    assert ensure_corrected_transcript(tmp_path, {}, transcript, changed, config)[0]["original_text"] == "new"
+    assert len(changed.chat.completions.calls) == 2
+
+
+def test_reviewed_source_reaches_translation_and_subtitles_without_overwriting_asr(tmp_path, monkeypatch):
+    import json
+    from youdub import translation
+    from youdub.subtitles import build_bilingual_subtitles
+    original = [{"start": 1, "end": 3, "speaker": "A", "text": "the tax shooter"}]
+    (tmp_path / "transcript.json").write_text(json.dumps(original))
+    (tmp_path / "download.info.json").write_text('{"title":"Bloons TD 6"}')
+    config = TranslationConfig(api_key="test", model="test")
+    client = _FakeClient([
+        _response('{"segments":[{"segment_id":0,"text":"The Tack Shooter."}]}'),
+        _response('{"segments":[{"segment_id":0,"translation":"图钉塔。"}]}'),
+    ])
+    monkeypatch.setattr(translation, "_create_openai_client", lambda config: client)
+    monkeypatch.setattr(translation, "ensure_summary", lambda *args, **kwargs: {})
+    monkeypatch.setattr(translation, "ensure_translation_context", lambda *args, **kwargs: {})
+    output = translation.translate_task(tmp_path, config, correct_source=True)
+    result = json.loads((tmp_path / "translation.json").read_text())
+    assert result[0]["source_text"] == "The Tack Shooter."
+    assert result[0]["original_text"] == "the tax shooter"
+    payload = json.loads(client.chat.completions.calls[1]["messages"][1]["content"])
+    assert payload["segments"][0]["text"] == "The Tack Shooter."
+    build_bilingual_subtitles(tmp_path)
+    assert "图钉塔\nThe Tack Shooter." in (tmp_path / "subtitles.srt").read_text()
+    assert json.loads((tmp_path / "transcript.json").read_text()) == original
+
+
+def test_cached_translation_keeps_review_metadata_for_unchanged_source(tmp_path):
+    config = TranslationConfig(api_key="test", model="test")
+    raw = [{"start": 1, "end": 2, "text": "Hello."}]
+    client = _FakeClient([_response('{"segments":[{"segment_id":0,"translation":"你好。"}]}')])
+    ensure_segment_translations(tmp_path, {}, {}, {}, raw, client, config)
+    reviewed = [{**raw[0], "original_text": "Hello."}]
+    result = ensure_segment_translations(tmp_path, {}, {}, {}, reviewed, client, config)
+    assert result[0]["original_text"] == "Hello."
+    assert len(client.chat.completions.calls) == 1

@@ -11,6 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from youdub.downloader import DownloadResult
@@ -44,14 +46,14 @@ def _client(monkeypatch, tmp_path: Path) -> TestClient:
     return TestClient(create_app())
 
 
-def _wait_for_task_idle(client: TestClient, task_id: str, timeout: float = 2.0) -> dict:
+def _wait_for_task_idle(client: TestClient, task_id: str, timeout: float = 2.0, *, expected_status: str | None = None) -> dict:
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
         response = client.get(f"/api/tasks/{task_id}")
         response.raise_for_status()
         last = response.json()
-        if not last["queued"] and not last["running"]:
+        if not last["queued"] and not last["running"] and (expected_status is None or last["display_status"] == expected_status):
             return last
         time.sleep(0.01)
     raise AssertionError(f"Task did not become idle: {last}")
@@ -98,7 +100,9 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert 'id="systemLine"' in index
     assert 'id="taskPager"' in index
     assert 'id="finalVideo"' not in index
-    assert "20260805-task-parameter-copy" in index
+    assert "20261028-task-types" in index
+    assert 'id="taskTypeInput"' in index
+    assert 'value="sub"' in index
     assert 'id="detailIdentity"' not in index
     assert "身份标识" not in index
     assert 'id="copyTaskConfigButton"' in index
@@ -111,7 +115,7 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert 'id="cleanTaskResourcesButton"' in index
     assert "/assets/app.js?v=" in index
     assert "/assets/styles.css?v=" in index
-    assert "20260812-task-cancellation" in index
+    assert "20261028-task-types" in index
     app_js = client.get("/assets/app.js").text
     assert "完整链路包含局部重配" in app_js
     assert "待上传" in app_js
@@ -952,7 +956,7 @@ def test_web_url_task_uses_and_saves_download_config(monkeypatch, tmp_path: Path
     client = _client(monkeypatch, tmp_path)
     captured = {}
 
-    def fake_download(url: str, root: Path, config: object) -> DownloadResult:
+    def fake_download(url: str, root: Path, config: object, **kwargs: object) -> DownloadResult:
         captured["url"] = url
         captured["root"] = root
         captured["config"] = config
@@ -1063,12 +1067,13 @@ def test_web_url_draft_reuses_existing_task_by_normalized_url(monkeypatch, tmp_p
     assert len(client.get("/api/tasks").json()["tasks"]) == 1
 
 
-def test_web_downloads_url_draft_with_saved_config_and_hydrates_same_task(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("task_type", ["dub", "sub"])
+def test_web_downloads_url_draft_with_saved_config_and_hydrates_same_task(monkeypatch, tmp_path: Path, task_type) -> None:
     client = _client(monkeypatch, tmp_path)
     draft = client.post(
         "/api/tasks/url-draft",
         headers={"X-YouDub-Identity": DEVICE_A},
-        json={"url": "https://example.test/watch?v=abc123", "max_height": 720},
+        json={"url": "https://example.test/watch?v=abc123", "max_height": 720, "task_type": task_type},
     ).json()
     config = draft["config"]
     config["download"]["max_height"] = 360
@@ -1077,7 +1082,7 @@ def test_web_downloads_url_draft_with_saved_config_and_hydrates_same_task(monkey
     assert updated.status_code == 200
     captured = {}
 
-    def fake_download(url: str, root: Path, config: object) -> DownloadResult:
+    def fake_download(url: str, root: Path, config: object, **kwargs: object) -> DownloadResult:
         captured["url"] = url
         captured["config"] = config
         task_dir = root / "Web" / "20260614 Hydrated__abc123"
@@ -1115,10 +1120,11 @@ def test_web_downloads_url_draft_with_saved_config_and_hydrates_same_task(monkey
     assert task["id"] == draft["id"]
     assert task["identity"] == DEVICE_A
     assert task["title"] == "Hydrated"
+    assert task["task_type"] == task_type
     assert task["source"] == "https://example.test/watch?v=abc123"
-    assert task["source_key"] == "youtube:abc123"
+    assert task["source_key"] == "youtube:abc123" + (":sub" if task_type == "sub" else "")
     assert task["author"] == "Web"
-    assert task["folder"] == str(tmp_path / "videos" / "Web" / "20260614 Hydrated")
+    assert task["folder"] == str(tmp_path / "videos" / "Web" / ("20260614 Hydrated_sub" if task_type == "sub" else "20260614 Hydrated"))
     assert task["steps"]["ingest"] == "success"
     assert task["artifacts"][0]["key"] == "download-video"
     assert not Path(draft["folder"]).exists()
@@ -1131,7 +1137,7 @@ def test_web_downloads_url_draft_with_saved_config_and_hydrates_same_task(monkey
 def test_web_url_draft_download_merges_existing_stable_task(monkeypatch, tmp_path: Path) -> None:
     client = _client(monkeypatch, tmp_path)
 
-    def fake_initial_download(url: str, root: Path, config: object) -> DownloadResult:
+    def fake_initial_download(url: str, root: Path, config: object, **kwargs: object) -> DownloadResult:
         task_dir = root / "Web" / "20260614 Existing"
         task_dir.mkdir(parents=True, exist_ok=True)
         info = {
@@ -1188,7 +1194,7 @@ def test_web_run_all_downloads_url_draft_before_pipeline_steps(monkeypatch, tmp_
     assert client.put(f"/api/tasks/{draft['id']}/config", json={"config": config}).status_code == 200
     captured = {"steps": []}
 
-    def fake_download(url: str, root: Path, config: object) -> DownloadResult:
+    def fake_download(url: str, root: Path, config: object, **kwargs: object) -> DownloadResult:
         captured["download_url"] = url
         captured["download_max_height"] = config.max_height
         task_dir = root / "Web" / "20260614 RunAll__abc123"
@@ -1963,7 +1969,7 @@ def test_web_terminate_request_keeps_running_task_in_terminating_state(monkeypat
     finally:
         release.set()
 
-    payload = _wait_for_task_idle(client, task["id"])
+    payload = _wait_for_task_idle(client, task["id"], expected_status="terminated")
     assert payload["display_status"] == "terminated"
     assert payload["termination"]["state"] == "terminated"
     assert payload["termination"]["released_at"]
@@ -1973,7 +1979,7 @@ def test_web_url_task_accepts_cookies_content_without_echoing_it(monkeypatch, tm
     client = _client(monkeypatch, tmp_path)
     captured = {}
 
-    def fake_download(url: str, root: Path, config: object) -> DownloadResult:
+    def fake_download(url: str, root: Path, config: object, **kwargs: object) -> DownloadResult:
         captured["config"] = config
         task_dir = root / "Web" / "20260614 CookieSample__abc123"
         task_dir.mkdir(parents=True)
@@ -2346,3 +2352,72 @@ def test_web_settings_write_runtime_config_and_do_not_echo_secrets(monkeypatch, 
         ".youtube.com\tTRUE\t/\tTRUE\t1815872581\tLOGIN_INFO\tsecret\n"
         ".youtube.com\tTRUE\t/\tFALSE\t1815872581\tSID\tsecret2\n"
     )
+
+
+def test_task_types_create_separate_drafts_and_select_pipeline(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    from youdub.models import TaskType
+    url = "https://www.youtube.com/watch?v=type-test"
+    dub = client.post("/api/tasks/url-draft", json={"url": url}).json()
+    sub = client.post("/api/tasks/url-draft", json={"url": url, "task_type": "sub"}).json()
+    assert dub["task_type"] == "dub"
+    assert sub["task_type"] == "sub"
+    assert dub["id"] != sub["id"]
+    assert client.post("/api/tasks/url-draft", json={"url": url, "task_type": "sub"}).json()["id"] == sub["id"]
+    assert client.post("/api/tasks/url-draft", json={"url": url, "task_type": "wrong"}).status_code == 422
+    task = web_module._store().get(sub["id"])
+    assert task.task_type == TaskType.SUB
+    task.config = {"workflow": {"enable_tts_redub": True}}
+    steps = web_module._run_all_steps_for_task(task)
+    assert steps == (PipelineStep.EXTRACT_AUDIO, PipelineStep.SEPARATE_AUDIO, PipelineStep.TRANSCRIBE,
+                     PipelineStep.TRANSLATE, PipelineStep.SUBTITLE, PipelineStep.SYNTHESIZE, PipelineStep.PREPARE_PUBLISH)
+    assert PipelineStep.TTS in web_module._run_all_steps_for_task(web_module._store().get(dub["id"]))
+    for step in ("tts", "transcribe-tts", "inspect-tts", "redub-tts"):
+        assert client.post(f"/api/tasks/{sub['id']}/run", json={"step": step}).status_code == 422
+    summaries = client.get("/api/tasks").json()["tasks"]
+    assert {t["task_type"] for t in summaries} == {"dub", "sub"}
+    assert all("config" not in t and "artifacts" not in t and "step_completion" not in t for t in summaries)
+
+
+def test_sub_task_run_all_executes_basic_stages_without_dubbing(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "original.mp4"
+    source.write_bytes(b"original")
+    task = client.post("/api/tasks/local", json={"source": str(source), "task_type": "sub"}).json()
+    called = []
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            pass
+
+        def run_step(self, current, step, task_lock=None):
+            assert current.task_type.value == "sub"
+            called.append(step.value)
+            current.mark_step(step, StepStatus.SUCCESS)
+            current.status = TaskStatus.SUCCESS
+            return current
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+    response = client.post(f"/api/tasks/{task['id']}/run-all")
+    assert response.status_code == 200
+    finished = _wait_for_task_idle(client, task["id"])
+    assert finished["status"] == "success"
+    assert called == ["extract-audio", "separate-audio", "transcribe", "translate", "subtitle", "synthesize", "prepare-publish"]
+
+
+def test_sub_translation_requires_review_artifact_and_cleans_it_with_downstream(monkeypatch, tmp_path):
+    from youdub.models import TaskType, Task
+    client = _client(monkeypatch, tmp_path)
+    folder = tmp_path / "review"
+    folder.mkdir()
+    task = Task(id="review", title="review", source="source", folder=folder, task_type=TaskType.SUB)
+    for name in web_module.STEP_OUTPUTS[PipelineStep.TRANSLATE]:
+        (folder / name).write_text("{}")
+    task.mark_step(PipelineStep.TRANSLATE, StepStatus.SUCCESS)
+    assert not web_module._step_completed(task, PipelineStep.TRANSLATE)
+    (folder / "transcript.corrected.json").write_text('{"status":"success"}')
+    assert web_module._step_completed(task, PipelineStep.TRANSLATE)
+    (folder / "transcript.json").write_text("original")
+    web_module._clear_step_outputs(task, PipelineStep.TRANSLATE)
+    assert not (folder / "transcript.corrected.json").exists()
+    assert (folder / "transcript.json").read_text() == "original"

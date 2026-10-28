@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .models import PipelineStep, StepStatus, Task
+from .models import PipelineStep, StepStatus, Task, TaskType
 
 DOWNLOAD_INFO_NAME = "download.info.json"
 TASK_METADATA_NAME = "task.json"
@@ -64,6 +64,7 @@ def create_task_from_download_artifacts(
     info_path: Path,
     root: Path,
     cover_path: Path | None = None,
+    task_type: TaskType = TaskType.DUB,
 ) -> Task:
     source = _resolve_file(source, "Source media")
     info_path = _resolve_file(info_path, "Download info")
@@ -73,7 +74,11 @@ def create_task_from_download_artifacts(
     source_key = source_key_from_download_info(info)
     author = author_from_download_info(info)
     task_title = slugify(title_from_download_info(info))
+    if task_type == TaskType.SUB:
+        source_key += ":sub"
     task_folder = task_folder_from_download_info(info, root)
+    if task_type == TaskType.SUB:
+        task_folder = task_folder.with_name(task_folder.name + "_sub")
     task_folder.mkdir(parents=True, exist_ok=True)
 
     _copy_video_if_needed(source, task_folder / "download.mp4")
@@ -83,6 +88,7 @@ def create_task_from_download_artifacts(
 
     task = Task(
         id=stable_task_id(source_key),
+        task_type=task_type,
         title=task_title,
         source=str(info.get("webpage_url") or source),
         folder=task_folder,

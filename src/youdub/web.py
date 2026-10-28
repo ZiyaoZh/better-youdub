@@ -36,7 +36,7 @@ from .downloader import DownloadResult, download_url_to_artifacts, supported_js_
 from .gpu import cleanup_gpu_memory, resolve_device
 from .ingest import create_pending_url_task, create_task_from_download_artifacts, create_task_from_local_media
 from .locking import TASK_LOCK_NAME, TaskLock, TaskLockBusy, task_is_locked
-from .models import PipelineStep, StepStatus, Task, TaskStatus, utc_now
+from .models import PipelineStep, StepStatus, Task, TaskStatus, TaskType, utc_now
 from .network import network_router
 from .pipeline import PipelineRunner
 from .resource_cleanup import (
@@ -70,6 +70,7 @@ ARTIFACTS: dict[str, tuple[str, str]] = {
     "publish-markdown": ("publish.md", "text/markdown"),
     "summary": ("summary.json", "application/json"),
     "transcript": ("transcript.json", "application/json"),
+    "corrected-transcript": ("transcript.corrected.json", "application/json"),
     "translation": ("translation.json", "application/json"),
     "tts-quality": ("tts.quality.json", "application/json"),
     "tts-redub-plan": ("tts.redub.plan.json", "application/json"),
@@ -220,6 +221,7 @@ class TaskRuntime:
 
 
 class UrlTaskRequest(BaseModel):
+    task_type: TaskType = TaskType.DUB
     url: str
     use_cookies: bool = True
     cookies_path: str | None = None
@@ -229,6 +231,7 @@ class UrlTaskRequest(BaseModel):
 
 
 class LocalTaskRequest(BaseModel):
+    task_type: TaskType = TaskType.DUB
     source: str
     title: str | None = None
 
@@ -377,6 +380,7 @@ def create_app() -> FastAPI:
             info_path=result.info_path,
             root=config.root,
             cover_path=result.cover_path,
+            task_type=payload.task_type,
         )
         task.identity = identity
         task.config = _task_config_for_url_payload(config, payload)
@@ -393,10 +397,11 @@ def create_app() -> FastAPI:
         config.ensure_dirs()
         url = _validated_url(payload.url)
         _save_url_cookies_content(config, payload)
-        existing = _find_task_by_source_url(url)
+        existing = _find_task_by_source_url(url, payload.task_type)
         if existing is not None:
             return _task_payload(existing)
         task = create_pending_url_task(url, config.root)
+        task.task_type = payload.task_type
         task.identity = identity
         task.config = _task_config_for_url_payload(config, payload)
         _store().add(task)
@@ -410,6 +415,7 @@ def create_app() -> FastAPI:
         identity = _validated_task_identity(task_identity)
         config = _config()
         task = create_task_from_local_media(Path(payload.source), config.root, payload.title)
+        task.task_type = payload.task_type
         task.identity = identity
         _store().add(task)
         return _task_payload(task)
@@ -418,6 +424,7 @@ def create_app() -> FastAPI:
     def upload_task(
         file: UploadFile = File(...),
         title: str = Form(""),
+        task_type: TaskType = Form(TaskType.DUB),
         task_identity: str | None = Header(None, alias="X-YouDub-Identity"),
     ) -> dict[str, Any]:
         identity = _validated_task_identity(task_identity)
@@ -438,6 +445,7 @@ def create_app() -> FastAPI:
                     if upload_path.stat().st_size <= 0:
                         raise HTTPException(status_code=422, detail="Uploaded file is empty")
                     task = create_task_from_local_media(upload_path, config.root, title or Path(original_name).stem)
+                    task.task_type = task_type
                     task.source = f"upload:{original_name}"
                     task.identity = identity
                     _store().add(task)
@@ -451,6 +459,8 @@ def create_app() -> FastAPI:
     @app.post("/api/tasks/{task_id}/run")
     def run_step(task_id: str, payload: RunStepRequest) -> dict[str, Any]:
         task = _get_task(task_id)
+        if task.task_type == TaskType.SUB and payload.step in {PipelineStep.TTS, PipelineStep.TRANSCRIBE_TTS, PipelineStep.INSPECT_TTS, PipelineStep.REDUB_TTS}:
+            raise HTTPException(status_code=422, detail="熟肉任务不支持配音步骤")
         if _step_completed(task, payload.step) and not payload.force:
             raise HTTPException(status_code=409, detail="Step is already completed")
         with _LOCK:
@@ -1217,10 +1227,10 @@ def _payload_fields_set(payload: BaseModel) -> set[str]:
     return set(fields)
 
 
-def _find_task_by_source_url(url: str) -> Task | None:
+def _find_task_by_source_url(url: str, task_type: TaskType = TaskType.DUB) -> Task | None:
     normalized_url = _normalize_source_url(url)
     for task in _store().load_all():
-        if _normalize_source_url(task.source) == normalized_url:
+        if task.task_type == task_type and _normalize_source_url(task.source) == normalized_url:
             return task
     return None
 
@@ -1282,6 +1292,7 @@ def _task_list_payload(task: Task) -> dict[str, Any]:
         "title": task.title,
         "source": task.source,
         "author": task.author,
+        "task_type": task.task_type.value,
         "status": task.status.value,
         "display_status": _task_display_status(task),
         "queued": _task_queued(task.id),
@@ -1980,6 +1991,7 @@ def _download_url_job(
             info_path=result.info_path,
             root=config.root,
             cover_path=result.cover_path,
+            task_type=task.task_type,
         )
         task = _merge_downloaded_task(store, task, incoming)
         store.update(task)
@@ -2030,6 +2042,7 @@ def _downloaded_task_payload(existing: Task, incoming: Task, config: dict[str, A
     steps.update(incoming.steps)
     merged = Task(
         id=existing.id,
+        task_type=existing.task_type,
         title=incoming.title,
         source=incoming.source,
         folder=incoming.folder,
@@ -2605,7 +2618,9 @@ def _run_all_steps_for_task(task: Task) -> tuple[PipelineStep, ...]:
         PipelineStep.PREPARE_PUBLISH,
     ]
     workflow = effective_task_config(_config(), task.config)["workflow"]
-    enable_tts_redub = bool(workflow["enable_tts_redub"])
+    if task.task_type == TaskType.SUB:
+        steps = [step for step in steps if step not in {PipelineStep.TTS, PipelineStep.TRANSCRIBE_TTS}]
+    enable_tts_redub = task.task_type == TaskType.DUB and bool(workflow["enable_tts_redub"])
     if enable_tts_redub:
         steps.insert(steps.index(PipelineStep.SYNTHESIZE), PipelineStep.INSPECT_TTS)
         steps.insert(steps.index(PipelineStep.SYNTHESIZE), PipelineStep.REDUB_TTS)
@@ -2657,7 +2672,7 @@ STEP_CLEANUP_GROUPS: tuple[tuple[tuple[PipelineStep, ...], tuple[str, ...]], ...
     ((PipelineStep.TRANSCRIBE, PipelineStep.TRANSCRIBE_WHISPER), ("transcript.whisper.json",)),
     ((PipelineStep.TRANSCRIBE, PipelineStep.TRANSCRIBE_ALIGN), ("transcript.aligned.json",)),
     ((PipelineStep.TRANSCRIBE, PipelineStep.TRANSCRIBE_DIARIZE), ("transcript.diarized.json", "transcript.json", "SPEAKER")),
-    ((PipelineStep.TRANSLATE,), ("summary.json", "translation.context.json", "translation.segments.json", "translation.json")),
+    ((PipelineStep.TRANSLATE,), ("summary.json", "translation.context.json", "translation.segments.json", "translation.json", "transcript.corrected.json")),
     ((PipelineStep.TTS,), ("audio_tts.wav", "audio_tts.timings.json", "segments/vocals", "segments/tts", "segments/stretched")),
     (
         (PipelineStep.TRANSCRIBE_TTS,),
@@ -2741,6 +2756,8 @@ def _missing_step_resources(task: Task, step: PipelineStep) -> list[str]:
 
 
 def _step_outputs_for_task(task: Task, step: PipelineStep) -> tuple[str, ...]:
+    if task.task_type == TaskType.SUB and step == PipelineStep.TRANSLATE:
+        return (*STEP_OUTPUTS[step], "transcript.corrected.json")
     if step == PipelineStep.PUBLISH_BILIBILI:
         bilibili = effective_task_config(_config(), task.config)["bilibili"]
         dry_run = bool(bilibili["dry_run"]) or not bool(bilibili["confirm"])

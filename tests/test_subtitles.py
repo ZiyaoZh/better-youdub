@@ -198,3 +198,25 @@ def test_build_subtitles_from_tts_asr_writes_segments_and_srt(tmp_path: Path) ->
 def test_format_srt_time() -> None:
     assert format_srt_time(0) == "00:00:00,000"
     assert format_srt_time(3723.4567) == "01:02:03,457"
+
+
+def test_bilingual_subtitles_use_original_timings_and_both_texts(tmp_path):
+    from youdub.subtitles import build_bilingual_subtitles
+    import json
+
+    (tmp_path / "translation.json").write_text(json.dumps([
+        {"segment_id": 4, "start": 1.25, "end": 3.5, "source_text": "Hello world!", "translation": "你好世界。", "source_reviewed": True}
+    ]))
+    # Existing dubbing artifacts must never change the original speech timing.
+    (tmp_path / "audio_tts.timings.json").write_text('[{"index": 1, "start": 20, "end": 25}]')
+    path = build_bilingual_subtitles(tmp_path)
+    assert json.loads(path.read_text())[0]["start"] == 1.25
+    assert "00:00:01,250 --> 00:00:03,500\n你好世界\nHello world!" in (tmp_path / "subtitles.srt").read_text()
+
+
+def test_bilingual_subtitles_require_reviewed_source(tmp_path):
+    import pytest
+    from youdub.subtitles import build_bilingual_subtitles
+    (tmp_path / "translation.json").write_text('[{"start":0,"end":1,"text":"raw ASR","translation":"原文"}]')
+    with pytest.raises(ValueError, match="重新运行翻译"):
+        build_bilingual_subtitles(tmp_path)

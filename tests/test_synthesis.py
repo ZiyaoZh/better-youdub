@@ -88,3 +88,26 @@ def test_ffmpeg_has_filter_checks_filter_table(monkeypatch) -> None:
 
     assert synthesis.ffmpeg_has_filter("subtitles") is True
     assert synthesis.ffmpeg_has_filter("scale") is False
+
+
+def test_subtitled_video_preserves_original_audio_without_tts(tmp_path, monkeypatch):
+    from youdub.synthesis import synthesize_subtitled_video
+    (tmp_path / "download.mp4").write_bytes(b"original")
+    (tmp_path / "subtitles.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\n你好\nHello\n")
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"final")
+
+    monkeypatch.setattr(synthesis, "_run_command", fake_run)
+    monkeypatch.setattr(synthesis, "probe_video_size", lambda _: (1920, 1080))
+    for burn in (True, False):
+        (tmp_path / "video.mp4").unlink(missing_ok=True)
+        synthesize_subtitled_video(tmp_path, SynthesisConfig(burn_subtitles=burn))
+        command = commands[-1]
+        assert command[command.index("-c:a") + 1] == "copy"
+        assert "0:a:0" in command
+        assert ("-vf" in command) == burn
+        if not burn:
+            assert "mov_text" in command

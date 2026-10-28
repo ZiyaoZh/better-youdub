@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 
+class TaskType(str, Enum):
+    DUB = "dub"
+    SUB = "sub"
+
+
 class TaskStatus(str, Enum):
     PENDING = "pending"
     QUEUED = "queued"
@@ -53,6 +58,7 @@ class Task:
     title: str
     source: str
     folder: Path
+    task_type: TaskType = TaskType.DUB
     identity: str | None = None
     source_key: str | None = None
     author: str | None = None
@@ -72,6 +78,7 @@ class Task:
             "title": self.title,
             "source": self.source,
             "folder": str(self.folder),
+            "task_type": self.task_type.value,
             "identity": self.identity,
             "source_key": self.source_key,
             "author": self.author,
@@ -93,6 +100,7 @@ class Task:
             title=data["title"],
             source=data["source"],
             folder=Path(data["folder"]),
+            task_type=TaskType(data.get("task_type", "dub")),
             identity=data.get("identity") if isinstance(data.get("identity"), str) else None,
             source_key=data.get("source_key"),
             author=data.get("author"),

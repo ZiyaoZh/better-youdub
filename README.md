@@ -207,14 +207,14 @@ YOUDUB_WEB_PORT=8080 docker compose -f compose.gpu.yml up --build -d
 
 Web UI 是推荐的任务入口。一个典型工作流如下：
 
-1. 新建 URL 任务，或从本地路径、上传文件创建任务。
+1. 新建 URL 任务时选择“中配”或“熟肉”。本地路径和上传 API 也支持任务类型。
 2. 在任务参数中配置下载、WhisperX、翻译、TTS、合成和发布选项。
 3. 对 URL 草稿任务执行下载，确认元信息和封面已经写入任务目录。
 4. 运行单个步骤，或点击“运行完整链路”。
 5. 检查步骤状态和日志，从产物区下载视频、字幕或发布材料。
 6. 如需发布到 Bilibili，先执行 dry-run；确认发布材料后再单独启用真实上传。
 
-“运行完整链路”默认依次执行：
+“中配”（默认类型）的完整链路依次执行：
 
 ```text
 extract-audio
@@ -227,6 +227,21 @@ extract-audio
   -> synthesize
   -> prepare-publish
 ```
+
+“熟肉”保留视频原声，按原语音时间轴生成中文在上、原文在下的双语字幕，完整链路为：
+
+```text
+extract-audio -> separate-audio -> transcribe -> translate
+  -> subtitle -> synthesize -> prepare-publish
+```
+
+熟肉在翻译步骤内先执行大模型原文校正：结合全文修正高置信度的识别错词、专有名词、拼写和标点，再将校正后的原文用于中文翻译及双语字幕。原始识别结果保留在 `transcript.json`，校正结果和逐句原文对照保存为 `transcript.corrected.json`，可在产物区下载。时间戳和说话人信息保持原值。原文校正使用独立提示，不应用中文术语译名；响应不完整或校正失败时会报错，不会静默使用未经校正的英文。
+
+已有熟肉任务缺少校正产物时，完整链路会重新执行翻译及后续步骤；单独生成字幕时，如果输入尚未经原文校正，会提示先重新运行翻译步骤。
+
+熟肉不执行 TTS、配音识别、配音质检或局部重配，即使复制的参数启用了局部重配也会跳过。默认将双语字幕烧录到视频；关闭 `synthesis.burn_subtitles` 时，将双语字幕作为可切换的字幕轨封装进 MP4。两种方式都直接保留原音轨，并输出可单独下载的 `subtitles.srt`。
+
+同一 URL 的中配和熟肉使用独立任务及产物目录，可同时保留。已有任务未指定类型时按中配处理。任务类型在创建时确定，复制参数不会改变类型。创建 API 的 `task_type` 可选 `dub`（中配，默认）和 `sub`（熟肉），支持 `/api/tasks/url-draft`、`/api/tasks/url`、`/api/tasks/local` 和上传表单。CLI 的 `create-task`、`create-download-task`、`create-url-task` 使用 `--task-type sub` 创建熟肉任务。
 
 启用 `workflow.enable_tts_redub` 后，系统会在首次生成字幕后增加一轮 `inspect-tts -> redub-tts -> transcribe-tts -> subtitle`。Bilibili 上传不在默认链路中，只有启用 `workflow.include_bilibili_upload` 后才会追加；未同时确认真实上传时，该步骤仍会降级为 dry-run。
 

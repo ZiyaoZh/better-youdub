@@ -5,15 +5,15 @@ import inspect
 from .cancellation import CancellationContext, TaskCancelled
 from .locking import TaskLock
 from .media import DemucsConfig, extract_audio, separate_audio
-from .models import PipelineStep, StepStatus, Task, TaskStatus
+from .models import PipelineStep, StepStatus, Task, TaskStatus, TaskType
 from .publishing import (
     BilibiliPublishConfig,
     PublishPackageConfig,
     prepare_publish_package,
     publish_to_bilibili,
 )
-from .subtitles import build_subtitles_from_tts_asr
-from .synthesis import SynthesisConfig, synthesize_video
+from .subtitles import build_subtitles_from_tts_asr, build_bilingual_subtitles
+from .synthesis import SynthesisConfig, synthesize_video, synthesize_subtitled_video
 from .tts import TTSConfig, generate_tts
 from .tts_quality import TTSQualityConfig, inspect_tts_quality
 from .tts_redub import RedubTTSConfig, redub_tts
@@ -59,6 +59,9 @@ class PipelineRunner:
             with TaskLock(task.folder, f"run-step:{step.value}") as lock:
                 return self.run_step(task, step, task_lock=lock)
 
+        if task.task_type == TaskType.SUB and step in {PipelineStep.TTS, PipelineStep.TRANSCRIBE_TTS, PipelineStep.INSPECT_TTS, PipelineStep.REDUB_TTS}:
+            raise ValueError("熟肉任务不支持配音步骤")
+
         task.status = TaskStatus.RUNNING
         task.error = None
         task.mark_step(step, StepStatus.RUNNING)
@@ -83,19 +86,22 @@ class PipelineRunner:
                 self._call(run_diarize, task.folder, self._whisperx_config())
                 self._call(finalize_transcript, task.folder)
             elif step == PipelineStep.TRANSLATE:
-                self._call(translate_task, task.folder, self._translation_config())
+                if task.task_type == TaskType.SUB:
+                    self._call(translate_task, task.folder, self._translation_config(), correct_source=True)
+                else:
+                    self._call(translate_task, task.folder, self._translation_config())
             elif step == PipelineStep.TTS:
                 self._call(generate_tts, task.folder, self._tts_config())
             elif step == PipelineStep.TRANSCRIBE_TTS:
                 self._call(transcribe_tts_audio, task.folder, self._whisperx_config())
             elif step == PipelineStep.SUBTITLE:
-                self._call(build_subtitles_from_tts_asr, task.folder)
+                self._call(build_bilingual_subtitles if task.task_type == TaskType.SUB else build_subtitles_from_tts_asr, task.folder)
             elif step == PipelineStep.INSPECT_TTS:
                 self._call(inspect_tts_quality, task.folder, self.tts_quality_config or TTSQualityConfig.from_env())
             elif step == PipelineStep.REDUB_TTS:
                 self._call(redub_tts, task.folder, self._tts_config(), self.redub_tts_config or RedubTTSConfig.from_env())
             elif step == PipelineStep.SYNTHESIZE:
-                self._call(synthesize_video, task.folder, self._synthesis_config())
+                self._call(synthesize_subtitled_video if task.task_type == TaskType.SUB else synthesize_video, task.folder, self._synthesis_config())
             elif step == PipelineStep.PREPARE_PUBLISH:
                 self._call(prepare_publish_package, task.folder, self._publish_config())
             elif step == PipelineStep.PUBLISH_BILIBILI:

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>better-youdub</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=20260812-task-cancellation" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20261028-task-types" />
   </head>
   <body>
     <div class="app-shell">
@@ -159,6 +159,7 @@
           <button class="icon-button" data-close-create title="关闭" type="button">×</button>
         </div>
         <form id="urlForm" class="create-form">
+          <label><span>任务类型</span><select id="taskTypeInput" name="task_type"><option value="dub">中配</option><option value="sub">熟肉（原声 + 双语字幕）</option></select></label>
           <label>
             <span>视频 URL</span>
             <input id="urlInput" name="url" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off" />
@@ -189,6 +190,6 @@
       </div>
     </aside>
 
-    <script src="/assets/app.js?v=20260812-task-cancellation"></script>
+    <script src="/assets/app.js?v=20261028-task-types"></script>
   </body>
 </html>

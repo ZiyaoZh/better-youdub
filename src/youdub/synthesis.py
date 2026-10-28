@@ -81,6 +81,40 @@ def synthesize_video(
     return final_video
 
 
+def synthesize_subtitled_video(
+    task_dir: Path,
+    config: SynthesisConfig | None = None,
+    *,
+    cancellation: CancellationContext | None = None,
+) -> Path:
+    config = config or SynthesisConfig()
+    config.validate()
+    task_dir = task_dir.resolve()
+    video = _require_file(task_dir / DOWNLOAD_VIDEO)
+    subtitles = task_dir / SUBTITLES
+    if config.burn_subtitles:
+        _require_file(subtitles)
+    final = task_dir / FINAL_VIDEO
+    if final.exists() and final.stat().st_size > 0:
+        return final
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(video)]
+    if not config.burn_subtitles:
+        command += ["-i", str(_require_file(subtitles))]
+    command += ["-map", "0:v:0", "-map", "0:a:0", "-c:a", "copy"]
+    if config.burn_subtitles:
+        command += ["-vf", subtitle_filter(video, subtitles, task_dir, config),
+                    "-c:v", "libx264", "-preset", config.video_preset,
+                    "-crf", str(config.video_crf), "-pix_fmt", "yuv420p"]
+    else:
+        command += ["-c:v", "copy",
+                    "-map", "1:0", "-c:s", "mov_text"]
+    command += ["-movflags", "+faststart", str(final)]
+    _run_command(command, cwd=task_dir, cancellation=cancellation, cleanup_paths=(final,))
+    if not final.exists() or final.stat().st_size <= 0:
+        raise RuntimeError(f"FFmpeg finished without producing {final}")
+    return final
+
+
 def ffmpeg_has_filter(name: str) -> bool:
     require_binary("ffmpeg")
     result = subprocess.run(

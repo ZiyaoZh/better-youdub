@@ -10,7 +10,7 @@ from .constants import TEST_VIDEO_URL
 from .downloader import download_url_to_artifacts, supported_js_runtimes
 from .ingest import create_task_from_download_artifacts, create_task_from_local_media
 from .media import require_binary
-from .models import PipelineStep
+from .models import TaskType, PipelineStep
 from .pipeline import PipelineRunner
 from .synthesis import ffmpeg_has_filter
 from .storage import TaskStore
@@ -32,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_task = subparsers.add_parser("create-task", help="Create a task from a local media file")
     create_task.add_argument("--source", required=True, type=Path)
     create_task.add_argument("--title")
+    create_task.add_argument("--task-type", choices=["dub", "sub"], default="dub")
 
     create_download_task = subparsers.add_parser(
         "create-download-task",
@@ -40,12 +41,14 @@ def build_parser() -> argparse.ArgumentParser:
     create_download_task.add_argument("--source", required=True, type=Path)
     create_download_task.add_argument("--info", required=True, type=Path)
     create_download_task.add_argument("--cover", type=Path)
+    create_download_task.add_argument("--task-type", choices=["dub", "sub"], default="dub")
 
     create_url_task = subparsers.add_parser(
         "create-url-task",
         help="Download one URL with yt-dlp and create or reuse a task",
     )
     create_url_task.add_argument("--url", required=True)
+    create_url_task.add_argument("--task-type", choices=["dub", "sub"], default="dub")
     create_url_task.add_argument(
         "--cookies",
         type=Path,
@@ -438,6 +441,7 @@ def cmd_doctor(config: AppConfig) -> int:
 def cmd_create_task(config: AppConfig, args: argparse.Namespace) -> int:
     config.ensure_dirs()
     task = create_task_from_local_media(args.source, config.root, args.title)
+    task.task_type = TaskType(args.task_type)
     TaskStore(config.tasks_path).add(task)
     print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
     return 0
@@ -451,6 +455,7 @@ def cmd_create_download_task(config: AppConfig, args: argparse.Namespace) -> int
         info_path=args.info,
         root=config.root,
         cover_path=args.cover,
+        task_type=TaskType(args.task_type),
     )
     task = store.upsert(task)
     print(json.dumps(task.to_dict(), ensure_ascii=False, indent=2))
@@ -467,6 +472,7 @@ def cmd_create_url_task(config: AppConfig, args: argparse.Namespace) -> int:
         info_path=result.info_path,
         root=config.root,
         cover_path=result.cover_path,
+        task_type=TaskType(args.task_type),
     )
     task.config = task_config
     task = TaskStore(config.tasks_path).upsert(task)

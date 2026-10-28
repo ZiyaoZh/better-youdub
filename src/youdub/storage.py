@@ -99,6 +99,7 @@ class TaskStore:
     def _merge(self, existing: Task, incoming: Task) -> Task:
         return Task(
             id=existing.id,
+            task_type=existing.task_type,
             title=incoming.title,
             source=incoming.source,
             folder=incoming.folder,

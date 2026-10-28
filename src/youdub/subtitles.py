@@ -156,6 +156,24 @@ def build_subtitles_from_tts_asr(
     return segments_path
 
 
+def build_bilingual_subtitles(task_dir: Path) -> Path:
+    """Use original speech timings, never stale TTS timings or TTS ASR."""
+    segments = []
+    for item in load_standard_translations(task_dir / TTS_TRANSLATION_INPUT):
+        if item.get("source_reviewed") is not True:
+            raise ValueError("熟肉原文尚未完成大模型校正，请重新运行翻译步骤")
+        start, end = item["start"], item["end"]
+        source = _clean_text(item.get("source_text") or item.get("text"))
+        if start is None or end is None or start < 0 or end <= start or not source:
+            raise ValueError(f"Missing source text or valid speech timing for segment {item['segment_id']}")
+        segments.append({**item, "index": len(segments), "source_text": source,
+                         "timing_source": "original-speech"})
+    path = task_dir / SUBTITLE_SEGMENTS_OUTPUT
+    _write_json(path, segments)
+    write_srt(segments, task_dir / SRT_OUTPUT, bilingual=True)
+    return path
+
+
 def load_standard_translations(path: Path) -> list[dict[str, Any]]:
     data = _read_json(path)
     if isinstance(data, dict):
@@ -693,7 +711,7 @@ def text_similarity(standard: str, recognized: str) -> float:
     return SequenceMatcher(None, left, right, autojunk=False).ratio()
 
 
-def write_srt(subtitle_segments: list[dict[str, Any]], path: Path) -> Path:
+def write_srt(subtitle_segments: list[dict[str, Any]], path: Path, *, bilingual: bool = False) -> Path:
     lines: list[str] = []
     for index, item in enumerate(subtitle_segments, start=1):
         start = float(item["start"])
@@ -703,6 +721,8 @@ def write_srt(subtitle_segments: list[dict[str, Any]], path: Path) -> Path:
         text = _strip_subtitle_trailing_punctuation(str(item["translation"]))
         if not text:
             continue
+        if bilingual:
+            text += "\n" + str(item["source_text"])
         lines.extend([str(index), f"{format_srt_time(start)} --> {format_srt_time(end)}", text, ""])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")
