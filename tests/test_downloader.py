@@ -134,6 +134,56 @@ def test_ytdlp_base_options_ignores_empty_cookies(tmp_path: Path) -> None:
     assert "cookiefile" not in options
 
 
+@pytest.mark.parametrize("error", [
+    "Read timed out", "Connection aborted: Remote end closed connection without response",
+    "HTTP Error 503: Service Unavailable",
+    "131072 bytes read, 9835303 more expected. Giving up after 5 retries",
+])
+def test_download_reduces_chunks_and_preserves_partial_transfer(tmp_path: Path, error: str) -> None:
+    from youdub.downloader import _download_media
+
+    calls: list[dict[str, Any]] = []
+
+    class InterruptedYoutubeDL(FakeYoutubeDL):
+        def download(self, urls: list[str]) -> None:
+            calls.append(self.params)
+            target = Path(self.params["outtmpl"]).with_suffix(".mp4")
+            partial = target.with_suffix(".mp4.part")
+            if len(calls) == 1:
+                partial.write_bytes(b"already downloaded")
+                raise RuntimeError(error)
+            assert partial.read_bytes() == b"already downloaded"
+            assert self.params["overwrites"] is False
+            target.write_bytes(partial.read_bytes() + b" remainder")
+
+    _download_media(
+        "https://example.test/video", tmp_path, tmp_path / "download.mp4",
+        DownloadConfig(youtube_dl_factory=InterruptedYoutubeDL),
+    )
+
+    assert [call["http_chunk_size"] for call in calls] == [10 * 1024 * 1024, 1024 * 1024]
+    assert calls[0]["outtmpl"] == calls[1]["outtmpl"]
+    assert (tmp_path / "download.mp4").read_bytes() == b"already downloaded remainder"
+
+
+def test_download_does_not_reduce_chunks_for_authentication_failure(tmp_path: Path) -> None:
+    from youdub.downloader import _download_media
+
+    calls = []
+
+    class UnauthorizedYoutubeDL(FakeYoutubeDL):
+        def download(self, urls: list[str]) -> None:
+            calls.append(self.params)
+            raise RuntimeError("HTTP Error 403: Forbidden")
+
+    with pytest.raises(RuntimeError, match="403"):
+        _download_media(
+            "https://example.test/video", tmp_path, tmp_path / "download.mp4",
+            DownloadConfig(youtube_dl_factory=UnauthorizedYoutubeDL),
+        )
+    assert len(calls) == 1
+
+
 def test_supported_js_runtimes_prefers_supported_deno_and_ignores_old_node(monkeypatch) -> None:
     import youdub.downloader as downloader
 

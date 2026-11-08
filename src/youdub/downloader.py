@@ -137,11 +137,15 @@ def ytdlp_base_options(config: DownloadConfig) -> dict[str, Any]:
         "remote_components": ["ejs:github"],
         "extractor_args": {"youtube": {"player_js_variant": ["main"]}},
         "http_headers": {"User-Agent": DEFAULT_USER_AGENT},
-        # Let the route-aware wrapper handle reconnects instead of retrying
-        # inside yt-dlp with the same proxy session.
-        "retries": 0,
-        "fragment_retries": 0,
+        # Retry interrupted transfers inside yt-dlp so its partial file can be
+        # resumed before the route wrapper starts a fresh download attempt.
+        "retries": 5,
+        "fragment_retries": 5,
         "extractor_retries": 0,
+        "socket_timeout": 20,
+        # Bound CDN requests instead of holding one connection for the whole
+        # media file; some routes stall or close these long transfers.
+        "http_chunk_size": 10 * 1024 * 1024,
     }
 
     js_runtimes = supported_js_runtimes()
@@ -256,9 +260,19 @@ def _download_media(
             if format_selector is not None:
                 options["format"] = format_selector
             try:
-                _checkpoint(cancellation, "download:yt-dlp")
-                with _youtube_dl_factory(config)(options) as ydl:
-                    ydl.download([url])
+                for attempt, chunk_size in enumerate((options["http_chunk_size"], 1024 * 1024)):
+                    _checkpoint(cancellation, "download:yt-dlp")
+                    try:
+                        with _youtube_dl_factory(config)({
+                            **options, "http_chunk_size": chunk_size, "overwrites": not attempt,
+                        }) as ydl:
+                            ydl.download([url])
+                        break
+                    except Exception as exc:
+                        if chunk_size == 1024 * 1024 or not _is_transfer_interrupted(exc):
+                            raise
+                        # Keep the same staging paths: yt-dlp can resume its
+                        # partial file and reuse any completed audio/video.
                 _normalize_downloaded_media(staging_dir, staged_media)
                 if not _has_nonempty_file(staged_media):
                     raise RuntimeError("yt-dlp did not produce a non-empty staged media file")
@@ -274,6 +288,16 @@ def _download_media(
             shutil.rmtree(staging_dir, ignore_errors=True)
     if last_error is not None:
         raise last_error
+
+
+def _is_transfer_interrupted(error: Exception) -> bool:
+    message = str(error).lower()
+    return bool(re.search(r"\d+ bytes read, \d+ more expected", message)) or any(marker in message for marker in (
+        "timed out", "timeout", "connection reset", "connection aborted",
+        "connection refused", "remote end closed", "remotedisconnected",
+        "incompleteread", "bytes missing", "network is unreachable",
+        "http error 500", "http error 502", "http error 503", "http error 504",
+    ))
 
 
 def _normalize_downloaded_media(task_dir: Path, media_path: Path) -> None:
