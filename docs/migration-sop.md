@@ -308,6 +308,12 @@ BILI_PROXY=
   `NLTK_DATA=/cache/nltk`，避免 NLTK 尝试写入不可写的 `/nltk_data`；裸跑 WebUI
   或缺少 home 的非 root 用户会兜底到 `/tmp/youdub-cache`，避免依赖链写入
   `/.cache`。
+- WhisperX 对齐前会检查 NLTK `punkt_tab` 分句数据，缺失时下载到 `NLTK_DATA`，
+  并通过文件锁避免多个 GPU worker 同时解压。新版 NLTK 要求下载目录由运行用户
+  控制；程序会去掉当前用户拥有的 NLTK 缓存目录的组/其他用户写权限。
+  离线部署前，用运行 YouDub 的同一用户执行
+  `python -m nltk.downloader -d /cache/nltk punkt_tab` 预装数据；
+  `scripts/check_gpu.sh` 也会检查并补齐该资源。
 - 字幕入口：`run-task --step subtitle` 已接入；字幕文本以 `translation.json`
   的标准译文为准，时间优先来自 `audio_tts.transcript.json` 中 WhisperX align 的
   词级时间窗口。字幕步骤会把标准译文和 ASR words 展开成全局无标点字符流，做

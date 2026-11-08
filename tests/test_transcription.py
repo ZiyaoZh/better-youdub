@@ -3,6 +3,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from youdub import transcription
 from youdub.transcription import WhisperXConfig
 
@@ -457,6 +459,8 @@ def test_run_whisper_passes_language_and_initial_prompt(tmp_path: Path, monkeypa
 
 
 def test_run_align_cleans_gpu_memory(tmp_path: Path, monkeypatch) -> None:
+    nltk_calls = []
+    monkeypatch.setattr(transcription, "prepare_nltk_sentence_data", lambda: nltk_calls.append(True))
     (tmp_path / "audio_vocals.wav").write_bytes(b"audio")
     (tmp_path / transcription.WHISPER_OUTPUT).write_text(
         json.dumps({"language": "en", "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}]}),
@@ -485,6 +489,7 @@ def test_run_align_cleans_gpu_memory(tmp_path: Path, monkeypatch) -> None:
     output = transcription.run_align(tmp_path, WhisperXConfig(models_dir=tmp_path / "models"))
 
     assert output == tmp_path / transcription.ALIGN_OUTPUT
+    assert nltk_calls == [True]
     assert cleanup_calls == ["whisperx-align"]
 
 
@@ -579,3 +584,64 @@ def test_transcribe_tts_audio_defaults_to_simplified_chinese_prompt(
             ],
         }
     ]
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_prepare_nltk_sentence_data_uses_cache_and_updates_loaded_search_path(
+    tmp_path: Path, monkeypatch, cached: bool,
+) -> None:
+    cache = tmp_path / "nltk"
+    cache.mkdir(mode=0o775)
+    cache.chmod(0o775)
+    monkeypatch.setenv("NLTK_DATA", str(cache))
+    state = {"available": cached}
+    downloads = []
+    paths = []
+
+    def load(resource):
+        assert resource == "tokenizers/punkt_tab/english.pickle"
+        assert str(cache) in paths
+        if not state["available"]:
+            raise LookupError("punkt_tab missing")
+        return object()
+
+    def download(package, **kwargs):
+        downloads.append((package, kwargs))
+        assert cache.stat().st_mode & 0o022 == 0
+        state["available"] = True
+        return True
+
+    monkeypatch.setitem(sys.modules, "nltk", types.SimpleNamespace(
+        data=types.SimpleNamespace(path=paths, load=load), download=download,
+    ))
+
+    transcription.prepare_nltk_sentence_data()
+    transcription.prepare_nltk_sentence_data()
+
+    assert len(downloads) == (0 if cached else 1)
+    if downloads:
+        assert downloads[0] == ("punkt_tab", {
+            "download_dir": str(cache), "quiet": True, "raise_on_error": True,
+        })
+
+
+@pytest.mark.parametrize("failure", ["exception", "false", "missing_after_download"])
+def test_prepare_nltk_sentence_data_reports_download_failure(tmp_path: Path, monkeypatch, failure: str) -> None:
+    monkeypatch.setenv("NLTK_DATA", str(tmp_path / "nltk"))
+
+    def load(resource):
+        raise LookupError("punkt_tab missing")
+
+    def download(*args, **kwargs):
+        if failure == "exception":
+            raise OSError("network unavailable")
+        return failure != "false"
+
+    monkeypatch.setitem(sys.modules, "nltk", types.SimpleNamespace(
+        data=types.SimpleNamespace(path=[], load=load), download=download,
+    ))
+
+    with pytest.raises(RuntimeError, match="Unable to prepare NLTK punkt_tab") as error:
+        transcription.prepare_nltk_sentence_data()
+    assert "using the same user as YouDub" in str(error.value)
+    assert error.value.__cause__ is not None

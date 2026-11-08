@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import logging
 import os
 import inspect
@@ -181,6 +182,53 @@ def _ensure_runtime_dir_env(
     if not _ensure_writable_dir(default_path):
         raise PermissionError(f"{name} is not writable: {default_path}")
     return default_path
+
+
+def prepare_nltk_sentence_data() -> None:
+    """Provision WhisperX sentence data before loading the alignment model."""
+    import nltk
+
+    cache = _ensure_runtime_dir_env(
+        "NLTK_DATA", RUNTIME_CACHE_DIR / "nltk_data",
+        replace_unwritable_defaults={Path("/nltk_data")},
+    )
+    # NLTK may have been imported before prepare_whisperx_runtime changed the
+    # environment. Updating NLTK_DATA alone does not update its search paths.
+    if str(cache) not in nltk.data.path:
+        nltk.data.path.insert(0, str(cache))
+
+    def available() -> bool:
+        try:
+            nltk.data.load("tokenizers/punkt_tab/english.pickle")
+        except (LookupError, OSError):
+            return False
+        return True
+
+    if available():
+        return
+
+    # Recent NLTK releases require downloads to an owner-controlled directory.
+    # Only adjust our configured NLTK cache, never its parent/shared caches.
+    if cache.stat().st_uid == os.getuid():
+        cache.chmod(cache.stat().st_mode & ~0o022)
+    with (cache / ".punkt_tab.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if available():
+            return
+        LOGGER.info("Downloading NLTK punkt_tab sentence data to %s", cache)
+        try:
+            downloaded = nltk.download(
+                "punkt_tab", download_dir=str(cache), quiet=True, raise_on_error=True,
+            )
+            if not downloaded or not available():
+                raise LookupError("punkt_tab is still unavailable after download")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Unable to prepare NLTK punkt_tab in {cache}: {exc}. "
+                "Check cache permissions and network access, or preinstall it with "
+                f"python -m nltk.downloader -d {cache} punkt_tab "
+                "using the same user as YouDub."
+            ) from exc
 
 
 def _first_env_path(value: str | None) -> Path | None:
@@ -469,6 +517,7 @@ def run_align(
         raise ValueError(f"Missing language in {whisper_path}")
 
     prepare_whisperx_runtime(config)
+    prepare_nltk_sentence_data()
     import whisperx
 
     device = _resolve_device(config.device).torch_name
