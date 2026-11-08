@@ -7,6 +7,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from .cancellation import CancellationContext
 from .translation import split_translation_text
 
 TTS_ASR_INPUT = "audio_tts.transcript.json"
@@ -156,18 +157,38 @@ def build_subtitles_from_tts_asr(
     return segments_path
 
 
-def build_bilingual_subtitles(task_dir: Path) -> Path:
-    """Use original speech timings, never stale TTS timings or TTS ASR."""
-    segments = []
-    for item in load_standard_translations(task_dir / TTS_TRANSLATION_INPUT):
+def build_bilingual_subtitles(
+    task_dir: Path,
+    *,
+    translation_config: Any | None = None,
+    synthesis_config: Any | None = None,
+    alignment_config: Any | None = None,
+    cancellation: CancellationContext | None = None,
+) -> Path:
+    """Plan semantic bilingual cues against original speech, then validate their layout."""
+    from .subtitle_layout import SubtitleLayout, write_ass
+    from .subtitle_plan import ensure_subtitle_plan
+
+    translations = load_standard_translations(task_dir / TTS_TRANSLATION_INPUT)
+    for item in translations:
         if item.get("source_reviewed") is not True:
             raise ValueError("熟肉原文尚未完成大模型校正，请重新运行翻译步骤")
         start, end = item["start"], item["end"]
         source = _clean_text(item.get("source_text") or item.get("text"))
         if start is None or end is None or start < 0 or end <= start or not source:
             raise ValueError(f"Missing source text or valid speech timing for segment {item['segment_id']}")
-        segments.append({**item, "index": len(segments), "source_text": source,
-                         "timing_source": "original-speech"})
+        item["source_text"] = source
+    layout = SubtitleLayout.from_task(task_dir, synthesis_config)
+    segments = ensure_subtitle_plan(task_dir, translations, translation_config,
+                                    layout=layout, alignment_config=alignment_config, cancellation=cancellation)
+    for index, item in enumerate(segments):
+        item["index"] = index
+        target_lines, source_lines = layout.render_lines(
+            _strip_subtitle_trailing_punctuation(item["translation"]), item["source_text"])
+        item["translation_lines"] = target_lines
+        item["source_lines"] = source_lines
+    write_ass([{**item, "translation": _strip_subtitle_trailing_punctuation(item["translation"])}
+               for item in segments], task_dir / "subtitles.ass", layout)
     path = task_dir / SUBTITLE_SEGMENTS_OUTPUT
     _write_json(path, segments)
     write_srt(segments, task_dir / SRT_OUTPUT, bilingual=True)
@@ -718,11 +739,14 @@ def write_srt(subtitle_segments: list[dict[str, Any]], path: Path, *, bilingual:
         end = float(item["end"])
         if end <= start:
             continue
-        text = _strip_subtitle_trailing_punctuation(str(item["translation"]))
+        text = ("\n".join(item["translation_lines"]) if item.get("translation_lines")
+                else _strip_subtitle_trailing_punctuation(str(item["translation"])))
         if not text:
             continue
         if bilingual:
-            text += "\n" + str(item["source_text"])
+            source_text = ("\n".join(item["source_lines"]) if item.get("source_lines")
+                           else str(item["source_text"]))
+            text += "\n" + source_text
         lines.extend([str(index), f"{format_srt_time(start)} --> {format_srt_time(end)}", text, ""])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")

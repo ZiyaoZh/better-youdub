@@ -1607,6 +1607,11 @@ def test_web_redub_cleans_tts_downstream_outputs_only(monkeypatch, tmp_path: Pat
         "audio_tts.transcript.json",
         "subtitles.segments.json",
         "subtitles.srt",
+        "subtitles.ass",
+        "subtitles.plan.json",
+        "subtitles.source-input.json",
+        "subtitles.source-aligned.json",
+        "subtitles.source-aligned.meta.json",
         "audio_mixed.m4a",
         "video.mp4",
         "publish.json",
@@ -1646,6 +1651,11 @@ def test_web_redub_cleans_tts_downstream_outputs_only(monkeypatch, tmp_path: Pat
     assert (task.folder / "tts.redub.history.jsonl").exists()
     assert not (task.folder / "audio_tts.transcript.json").exists()
     assert not (task.folder / "subtitles.srt").exists()
+    assert not (task.folder / "subtitles.ass").exists()
+    assert not (task.folder / "subtitles.plan.json").exists()
+    assert not (task.folder / "subtitles.source-input.json").exists()
+    assert not (task.folder / "subtitles.source-aligned.json").exists()
+    assert not (task.folder / "subtitles.source-aligned.meta.json").exists()
     assert not (task.folder / "video.mp4").exists()
     assert task.steps[PipelineStep.REDUB_TTS.value] == StepStatus.SUCCESS
     assert task.steps[PipelineStep.TRANSCRIBE_TTS.value] == StepStatus.PENDING
@@ -1728,6 +1738,70 @@ def test_web_executor_worker_counts_and_step_routes() -> None:
     assert web_module._executor_for_step(PipelineStep.TRANSCRIBE) is web_module._GPU_EXECUTOR
     assert web_module._executor_for_step(PipelineStep.TRANSCRIBE_TTS) is web_module._GPU_EXECUTOR
     assert web_module._executor_for_step(PipelineStep.TRANSLATE) is web_module._EXECUTOR
+
+
+@pytest.mark.parametrize("task_type", ["sub", "dub"])
+def test_subtitle_alignment_uses_gpu_worker_only_for_sub_tasks(monkeypatch, tmp_path, task_type):
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "subtitle-worker.mp4"
+    source.write_bytes(b"video")
+    payload = client.post("/api/tasks/local", json={"source": str(source), "task_type": task_type}).json()
+    task = web_module._store().get(payload["id"])
+    task.config = {"whisperx": {"device": "cuda:3"}}
+    web_module._store().update(task)
+    calls = []
+
+    def complete(current, step, execution):
+        calls.append((execution, threading.current_thread().name))
+        current.mark_step(step, StepStatus.SUCCESS)
+        current.status = TaskStatus.SUCCESS
+        return current
+
+    class FakeRunner:
+        __module__ = "youdub.pipeline"
+
+        def __init__(self, **kwargs):
+            pass
+
+        def run_step(self, current, step, task_lock=None):
+            return complete(current, step, "in-process")
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+    monkeypatch.setattr(web_module, "_run_gpu_step_in_worker", lambda current, step, runtime: complete(current, step, "worker"))
+    monkeypatch.setattr(web_module, "cleanup_gpu_memory", lambda *_args: None)
+    assert web_module._gpu_device_request(task, PipelineStep.SUBTITLE) == ("cuda:3" if task_type == "sub" else "cpu")
+
+    response = client.post(f"/api/tasks/{task.id}/run", json={"step": "subtitle"})
+    assert response.status_code == 200
+    _wait_for_task_idle(client, task.id)
+    assert len(calls) == 1
+    execution, thread = calls[0]
+    assert execution == ("worker" if task_type == "sub" else "in-process")
+    assert thread.startswith("youdub-gpu" if task_type == "sub" else "youdub-web")
+
+    # Run-all must take the same queue before source realignment is needed.
+    calls.clear()
+    monkeypatch.setattr(web_module, "_run_step_job", lambda *_args, **_kwargs: calls.append(threading.current_thread().name))
+    web_module._run_step_for_run_all(task.id, PipelineStep.SUBTITLE, task_lock=None)
+    assert len(calls) == 1
+    if task_type == "sub":
+        assert calls[0].startswith("youdub-gpu")
+    else:
+        assert calls[0] == threading.current_thread().name
+
+
+def test_subtitle_worker_applies_leased_device_without_changing_dub_options(monkeypatch, tmp_path):
+    from youdub import pipeline_worker
+    from youdub.models import TaskType
+
+    _client(monkeypatch, tmp_path)
+    options = web_module.runtime_options_from_task_config(web_module._config(), {"whisperx": {"device": "auto"}})
+    sub_options = pipeline_worker._options_with_cuda_device(options, PipelineStep.SUBTITLE, "cuda:2", TaskType.SUB)
+    assert sub_options.whisperx.device == "cuda:2"
+    assert sub_options.tts == options.tts
+    assert sub_options.demucs == options.demucs
+    assert pipeline_worker._options_with_cuda_device(options, PipelineStep.SUBTITLE, "cuda:2", TaskType.DUB) is options
+    assert pipeline_worker._options_with_cuda_device(options, PipelineStep.SUBTITLE, None, TaskType.SUB) is options
 
 
 def test_web_runs_non_dubbing_gpu_steps_on_gpu_worker_pool(monkeypatch, tmp_path: Path) -> None:
@@ -2530,6 +2604,259 @@ def test_sub_translation_requires_review_artifact_and_cleans_it_with_downstream(
     (folder / "transcript.corrected.json").write_text('{"status":"success"}')
     assert web_module._step_completed(task, PipelineStep.TRANSLATE)
     (folder / "transcript.json").write_text("original")
+    (folder / "subtitles.ass").write_text("old layout")
+    (folder / "subtitles.plan.json").write_text("old plan")
+    (folder / "subtitles.source-input.json").write_text("old corrected text")
+    (folder / "subtitles.source-aligned.json").write_text("old alignment")
+    (folder / "subtitles.source-aligned.meta.json").write_text("old alignment metadata")
     web_module._clear_step_outputs(task, PipelineStep.TRANSLATE)
     assert not (folder / "transcript.corrected.json").exists()
+    assert not (folder / "subtitles.ass").exists()
+    assert not (folder / "subtitles.plan.json").exists()
+    assert not (folder / "subtitles.source-input.json").exists()
+    assert not (folder / "subtitles.source-aligned.json").exists()
+    assert not (folder / "subtitles.source-aligned.meta.json").exists()
     assert (folder / "transcript.json").read_text() == "original"
+
+
+def test_sub_subtitle_completion_requires_semantic_plan_and_ass_but_dub_stays_compatible(tmp_path):
+    from youdub.models import Task, TaskType
+    from youdub.subtitle_plan import PLAN_PROMPT_VERSION, PLAN_SCHEMA_VERSION
+
+    task = Task(id="sub", title="sub", source="source", folder=tmp_path, task_type=TaskType.SUB)
+    for name in ("subtitles.segments.json", "subtitles.srt"):
+        (tmp_path / name).write_text("legacy subtitle")
+    task.mark_step(PipelineStep.SUBTITLE, StepStatus.SUCCESS)
+
+    completion = web_module._step_completion_for_task(task, PipelineStep.SUBTITLE)
+    assert not completion["complete"]
+    assert set(completion["missing"]) == {"subtitles.ass", "subtitles.plan.json"}
+    assert not web_module._step_completed(task, PipelineStep.SUBTITLE)
+    (tmp_path / "subtitles.ass").write_text("new layout")
+    assert not web_module._step_completed(task, PipelineStep.SUBTITLE)
+    (tmp_path / "subtitles.plan.json").write_text(json.dumps({
+        "schema_version": PLAN_SCHEMA_VERSION,
+        "prompt_version": PLAN_PROMPT_VERSION,
+        "status": "success",
+    }))
+    assert web_module._step_completed(task, PipelineStep.SUBTITLE)
+
+    (tmp_path / "subtitles.ass").unlink()
+    (tmp_path / "subtitles.plan.json").unlink()
+    task.task_type = TaskType.DUB
+    assert web_module._step_completed(task, PipelineStep.SUBTITLE)
+
+
+def test_sub_subtitle_cleanup_preserves_reviewed_translation(tmp_path):
+    from youdub.models import Task, TaskType
+
+    task = Task(id="sub", title="sub", source="source", folder=tmp_path, task_type=TaskType.SUB)
+    for name in ("translation.json", "transcript.corrected.json"):
+        (tmp_path / name).write_text("reviewed source and complete translation")
+    for name in (*web_module.STEP_OUTPUTS[PipelineStep.SUBTITLE], "video.mp4", "publish.json"):
+        (tmp_path / name).write_text("old subtitle or downstream output")
+    task.mark_step(PipelineStep.TRANSLATE, StepStatus.SUCCESS)
+    task.mark_step(PipelineStep.SUBTITLE, StepStatus.SUCCESS)
+
+    web_module._clear_step_outputs(task, PipelineStep.SUBTITLE)
+
+    assert (tmp_path / "translation.json").read_text() == "reviewed source and complete translation"
+    assert (tmp_path / "transcript.corrected.json").exists()
+    assert task.steps[PipelineStep.TRANSLATE.value] == StepStatus.SUCCESS
+    assert task.steps[PipelineStep.SUBTITLE.value] == StepStatus.PENDING
+    assert all(not (tmp_path / name).exists() for name in web_module.STEP_OUTPUTS[PipelineStep.SUBTITLE])
+    assert not (tmp_path / "video.mp4").exists()
+    assert not (tmp_path / "publish.json").exists()
+
+
+def test_sub_run_all_upgrades_legacy_subtitles_without_retranslating(monkeypatch, tmp_path):
+    from youdub.subtitle_plan import PLAN_PROMPT_VERSION, PLAN_SCHEMA_VERSION
+
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    payload = client.post("/api/tasks/local", json={"source": str(source), "task_type": "sub"}).json()
+    store = web_module._store()
+    task = store.get(payload["id"])
+    for step in web_module._run_all_steps_for_task(task):
+        for name in web_module._step_outputs_for_task(task, step):
+            if name not in {"subtitles.ass", "subtitles.plan.json"}:
+                (task.folder / name).write_text("existing reviewed task data")
+        task.mark_step(step, StepStatus.SUCCESS)
+    store.update(task)
+    called = []
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            pass
+
+        def run_step(self, current, step, task_lock=None):
+            called.append(step)
+            assert (current.folder / "translation.json").read_text() == "existing reviewed task data"
+            assert (current.folder / "transcript.corrected.json").read_text() == "existing reviewed task data"
+            if step == PipelineStep.SUBTITLE:
+                assert not (current.folder / "video.mp4").exists()
+                assert not (current.folder / "publish.json").exists()
+            for name in web_module._step_outputs_for_task(current, step):
+                (current.folder / name).write_text("regenerated subtitle or downstream output")
+            if step == PipelineStep.SUBTITLE:
+                (current.folder / "subtitles.plan.json").write_text(json.dumps({
+                    "schema_version": PLAN_SCHEMA_VERSION,
+                    "prompt_version": PLAN_PROMPT_VERSION,
+                    "status": "success",
+                }))
+            current.mark_step(step, StepStatus.SUCCESS)
+            current.status = TaskStatus.SUCCESS
+            return current
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+    web_module._run_all_job(task.id)
+
+    assert called == [PipelineStep.SUBTITLE, PipelineStep.SYNTHESIZE, PipelineStep.PREPARE_PUBLISH]
+    assert web_module._step_completed(store.get(task.id), PipelineStep.SUBTITLE)
+
+
+@pytest.mark.parametrize("invalid_plan", [
+    "{",
+    '[]',
+    {"status": "planning"},
+    {"status": "error"},
+    {"schema_version": 999},
+    {"prompt_version": "old-semantic-prompt"},
+])
+def test_sub_subtitle_rejects_failed_or_incompatible_plan_with_old_rendered_files(tmp_path, invalid_plan):
+    from youdub.models import Task, TaskType
+    from youdub.subtitle_plan import PLAN_PROMPT_VERSION, PLAN_SCHEMA_VERSION
+
+    task = Task(id="sub", title="sub", source="source", folder=tmp_path, task_type=TaskType.SUB)
+    for name in ("subtitles.srt", "subtitles.segments.json", "subtitles.ass"):
+        (tmp_path / name).write_text("previously rendered subtitle")
+    if isinstance(invalid_plan, dict):
+        invalid_plan = json.dumps({
+            "schema_version": PLAN_SCHEMA_VERSION,
+            "prompt_version": PLAN_PROMPT_VERSION,
+            "status": "success",
+            **invalid_plan,
+        })
+    (tmp_path / "subtitles.plan.json").write_text(invalid_plan)
+    task.mark_step(PipelineStep.SUBTITLE, StepStatus.SUCCESS)
+
+    assert not web_module._step_completed(task, PipelineStep.SUBTITLE)
+    assert web_module._step_completion_for_task(task, PipelineStep.SUBTITLE)["missing"] == ["subtitles.plan.json"]
+
+
+def test_subtitle_plan_and_ass_are_explicit_downloads(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    payload = client.post("/api/tasks/local", json={"source": str(source), "task_type": "sub"}).json()
+    task = web_module._store().get(payload["id"])
+    artifacts = {"subtitles-ass": ("subtitles.ass", "[Script Info]"), "subtitles-plan": ("subtitles.plan.json", '{"version":1}')}
+    for name, content in artifacts.values():
+        (task.folder / name).write_text(content)
+
+    listed = {item["key"]: item for item in client.get(f"/api/tasks/{task.id}/artifacts").json()["artifacts"]}
+    for key, (name, content) in artifacts.items():
+        assert listed[key]["name"] == name
+        response = client.get(listed[key]["url"], params={"download": True})
+        assert response.status_code == 200
+        assert response.text == content
+        assert "attachment" in response.headers["content-disposition"]
+
+    summaries = client.get("/api/tasks").json()["tasks"]
+    assert "artifacts" not in summaries[0]
+    assert "step_completion" not in summaries[0]
+
+
+@pytest.mark.parametrize("task_type", ["sub", "dub"])
+def test_subtitle_retry_preserves_only_sub_semantic_and_alignment_cache(monkeypatch, tmp_path, task_type):
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    payload = client.post("/api/tasks/local", json={"source": str(source), "task_type": task_type}).json()
+    task = web_module._store().get(payload["id"])
+    cache_names = (
+        "subtitles.plan.json", "subtitles.source-input.json", "subtitles.source-aligned.json",
+        "subtitles.source-aligned.meta.json",
+    )
+    calls = []
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            pass
+
+        def run_step(self, current, step, task_lock=None):
+            calls.append(step)
+            if len(calls) == 1:
+                for name in cache_names:
+                    (current.folder / name).write_text("one sentence already succeeded")
+                (current.folder / "subtitles.srt").write_text("unfinished rendering")
+                raise RuntimeError("second sentence failed")
+            assert not (current.folder / "subtitles.srt").exists()
+            for name in cache_names:
+                path = current.folder / name
+                if task_type == "sub":
+                    assert path.read_text() == "one sentence already succeeded"
+                else:
+                    assert not path.exists()
+            current.mark_step(step, StepStatus.SUCCESS)
+            current.status = TaskStatus.SUCCESS
+            return current
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+    with pytest.raises(RuntimeError, match="second sentence"):
+        web_module._run_step_job(task.id, PipelineStep.SUBTITLE)
+    assert web_module._store().get(task.id).steps[PipelineStep.SUBTITLE.value] == StepStatus.FAILED
+    web_module._run_step_job(task.id, PipelineStep.SUBTITLE)
+    assert calls == [PipelineStep.SUBTITLE, PipelineStep.SUBTITLE]
+
+
+@pytest.mark.parametrize("edit_method", ["put", "paste"])
+@pytest.mark.parametrize("task_type,new_font", [("sub", "New Font"), ("sub", "Old Font"), ("dub", "New Font")])
+def test_font_changes_invalidate_only_sub_rendering_and_keep_reusable_cache(monkeypatch, tmp_path, edit_method, task_type, new_font):
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    payload = client.post(
+        "/api/tasks/local", headers={"X-YouDub-Identity": DEVICE_A},
+        json={"source": str(source), "task_type": task_type},
+    ).json()
+    store = web_module._store()
+    task = store.get(payload["id"])
+    task.config = {"synthesis": {"subtitle_font": "Old Font"}}
+    cache_names = (
+        "subtitles.plan.json", "subtitles.source-input.json", "subtitles.source-aligned.json",
+        "subtitles.source-aligned.meta.json",
+    )
+    rendering_names = ("subtitles.segments.json", "subtitles.srt", "subtitles.ass", "video.mp4", "publish.json")
+    for name in (*cache_names, *rendering_names, "translation.json", "transcript.corrected.json"):
+        (task.folder / name).write_text("preserved input or reusable cache")
+    for step in (PipelineStep.TRANSLATE, PipelineStep.SUBTITLE, PipelineStep.SYNTHESIZE, PipelineStep.PREPARE_PUBLISH):
+        task.mark_step(step, StepStatus.SUCCESS)
+    store.update(task)
+    incoming_config = {"synthesis": {"subtitle_font": new_font}}
+    if edit_method == "put":
+        response = client.put(f"/api/tasks/{task.id}/config", json={"config": incoming_config})
+    else:
+        other_source = tmp_path / "other.mp4"
+        other_source.write_bytes(b"other source")
+        other_payload = client.post(
+            "/api/tasks/local", headers={"X-YouDub-Identity": DEVICE_A},
+            json={"source": str(other_source)},
+        ).json()
+        other = store.get(other_payload["id"])
+        other.config = incoming_config
+        store.update(other)
+        response = client.post(
+            f"/api/tasks/{task.id}/config/paste", headers={"X-YouDub-Identity": DEVICE_A},
+            json={"source_task_id": other.id},
+        )
+    assert response.status_code == 200
+    changed = task_type == "sub" and new_font != "Old Font"
+    updated = store.get(task.id)
+    assert updated.steps[PipelineStep.SUBTITLE.value] == (StepStatus.PENDING if changed else StepStatus.SUCCESS)
+    for name in rendering_names:
+        assert (task.folder / name).exists() is not changed
+    for name in (*cache_names, "translation.json", "transcript.corrected.json"):
+        assert (task.folder / name).read_text() == "preserved input or reusable cache"
+    assert updated.steps[PipelineStep.TRANSLATE.value] == StepStatus.SUCCESS

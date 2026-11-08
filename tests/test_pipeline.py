@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from youdub import pipeline
+from youdub.cancellation import CancellationContext
 from youdub.locking import TaskLock, TaskLockBusy
 from youdub.models import PipelineStep, StepStatus, Task, TaskStatus
 from youdub.publishing import BilibiliPublishConfig, PublishPackageConfig
@@ -324,7 +325,42 @@ def test_sub_task_enables_source_correction_before_translation(tmp_path, monkeyp
     from youdub.models import TaskType
     task = Task(id="sub", title="sub", source="demo", folder=tmp_path, task_type=TaskType.SUB)
     config = TranslationConfig(api_key="test", model="test")
+    synthesis_config = SynthesisConfig(subtitle_font="Test Font")
+    layout = object()
+    layout_inputs = []
+
+    def fake_layout(*args):
+        layout_inputs.append(args)
+        return layout
+
+    monkeypatch.setattr(pipeline.SubtitleLayout, "from_task", fake_layout)
     calls = []
     monkeypatch.setattr(pipeline, "translate_task", lambda *args, **kwargs: calls.append(kwargs))
-    PipelineRunner(translation_config=config).run_step(task, PipelineStep.TRANSLATE)
-    assert calls == [{"correct_source": True}]
+    PipelineRunner(translation_config=config, synthesis_config=synthesis_config).run_step(task, PipelineStep.TRANSLATE)
+    assert layout_inputs == [(tmp_path, synthesis_config)]
+    assert calls == [{"correct_source": True, "subtitle_layout": layout}]
+
+
+def test_sub_subtitle_passes_model_layout_and_cancellation(tmp_path, monkeypatch):
+    from youdub.models import TaskType
+
+    task = Task(id="sub", title="sub", source="demo", folder=tmp_path, task_type=TaskType.SUB)
+    translation = TranslationConfig(api_key="test", model="test")
+    synthesis = SynthesisConfig(subtitle_font="Test Font")
+    alignment = WhisperXConfig(models_dir=tmp_path / "models")
+    cancellation = CancellationContext()
+    calls = []
+
+    def fake_build(task_dir, *, translation_config, synthesis_config, alignment_config, cancellation):
+        calls.append((task_dir, translation_config, synthesis_config, alignment_config, cancellation))
+
+    monkeypatch.setattr(pipeline, "build_bilingual_subtitles", fake_build)
+    PipelineRunner(
+        translation_config=translation,
+        synthesis_config=synthesis,
+        whisperx_config=alignment,
+        cancellation=cancellation,
+    ).run_step(task, PipelineStep.SUBTITLE)
+
+    assert calls == [(tmp_path, translation, synthesis, alignment, cancellation)]
+    assert task.steps[PipelineStep.SUBTITLE.value] == StepStatus.SUCCESS

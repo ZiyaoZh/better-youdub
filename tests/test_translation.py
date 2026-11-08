@@ -414,6 +414,11 @@ def test_translate_batch_includes_context_terms(monkeypatch) -> None:
     assert "全局翻译提示" in system_prompt
     assert "使用中文主播口吻" in system_prompt
     assert "tax shooter" in system_prompt
+    # The dubbing path retains its original whole-sentence response contract.
+    assert "subtitle_groups" not in system_prompt
+    assert "source_tokens" not in payload
+    assert client.chat.completions.calls[0]["response_format"]["json_schema"]["schema"][
+        "properties"]["segments"]["items"]["required"] == ["segment_id", "translation"]
 
 
 def test_translate_batch_rejects_punctuation_only_translation(monkeypatch) -> None:
@@ -684,7 +689,8 @@ def test_reviewed_source_reaches_translation_and_subtitles_without_overwriting_a
     config = TranslationConfig(api_key="test", model="test")
     client = _FakeClient([
         _response('{"segments":[{"segment_id":0,"text":"The Tack Shooter."}]}'),
-        _response('{"segments":[{"segment_id":0,"translation":"图钉塔。"}]}'),
+        _response('{"segments":[{"segment_id":0,"translation":"图钉塔。",'
+                  '"subtitle_groups":[{"source_start":0,"source_end":3,"translation":"图钉塔。"}]}]}'),
     ])
     monkeypatch.setattr(translation, "_create_openai_client", lambda config: client)
     monkeypatch.setattr(translation, "ensure_summary", lambda *args, **kwargs: {})
@@ -693,8 +699,11 @@ def test_reviewed_source_reaches_translation_and_subtitles_without_overwriting_a
     result = json.loads((tmp_path / "translation.json").read_text())
     assert result[0]["source_text"] == "The Tack Shooter."
     assert result[0]["original_text"] == "the tax shooter"
+    assert result[0]["subtitle_groups"][0]["source_end"] == 3
     payload = json.loads(client.chat.completions.calls[1]["messages"][1]["content"])
     assert payload["segments"][0]["text"] == "The Tack Shooter."
+    assert payload["segments"][0]["source_tokens"] == [
+        {"index": 0, "text": "The"}, {"index": 1, "text": "Tack"}, {"index": 2, "text": "Shooter."}]
     build_bilingual_subtitles(tmp_path)
     assert "图钉塔\nThe Tack Shooter." in (tmp_path / "subtitles.srt").read_text()
     assert json.loads((tmp_path / "transcript.json").read_text()) == original
@@ -709,3 +718,49 @@ def test_cached_translation_keeps_review_metadata_for_unchanged_source(tmp_path)
     result = ensure_segment_translations(tmp_path, {}, {}, {}, reviewed, client, config)
     assert result[0]["original_text"] == "Hello."
     assert len(client.chat.completions.calls) == 1
+
+
+def test_bilingual_translation_keeps_whole_sentence_and_semantic_groups_in_cache(tmp_path):
+    import json
+
+    class Layout:
+        def prompt_budget(self):
+            return {"max_total_lines": 3, "target_characters_per_line": 24}
+
+    groups = [{"source_start": 0, "source_end": 3, "translation": "博士需要芯片，"},
+              {"source_start": 3, "source_end": 6, "translation": "来启动监控网络。"}]
+    response = {"segments": [{"segment_id": 0, "translation": "博士需要芯片，来启动监控网络。",
+                              "subtitle_groups": groups}]}
+    client = _FakeClient([_response(json.dumps(response, ensure_ascii=False))])
+    config = TranslationConfig(api_key="test", model="test", max_retries=1)
+    source = [{"start": 1, "end": 5, "speaker": "A", "original_text": "Doc needs chip to start surveillance.",
+               "text": "Doc needs chip to start surveillance."}]
+    result = ensure_segment_translations(tmp_path, {}, {}, {}, source, client, config, subtitle_layout=Layout())
+    assert ensure_segment_translations(tmp_path, {}, {}, {}, source, client, config,
+                                       subtitle_layout=Layout()) == result
+    assert len(client.chat.completions.calls) == 1
+    request = client.chat.completions.calls[0]
+    assert "WHOLE sentence" in request["messages"][0]["content"]
+    assert request["response_format"]["json_schema"]["schema"]["properties"]["segments"]["items"][
+        "required"] == ["segment_id", "translation", "subtitle_groups"]
+    entries = build_tts_translation_entries(result)
+    assert len(entries) == 1
+    assert entries[0]["translation"] == response["segments"][0]["translation"]
+    assert entries[0]["source_reviewed"] is True
+    assert [part["translation"] for part in entries[0]["subtitle_groups"]] == [g["translation"] for g in groups]
+
+
+def test_bilingual_translation_rejects_missing_text_and_crossed_source_ranges():
+    import pytest
+    from youdub.translation import _normalize_segment_translation_response, TranslationResponseError
+
+    batch = [{"segment_id": 0, "text": "Doc needs chip."}]
+    for groups in (None,
+                   [{"source_start": 0, "source_end": 3, "translation": "博士需要"}],
+                   [{"source_start": 1, "source_end": 3, "translation": "博士需要芯片。"}],
+                   [{"source_start": 0, "source_end": 2, "translation": "博士需要"},
+                    {"source_start": 1, "source_end": 3, "translation": "芯片。"}]):
+        with pytest.raises(TranslationResponseError, match="Invalid subtitle groups"):
+            _normalize_segment_translation_response({"segments": [
+                {"segment_id": 0, "translation": "博士需要芯片。", "subtitle_groups": groups}]},
+                batch, require_subtitle_groups=True)

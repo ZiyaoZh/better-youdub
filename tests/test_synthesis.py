@@ -111,3 +111,28 @@ def test_subtitled_video_preserves_original_audio_without_tts(tmp_path, monkeypa
         assert ("-vf" in command) == burn
         if not burn:
             assert "mov_text" in command
+
+
+def test_subtitled_video_burns_ass_styles_and_keeps_srt_for_soft_subtitles(tmp_path, monkeypatch):
+    from youdub.synthesis import synthesize_subtitled_video
+
+    (tmp_path / "download.mp4").write_bytes(b"original")
+    (tmp_path / "subtitles.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\n你好\nHello\n")
+    (tmp_path / "subtitles.ass").write_text("[Script Info]\nPlayResX: 1920\n")
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"final")
+
+    def no_probe(_):
+        raise AssertionError("ASS geometry must not be replaced by legacy SRT styles")
+
+    monkeypatch.setattr(synthesis, "_run_command", fake_run)
+    monkeypatch.setattr(synthesis, "probe_video_size", no_probe)
+    synthesize_subtitled_video(tmp_path)
+    assert commands[-1][commands[-1].index("-vf") + 1] == "subtitles=filename='subtitles.ass'"
+    (tmp_path / "video.mp4").unlink()
+    synthesize_subtitled_video(tmp_path, SynthesisConfig(burn_subtitles=False))
+    assert commands[-1][commands[-1].index("-i", commands[-1].index("-i") + 1) + 1] == str(tmp_path / "subtitles.srt")
+    assert "mov_text" in commands[-1]

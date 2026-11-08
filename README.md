@@ -187,6 +187,18 @@ docker compose -f compose.gpu.yml down
 docker compose -f compose.gpu.yml run --rm youdub-gpu scripts/check_gpu.sh
 ```
 
+智能字幕排版新增通用运行依赖 `Pillow`，用于按真实字体测量文字宽度；同时显式声明翻译网络路由使用的 `httpx`，兼容新版 OpenAI SDK 的依赖变化。CPU 和 GPU 镜像均需要安装。已有部署更新源码后，应在宿主机重新构建镜像并重建服务，再检查依赖：
+
+```bash
+docker compose -f compose.gpu.yml config
+docker compose -f compose.gpu.yml build
+docker compose -f compose.gpu.yml up -d
+docker compose -f compose.gpu.yml run --rm youdub-gpu python -c "from PIL import ImageFont; print(ImageFont.__file__)"
+docker compose -f compose.gpu.yml run --rm youdub-gpu scripts/check_gpu.sh
+```
+
+使用 DNS 覆盖时，以上命令也应保留 `-f compose.dns.yml`。完整依赖验证流程见 [依赖与 Dockerfile 同步规范](./docs/dependency-sync.md)；镜像构建与 GPU 运行验证在具备 Docker/GPU 的宿主机执行。
+
 ### CPU 开发模式
 
 只需要查看 Web UI 或开发非 GPU 功能时，可以启动较小的 CPU 镜像：
@@ -213,6 +225,8 @@ Web UI 是推荐的任务入口。一个典型工作流如下：
 4. 运行单个步骤，或点击“运行完整链路”。
 5. 检查步骤状态和日志，从产物区下载视频、字幕或发布材料。
 6. 如需发布到 Bilibili，先执行 dry-run；确认发布材料后再单独启用真实上传。
+
+页面中新任务的默认翻译 API 为 `http://222.20.126.133:18080/v1`，默认模型为 `gpt-6-luna`。API 密钥通过本地配置保存，页面仅显示掩码；已有任务可在翻译参数中设置自己的地址和模型。
 
 “上传并继续”保留当前任务的 ID、目录、任务类型和参数，并从 `download.info.json` 读取标题、作者和视频标识。三个文件必须齐全且非空，信息文件必须是 JSON 对象；校验失败时保留原有产物。替换已完成的下载需要确认，随后会清理旧视频及后续产物并重新推进。API 对应 `POST /api/tasks/{task_id}/download-upload`，使用 multipart 表单字段 `info`、`video`、`cover`，替换时增加 `force=true`。
 
@@ -241,7 +255,15 @@ extract-audio -> separate-audio -> transcribe -> translate
 
 已有熟肉任务缺少校正产物时，完整链路会重新执行翻译及后续步骤；单独生成字幕时，如果输入尚未经原文校正，会提示先重新运行翻译步骤。
 
-熟肉不执行 TTS、配音识别、配音质检或局部重配，即使复制的参数启用了局部重配也会跳过。默认将双语字幕烧录到视频；关闭 `synthesis.burn_subtitles` 时，将双语字幕作为可切换的字幕轨封装进 MP4。两种方式都直接保留原音轨，并输出可单独下载的 `subtitles.srt`。
+熟肉字幕保留整句翻译，再由翻译大模型结合完整原句、上下文及显示预算生成双语语义组。模型输出每组的中文和对应原文范围，程序检查译文覆盖、原文顺序、实际字体宽度及阅读时间；长句的分段可以在整句层面回修，不会先把英文按字数切开后逐段翻译。计时优先使用原声词级时间，显示时分别控制中英文换行、字号和画面安全区。分段计划及校验信息保存在 `subtitles.plan.json`，烧录使用带明确样式和换行的 `subtitles.ass`，同时保留通用的 `subtitles.srt`。
+
+真实长句、全段字体边界检查和中配隔离的验证记录见 [熟肉语义字幕分段验证](docs/subtitle-segmentation-validation.md)。
+
+校正后的原文先映射到已有的原声词级时间。若原文改动导致映射置信度不足，且具有原声音频和 WhisperX 配置，字幕步骤会按需对校正后的原文重新执行强制对齐，并缓存校正文本及对齐结果；缺少音频或对齐配置时会明确报错，避免把不可靠的词级时间用于字幕切换。这些对齐缓存随字幕和下游重配产物一起清理，不作为每个任务必需的产物。
+
+已有熟肉任务具备校正结果和完整译文，但缺少新的分段计划或 ASS 字幕时，下一次运行完整链路会只补做字幕及合成、发布包等后续步骤，复用现有翻译。单独重跑字幕会保留翻译、原文校正和可复用的分段及对齐缓存，失败后重试可继续使用已经成功处理的句子。修改熟肉字幕字体会清理呈现产物和后续成片，分段缓存由输入签名决定是否复用；重跑翻译会清理字幕计划、对齐缓存、ASS 和后续成片。更新程序不会主动重跑已有任务或调用翻译服务。
+
+熟肉不执行 TTS、配音识别、配音质检或局部重配，即使复制的参数启用了局部重配也会跳过。默认将双语 ASS 字幕烧录到视频；关闭 `synthesis.burn_subtitles` 时，将双语字幕作为可切换的字幕轨封装进 MP4。两种方式都直接保留原音轨；SRT、ASS 和分段计划在 Web UI 产物区按需下载，成片继续使用显式下载链接。
 
 同一 URL 的中配和熟肉使用独立任务及产物目录，可同时保留。已有任务未指定类型时按中配处理。任务类型在创建时确定，复制参数不会改变类型。创建 API 的 `task_type` 可选 `dub`（中配，默认）和 `sub`（熟肉），支持 `/api/tasks/url-draft`、`/api/tasks/url`、`/api/tasks/local` 和上传表单。CLI 的 `create-task`、`create-download-task`、`create-url-task` 使用 `--task-type sub` 创建熟肉任务。
 
@@ -367,7 +389,7 @@ docker compose -f compose.gpu.yml exec youdub-gpu \
 | `translate` | 视频元信息、`transcript.json` | `summary.json`、`translation.context.json`、`translation.segments.json`、`translation.json` |
 | `tts` | 译文、人声参考 | `segments/tts/`、`audio_tts.wav`、`audio_tts.timings.json` |
 | `transcribe-tts` | `audio_tts.wav` | `audio_tts.transcript.json` 及阶段产物 |
-| `subtitle` | 标准译文、TTS 转写 | `subtitles.segments.json`、`subtitles.srt` |
+| `subtitle` | 标准译文；中配使用 TTS 转写，熟肉使用原声词级时间与语义分段 | `subtitles.segments.json`、`subtitles.srt`；熟肉另有 `subtitles.plan.json`、`subtitles.ass` |
 | `inspect-tts` | TTS、转写和字幕信息 | `tts.quality.json`、`tts.redub.plan.json` |
 | `redub-tts` | 重配计划 | 更新后的 TTS 片段、`tts.redub.history.jsonl` |
 | `synthesize` | 原视频、配音、伴奏、字幕 | `audio_mixed.m4a`、`video.mp4` |

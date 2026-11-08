@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .config import AppConfig
-from .models import PipelineStep, Task
+from .models import PipelineStep, Task, TaskType
 from .pipeline import PipelineRunner
 from .task_config import dry_run_bilibili_options, runtime_options_from_task_config
 
@@ -37,7 +37,7 @@ def main() -> int:
             raise ValueError("Worker input must be a task object")
         task = Task.from_dict(data)
         options = runtime_options_from_task_config(AppConfig.from_env(), task.config)
-        options = _options_with_cuda_device(options, args.step, args.cuda_device)
+        options = _options_with_cuda_device(options, args.step, args.cuda_device, task.task_type)
         if args.step == PipelineStep.PUBLISH_BILIBILI and not options.bilibili.dry_run and not options.bilibili.confirm:
             options = dry_run_bilibili_options(options)
         cancellation = _WorkerCancellation(args.state)
@@ -71,7 +71,7 @@ def main() -> int:
         return 1
 
 
-def _options_with_cuda_device(options, step: PipelineStep, cuda_device: str | None):
+def _options_with_cuda_device(options, step: PipelineStep, cuda_device: str | None, task_type: TaskType = TaskType.DUB):
     """Apply the scheduler's concrete selection only to the active GPU step."""
     if not cuda_device:
         return options
@@ -83,7 +83,7 @@ def _options_with_cuda_device(options, step: PipelineStep, cuda_device: str | No
         PipelineStep.TRANSCRIBE_ALIGN,
         PipelineStep.TRANSCRIBE_DIARIZE,
         PipelineStep.TRANSCRIBE_TTS,
-    }:
+    } or (step == PipelineStep.SUBTITLE and task_type == TaskType.SUB):
         return replace(options, whisperx=replace(options.whisperx, device=cuda_device))
     if step in {PipelineStep.TTS, PipelineStep.REDUB_TTS}:
         return replace(options, tts=replace(options.tts, device=cuda_device))

@@ -12,6 +12,7 @@ from .publishing import (
     prepare_publish_package,
     publish_to_bilibili,
 )
+from .subtitle_layout import SubtitleLayout
 from .subtitles import build_subtitles_from_tts_asr, build_bilingual_subtitles
 from .synthesis import SynthesisConfig, synthesize_video, synthesize_subtitled_video
 from .tts import TTSConfig, generate_tts
@@ -87,7 +88,13 @@ class PipelineRunner:
                 self._call(finalize_transcript, task.folder)
             elif step == PipelineStep.TRANSLATE:
                 if task.task_type == TaskType.SUB:
-                    self._call(translate_task, task.folder, self._translation_config(), correct_source=True)
+                    self._call(
+                        translate_task,
+                        task.folder,
+                        self._translation_config(),
+                        correct_source=True,
+                        subtitle_layout=SubtitleLayout.from_task(task.folder, self._synthesis_config()),
+                    )
                 else:
                     self._call(translate_task, task.folder, self._translation_config())
             elif step == PipelineStep.TTS:
@@ -95,7 +102,16 @@ class PipelineRunner:
             elif step == PipelineStep.TRANSCRIBE_TTS:
                 self._call(transcribe_tts_audio, task.folder, self._whisperx_config())
             elif step == PipelineStep.SUBTITLE:
-                self._call(build_bilingual_subtitles if task.task_type == TaskType.SUB else build_subtitles_from_tts_asr, task.folder)
+                if task.task_type == TaskType.SUB:
+                    self._call(
+                        build_bilingual_subtitles,
+                        task.folder,
+                        translation_config=self.translation_config,
+                        synthesis_config=self._synthesis_config(),
+                        alignment_config=self.whisperx_config,
+                    )
+                else:
+                    self._call(build_subtitles_from_tts_asr, task.folder)
             elif step == PipelineStep.INSPECT_TTS:
                 self._call(inspect_tts_quality, task.folder, self.tts_quality_config or TTSQualityConfig.from_env())
             elif step == PipelineStep.REDUB_TTS:

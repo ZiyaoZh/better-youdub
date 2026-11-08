@@ -83,6 +83,8 @@ ARTIFACTS: dict[str, tuple[str, str]] = {
     "tts-quality": ("tts.quality.json", "application/json"),
     "tts-redub-plan": ("tts.redub.plan.json", "application/json"),
     "subtitles": ("subtitles.srt", "application/x-subrip"),
+    "subtitles-ass": ("subtitles.ass", "text/x-ssa"),
+    "subtitles-plan": ("subtitles.plan.json", "application/json"),
     "bilibili-dry-run": ("bilibili.dry-run.json", "application/json"),
 }
 
@@ -648,8 +650,10 @@ def create_app() -> FastAPI:
         task = _get_task(task_id)
         if _task_has_active_work(task):
             raise HTTPException(status_code=409, detail="Cannot edit a running task")
+        previous_config = task.config
         task.config = normalize_task_config_update(_config(), task.config, payload.config)
         _normalize_scheduled_publish_config(task.config)
+        _invalidate_subtitle_font_change(task, previous_config)
         _store().update(task)
         return {"config": public_task_config(_config(), task.config)}
 
@@ -668,8 +672,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail="Parameter paste requires tasks with the same identity")
         if _task_has_active_work(target):
             raise HTTPException(status_code=409, detail="Cannot edit a running task")
+        previous_config = target.config
         target.config = copy.deepcopy(source.config)
         _normalize_scheduled_publish_config(target.config)
+        _invalidate_subtitle_font_change(target, previous_config)
         _store().update(target)
         return {
             "config": public_task_config(_config(), target.config),
@@ -1547,7 +1553,8 @@ def _schedule_download_for_task(task: Task, label: str, *, force: bool = False) 
 
 def _submit_step_job(task_id: str, step: PipelineStep, label: str) -> Future[Any]:
     runtime = _create_task_runtime(task_id)
-    future = _executor_for_step(step).submit(_run_step_job, task_id, step, label)
+    task = _store().get(task_id)
+    future = _executor_for_step(step, task).submit(_run_step_job, task_id, step, label)
     return _track_running(task_id, future, runtime=runtime)
 
 
@@ -1758,16 +1765,21 @@ def _mark_task_termination_failed(task: Task, reason: str) -> Task:
     return task
 
 
-def _executor_for_step(step: PipelineStep) -> ThreadPoolExecutor:
+def _executor_for_step(step: PipelineStep, task: Task | None = None) -> ThreadPoolExecutor:
     if _step_requires_dubbing_exclusivity(step):
         return _DUBBING_EXECUTOR
-    if _step_uses_gpu(step):
+    if _step_uses_gpu(step, task):
         return _GPU_EXECUTOR
     return _EXECUTOR
 
 
-def _step_uses_gpu(step: PipelineStep) -> bool:
-    return step in GPU_STEPS
+def _step_uses_gpu(step: PipelineStep, task: Task | None = None) -> bool:
+    # Semantic SUB planning may need WhisperX to realign corrected source words.
+    # Keep that fallback in the GPU queue and an isolated worker. DUB subtitle
+    # generation still uses its original CPU scheduling and timing strategy.
+    return step in GPU_STEPS or (
+        step == PipelineStep.SUBTITLE and task is not None and task.task_type == TaskType.SUB
+    )
 
 
 def _step_requires_dubbing_exclusivity(step: PipelineStep) -> bool:
@@ -2179,7 +2191,7 @@ def _run_step_job(
             acquired_here = True
         _raise_if_termination_requested(task_id)
         if step != PipelineStep.REDUB_TTS or _redub_plan_has_segments(task):
-            _clear_step_outputs(task, step)
+            _clear_step_outputs(task, step, preserve_subtitle_cache=step == PipelineStep.SUBTITLE)
         task.status = TaskStatus.RUNNING
         task.error = None
         task.mark_step(step, StepStatus.RUNNING)
@@ -2188,7 +2200,7 @@ def _run_step_job(
         options = runtime_options_from_task_config(_config(), task.config)
         if step == PipelineStep.PUBLISH_BILIBILI and not options.bilibili.dry_run and not options.bilibili.confirm:
             options = dry_run_bilibili_options(options)
-        if _should_isolate_step(step, runtime):
+        if _should_isolate_step(step, runtime, task):
             task = _run_gpu_step_in_worker(task, step, runtime)
         else:
             task = PipelineRunner(
@@ -2229,7 +2241,7 @@ def _run_step_job(
         finally:
             if runtime is not None:
                 runtime.current_step = None
-            if _step_uses_gpu(step):
+            if _step_uses_gpu(step, task):
                 cleanup_gpu_memory(f"web-step:{step.value}")
             if release_lock and isinstance(task_lock, TaskLock):
                 task_lock.release()
@@ -2237,17 +2249,16 @@ def _run_step_job(
                 store.update(termination_result)
 
 
-def _should_isolate_step(step: PipelineStep, runtime: TaskRuntime | None) -> bool:
+def _should_isolate_step(step: PipelineStep, runtime: TaskRuntime | None, task: Task | None = None) -> bool:
     if runtime is None:
         return False
     # Keep dependency injection viable for tests and integrations that replace
     # the runner; normal WebUI execution always uses the spawn-safe worker.
-    return getattr(PipelineRunner, "__module__", "") == "youdub.pipeline" and step in {
-        *GPU_STEPS,
+    return getattr(PipelineRunner, "__module__", "") == "youdub.pipeline" and (_step_uses_gpu(step, task) or step in {
         PipelineStep.TRANSLATE,
         PipelineStep.PREPARE_PUBLISH,
         PipelineStep.PUBLISH_BILIBILI,
-    }
+    })
 
 
 def _publish_result_confirmed(runtime: TaskRuntime | None) -> bool:
@@ -2384,7 +2395,7 @@ def _run_gpu_step_in_worker(task: Task, step: PipelineStep, runtime: TaskRuntime
             selected_index = _cuda_device_index(cuda_device or _payload_cuda_device(payload))
             attempts.append(f"attempt={attempt},device={cuda_device or 'unchanged'},error={_error_summary(error)}")
             retryable = (
-                _step_uses_gpu(step)
+                _step_uses_gpu(step, task)
                 and _is_retryable_cuda_error(error)
                 and attempt < max_attempts
             )
@@ -2425,7 +2436,7 @@ def _gpu_device_request(task: Task, step: PipelineStep) -> str:
         PipelineStep.TRANSCRIBE_ALIGN,
         PipelineStep.TRANSCRIBE_DIARIZE,
         PipelineStep.TRANSCRIBE_TTS,
-    }:
+    } or (step == PipelineStep.SUBTITLE and task.task_type == TaskType.SUB):
         return options.whisperx.device
     if step in DUBBING_STEPS:
         return options.tts.device
@@ -2594,7 +2605,7 @@ def _run_step_for_run_all(task_id: str, step: PipelineStep, task_lock: TaskLock 
     if _step_requires_dubbing_exclusivity(step):
         _run_step_for_run_all_on_executor(_DUBBING_EXECUTOR, task_id, step, task_lock)
         return
-    if _step_uses_gpu(step):
+    if _step_uses_gpu(step, _store().get(task_id)):
         _run_step_for_run_all_on_executor(_GPU_EXECUTOR, task_id, step, task_lock)
         return
     _run_step_job(task_id, step, task_lock=task_lock, release_lock=False)
@@ -2730,7 +2741,7 @@ STEP_OUTPUTS: dict[PipelineStep, tuple[str, ...]] = {
         "audio_tts.transcript.aligned.json",
         "audio_tts.transcript.json",
     ),
-    PipelineStep.SUBTITLE: ("subtitles.segments.json", "subtitles.srt"),
+    PipelineStep.SUBTITLE: ("subtitles.segments.json", "subtitles.srt", "subtitles.ass", "subtitles.plan.json"),
     PipelineStep.INSPECT_TTS: ("tts.quality.json", "tts.redub.plan.json"),
     PipelineStep.REDUB_TTS: ("audio_tts.wav", "audio_tts.timings.json"),
     PipelineStep.SYNTHESIZE: ("video.mp4",),
@@ -2751,7 +2762,11 @@ STEP_CLEANUP_GROUPS: tuple[tuple[tuple[PipelineStep, ...], tuple[str, ...]], ...
         (PipelineStep.TRANSCRIBE_TTS,),
         ("audio_tts.transcript.whisper.json", "audio_tts.transcript.aligned.json", "audio_tts.transcript.json"),
     ),
-    ((PipelineStep.SUBTITLE,), ("subtitles.segments.json", "subtitles.srt")),
+    (
+        (PipelineStep.SUBTITLE,),
+        ("subtitles.segments.json", "subtitles.srt", "subtitles.ass", "subtitles.plan.json",
+         "subtitles.source-input.json", "subtitles.source-aligned.json", "subtitles.source-aligned.meta.json"),
+    ),
     ((PipelineStep.INSPECT_TTS,), ("tts.quality.json", "tts.redub.plan.json")),
     ((PipelineStep.SYNTHESIZE,), ("audio_mixed.m4a", "video.mp4")),
     ((PipelineStep.PREPARE_PUBLISH,), ("publish.json", "publish.md", "cover.jpg")),
@@ -2825,12 +2840,37 @@ def _step_completed(task: Task, step: PipelineStep) -> bool:
 
 def _missing_step_resources(task: Task, step: PipelineStep) -> list[str]:
     outputs = _step_outputs_for_task(task, step)
-    return [name for name in outputs if not _has_step_resource(task.folder / name)]
+    missing = [name for name in outputs if not _has_step_resource(task.folder / name)]
+    if (
+        task.task_type == TaskType.SUB
+        and step == PipelineStep.SUBTITLE
+        and "subtitles.plan.json" not in missing
+        and not _subtitle_plan_completed(task.folder / "subtitles.plan.json")
+    ):
+        missing.append("subtitles.plan.json")
+    return missing
+
+
+def _subtitle_plan_completed(path: Path) -> bool:
+    from .subtitle_plan import PLAN_PROMPT_VERSION, PLAN_SCHEMA_VERSION
+
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (
+        isinstance(plan, dict)
+        and plan.get("schema_version") == PLAN_SCHEMA_VERSION
+        and plan.get("prompt_version") == PLAN_PROMPT_VERSION
+        and plan.get("status") == "success"
+    )
 
 
 def _step_outputs_for_task(task: Task, step: PipelineStep) -> tuple[str, ...]:
     if task.task_type == TaskType.SUB and step == PipelineStep.TRANSLATE:
         return (*STEP_OUTPUTS[step], "transcript.corrected.json")
+    if task.task_type == TaskType.DUB and step == PipelineStep.SUBTITLE:
+        return ("subtitles.segments.json", "subtitles.srt")
     if step == PipelineStep.PUBLISH_BILIBILI:
         bilibili = effective_task_config(_config(), task.config)["bilibili"]
         dry_run = bool(bilibili["dry_run"]) or not bool(bilibili["confirm"])
@@ -2846,7 +2886,17 @@ def _has_step_resource(path: Path) -> bool:
     return False
 
 
-def _clear_step_outputs(task: Task, step: PipelineStep) -> None:
+def _invalidate_subtitle_font_change(task: Task, previous_config: dict[str, Any]) -> None:
+    if task.task_type != TaskType.SUB:
+        return
+    config = _config()
+    previous_font = effective_task_config(config, previous_config)["synthesis"]["subtitle_font"]
+    current_font = effective_task_config(config, task.config)["synthesis"]["subtitle_font"]
+    if previous_font != current_font:
+        _clear_step_outputs(task, PipelineStep.SUBTITLE, preserve_subtitle_cache=True)
+
+
+def _clear_step_outputs(task: Task, step: PipelineStep, *, preserve_subtitle_cache: bool = False) -> None:
     if step == PipelineStep.INSPECT_TTS:
         _remove_task_resource(task.folder, "tts.quality.json")
         _remove_task_resource(task.folder, "tts.redub.plan.json")
@@ -2862,10 +2912,15 @@ def _clear_step_outputs(task: Task, step: PipelineStep) -> None:
     if start is None:
         return
     affected_steps: set[PipelineStep] = set()
+    reusable_subtitle_resources = {
+        "subtitles.plan.json", "subtitles.source-input.json", "subtitles.source-aligned.json",
+        "subtitles.source-aligned.meta.json",
+    } if preserve_subtitle_cache and step == PipelineStep.SUBTITLE and task.task_type == TaskType.SUB else set()
     for group_steps, resources in STEP_CLEANUP_GROUPS[start:]:
         affected_steps.update(group_steps)
         for resource in resources:
-            _remove_task_resource(task.folder, resource)
+            if resource not in reusable_subtitle_resources:
+                _remove_task_resource(task.folder, resource)
 
     for affected in affected_steps:
         if affected.value in task.steps:
@@ -2888,6 +2943,11 @@ def _clear_redub_downstream_outputs(task: Task) -> None:
         "audio_tts.transcript.json",
         "subtitles.segments.json",
         "subtitles.srt",
+        "subtitles.ass",
+        "subtitles.plan.json",
+        "subtitles.source-input.json",
+        "subtitles.source-aligned.json",
+        "subtitles.source-aligned.meta.json",
         "audio_mixed.m4a",
         "video.mp4",
         "publish.json",

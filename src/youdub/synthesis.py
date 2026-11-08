@@ -11,6 +11,7 @@ DOWNLOAD_VIDEO = "download.mp4"
 TTS_AUDIO = "audio_tts.wav"
 INSTRUMENTS_AUDIO = "audio_instruments.wav"
 SUBTITLES = "subtitles.srt"
+ASS_SUBTITLES = "subtitles.ass"
 MIXED_AUDIO = "audio_mixed.m4a"
 FINAL_VIDEO = "video.mp4"
 
@@ -92,6 +93,9 @@ def synthesize_subtitled_video(
     task_dir = task_dir.resolve()
     video = _require_file(task_dir / DOWNLOAD_VIDEO)
     subtitles = task_dir / SUBTITLES
+    ass_subtitles = task_dir / ASS_SUBTITLES
+    if config.burn_subtitles and ass_subtitles.is_file():
+        subtitles = ass_subtitles
     if config.burn_subtitles:
         _require_file(subtitles)
     final = task_dir / FINAL_VIDEO
@@ -198,6 +202,9 @@ def subtitle_style_for_orientation(
 
 def subtitle_filter(video_path: Path, subtitles_path: Path, task_dir: Path, config: SynthesisConfig) -> str:
     sub_path = _relative_subtitle_path(subtitles_path, task_dir)
+    if subtitles_path.suffix.lower() == ".ass":
+        # ASS already contains measured geometry and separate bilingual styles.
+        return f"subtitles=filename='{sub_path}'"
     style = subtitle_style_for_orientation(
         video_orientation(video_path),
         language=config.subtitle_language,
