@@ -34,7 +34,15 @@ from .config import AppConfig
 from .cancellation import CancellationContext, TaskCancelled, run_managed_command
 from .downloader import DownloadResult, download_url_to_artifacts, supported_js_runtimes
 from .gpu import cleanup_gpu_memory, resolve_device
-from .ingest import create_pending_url_task, create_task_from_download_artifacts, create_task_from_local_media
+from .ingest import (
+    author_from_download_info,
+    create_pending_url_task,
+    create_task_from_download_artifacts,
+    create_task_from_local_media,
+    slugify,
+    source_key_from_download_info,
+    title_from_download_info,
+)
 from .locking import TASK_LOCK_NAME, TaskLock, TaskLockBusy, task_is_locked
 from .models import PipelineStep, StepStatus, Task, TaskStatus, TaskType, utc_now
 from .network import network_router
@@ -492,6 +500,71 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=409, detail="Step is already completed")
         _schedule_download_for_task(task, "web-download-url", force=force)
         return _task_payload(task)
+
+    @app.post("/api/tasks/{task_id}/download-upload")
+    def upload_download_artifacts(
+        task_id: str,
+        info: UploadFile = File(...),
+        video: UploadFile = File(...),
+        cover: UploadFile = File(...),
+        force: bool = Form(False),
+    ) -> dict[str, Any]:
+        uploads = {"download.info.json": info, "download.mp4": video, "download.webp": cover}
+        task_lock = None
+        try:
+            for name, upload in uploads.items():
+                if upload.filename != name:
+                    raise HTTPException(status_code=422, detail=f"请选择 {name}")
+            with _LOCK:
+                task = _get_task(task_id)
+                if _task_has_active_work(task):
+                    raise HTTPException(status_code=409, detail="Task is already running")
+                if _step_completed(task, PipelineStep.INGEST) and not force:
+                    raise HTTPException(status_code=409, detail="Step is already completed")
+                _validate_scheduled_publish_task(task)
+                task_lock = _acquire_task_lock_for_web(task, "web-download-upload")
+
+            # Stage the complete set on the same filesystem before replacing any outputs.
+            with tempfile.TemporaryDirectory(prefix=".download-upload-", dir=task.folder) as staging:
+                staging_dir = Path(staging)
+                for name, upload in uploads.items():
+                    target = staging_dir / name
+                    with target.open("wb") as output:
+                        shutil.copyfileobj(upload.file, output, length=1024 * 1024)
+                    if target.stat().st_size == 0:
+                        raise HTTPException(status_code=422, detail=f"{name} 不能为空")
+                try:
+                    metadata = json.loads((staging_dir / "download.info.json").read_text(encoding="utf-8"))
+                except (ValueError, UnicodeError) as exc:
+                    raise HTTPException(status_code=422, detail="download.info.json 必须是有效的 JSON 对象") from exc
+                if not isinstance(metadata, dict):
+                    raise HTTPException(status_code=422, detail="download.info.json 必须是 JSON 对象")
+
+                # Retain this task's folder, identity, type and saved configuration.
+                with _LOCK:
+                    task = _get_task(task_id)
+                    _clear_step_outputs(task, PipelineStep.INGEST)
+                    for name in uploads:
+                        (staging_dir / name).replace(task.folder / name)
+                    task.title = slugify(title_from_download_info(metadata))
+                    task.author = author_from_download_info(metadata)
+                    task.source_key = source_key_from_download_info(metadata)
+                    if task.task_type == TaskType.SUB:
+                        task.source_key += ":sub"
+                    task.status = TaskStatus.PENDING
+                    task.error = None
+                    task.mark_step(PipelineStep.INGEST, StepStatus.SUCCESS)
+                    _store().update(task)
+            with _LOCK:
+                task_lock.release()
+                task_lock = None
+                _schedule_run_all_for_task(task, "web-download-upload-continue")
+            return _task_payload(_get_task(task_id))
+        finally:
+            if task_lock is not None:
+                task_lock.release()
+            for upload in uploads.values():
+                upload.file.close()
 
     @app.post("/api/tasks/{task_id}/terminate")
     def terminate_task(task_id: str) -> dict[str, Any]:

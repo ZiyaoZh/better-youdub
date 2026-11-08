@@ -994,6 +994,36 @@ textarea:focus {
 
 .step-card-actions {
   display: grid;
+  gap: 8px;
+}
+
+.download-upload-dialog {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text);
+  background: var(--panel);
+}
+
+.download-upload-dialog::backdrop {
+  background: rgba(16, 24, 40, 0.4);
+}
+
+.download-upload-dialog form {
+  display: grid;
+  gap: 16px;
+}
+
+.download-upload-dialog h2,
+.download-upload-dialog p {
+  margin: 0;
+}
+
+.download-upload-dialog input {
+  max-width: 100%;
 }
 
 .step-card .button {

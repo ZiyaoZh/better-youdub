@@ -100,7 +100,7 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert 'id="systemLine"' in index
     assert 'id="taskPager"' in index
     assert 'id="finalVideo"' not in index
-    assert "20261028-task-types" in index
+    assert "20261029-download-upload" in index
     assert 'id="taskTypeInput"' in index
     assert 'value="sub"' in index
     assert 'id="detailIdentity"' not in index
@@ -115,7 +115,7 @@ def test_web_serves_index_static_assets_and_health(monkeypatch, tmp_path: Path) 
     assert 'id="cleanTaskResourcesButton"' in index
     assert "/assets/app.js?v=" in index
     assert "/assets/styles.css?v=" in index
-    assert "20261028-task-types" in index
+    assert "20261029-download-upload" in index
     app_js = client.get("/assets/app.js").text
     assert "完整链路包含局部重配" in app_js
     assert "待上传" in app_js
@@ -1132,6 +1132,118 @@ def test_web_downloads_url_draft_with_saved_config_and_hydrates_same_task(monkey
     assert task["config"]["translation"]["model"] == "gpt-task"
     assert captured["url"] == "https://example.test/watch?v=abc123"
     assert captured["config"].max_height == 360
+
+
+def _download_upload_files(info: bytes | None = None) -> dict:
+    if info is None:
+        info = json.dumps({
+            "extractor_key": "YouTube", "id": "abc123", "title": "Uploaded result",
+            "uploader": "Web", "webpage_url": "https://example.test/watch?v=abc123",
+        }).encode()
+    return {
+        "info": ("download.info.json", info, "application/json"),
+        "video": ("download.mp4", b"uploaded-video", "video/mp4"),
+        "cover": ("download.webp", b"uploaded-cover", "image/webp"),
+    }
+
+
+@pytest.mark.parametrize("task_type", ["dub", "sub"])
+def test_web_download_upload_skips_download_and_continues_pipeline(monkeypatch, tmp_path, task_type):
+    client = _client(monkeypatch, tmp_path)
+    draft = client.post(
+        "/api/tasks/url-draft", headers={"X-YouDub-Identity": DEVICE_A},
+        json={"url": "https://example.test/watch?v=abc123", "task_type": task_type, "max_height": 360},
+    ).json()
+    called = []
+
+    def fail_download(*args, **kwargs):
+        raise AssertionError("uploaded artifacts must bypass downloading")
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            pass
+
+        def run_step(self, task, step, task_lock=None):
+            assert task.steps["ingest"] == StepStatus.SUCCESS
+            assert (task.folder / "download.mp4").read_bytes() == b"uploaded-video"
+            called.append(step)
+            task.mark_step(step, StepStatus.SUCCESS)
+            task.status = TaskStatus.SUCCESS
+            return task
+
+    monkeypatch.setattr(web_module, "download_url_to_artifacts", fail_download)
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+    response = client.post(f"/api/tasks/{draft['id']}/download-upload", files=_download_upload_files())
+    assert response.status_code == 200
+    task = _wait_for_task_idle(client, draft["id"])
+    assert task["status"] == "success"
+    assert task["steps"]["ingest"] == "success"
+    assert task["title"] == "Uploaded result"
+    assert task["author"] == "Web"
+    assert task["source_key"] == "youtube:abc123" + (":sub" if task_type == "sub" else "")
+    assert task["identity"] == DEVICE_A
+    assert task["task_type"] == task_type
+    assert task["config"] == draft["config"]
+    assert task["folder"] == draft["folder"]
+    assert task["source"] == draft["source"]
+    assert (Path(task["folder"]) / "download.webp").read_bytes() == b"uploaded-cover"
+    assert not list(Path(task["folder"]).glob(".download-upload-*"))
+    assert called == list(web_module._run_all_steps_for_task(web_module._store().get(task["id"])))
+    assert (PipelineStep.TTS in called) == (task_type == "dub")
+
+
+@pytest.mark.parametrize("invalid", ["missing", "filename", "empty-video", "empty-cover", "json", "json-list"])
+def test_web_download_upload_validation_preserves_existing_outputs(monkeypatch, tmp_path, invalid):
+    client = _client(monkeypatch, tmp_path)
+    source = tmp_path / "original.mp4"
+    source.write_bytes(b"original-video")
+    task = client.post("/api/tasks/local", json={"source": str(source)}).json()
+    folder = Path(task["folder"])
+    (folder / "audio.wav").write_bytes(b"original-audio")
+    files = _download_upload_files()
+    if invalid == "missing":
+        del files["cover"]
+    elif invalid == "filename":
+        files["video"] = ("wrong.mp4", b"video", "video/mp4")
+    elif invalid.startswith("empty-"):
+        field = invalid.removeprefix("empty-")
+        name, _, mime = files[field]
+        files[field] = (name, b"", mime)
+    else:
+        files = _download_upload_files(b"[]" if invalid == "json-list" else b"invalid-json")
+    response = client.post(f"/api/tasks/{task['id']}/download-upload", files=files, data={"force": "true"})
+    assert response.status_code == 422
+    assert (folder / "download.mp4").read_bytes() == b"original-video"
+    assert (folder / "audio.wav").read_bytes() == b"original-audio"
+    assert client.get(f"/api/tasks/{task['id']}").json()["steps"] == task["steps"]
+    assert not list(folder.glob(".download-upload-*"))
+    assert not web_module._RUNNING
+
+
+def test_web_download_upload_refuses_active_and_requires_force_to_replace(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    draft = client.post("/api/tasks/url-draft", json={"url": "https://example.test/watch?v=abc123"}).json()
+    endpoint = f"/api/tasks/{draft['id']}/download-upload"
+    folder = Path(draft["folder"])
+    with TaskLock(folder, "existing"):
+        assert client.post(endpoint, files=_download_upload_files()).status_code == 409
+    (folder / "download.mp4").write_bytes(b"old-video")
+    (folder / "audio.wav").write_bytes(b"old-audio")
+    (folder / "video.mp4").write_bytes(b"old-final")
+    task = web_module._store().get(draft["id"])
+    task.mark_step(PipelineStep.INGEST, StepStatus.SUCCESS)
+    task.mark_step(PipelineStep.EXTRACT_AUDIO, StepStatus.SUCCESS)
+    web_module._store().update(task)
+    assert client.post(endpoint, files=_download_upload_files()).status_code == 409
+    scheduled = []
+    monkeypatch.setattr(web_module, "_schedule_run_all_for_task", lambda task, label: scheduled.append(task.id))
+    response = client.post(endpoint, files=_download_upload_files(), data={"force": "true"})
+    assert response.status_code == 200
+    assert scheduled == [draft["id"]]
+    assert (folder / "download.mp4").read_bytes() == b"uploaded-video"
+    assert not (folder / "audio.wav").exists()
+    assert not (folder / "video.mp4").exists()
+    assert response.json()["steps"]["extract-audio"] == "pending"
 
 
 def test_web_url_draft_download_merges_existing_stable_task(monkeypatch, tmp_path: Path) -> None:

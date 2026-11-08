@@ -878,11 +878,10 @@ function renderDownloadConfigCard(task) {
       </div>
       <button class="icon-button step-config-button" type="button" title="下载参数" aria-label="下载参数">⚙</button>
     </div>
-    ${canDownload ? `
-      <div class="step-card-actions">
-        <button class="button secondary download-task-button" type="button" ${taskActive(task) ? "disabled" : ""}>${buttonLabel}</button>
-      </div>
-    ` : ""}
+    <div class="step-card-actions">
+      ${canDownload ? `<button class="button secondary download-task-button" type="button" ${taskActive(task) ? "disabled" : ""}>${buttonLabel}</button>` : ""}
+      <button class="button secondary upload-download-button" type="button" ${taskActive(task) ? "disabled" : ""}>上传并继续</button>
+    </div>
   `
   card.querySelector(".step-config-button").addEventListener("click", (event) => {
     event.stopPropagation()
@@ -899,7 +898,90 @@ function renderDownloadConfigCard(task) {
       downloadTask(task).catch((error) => window.alert(error.message))
     })
   }
+  card.querySelector(".upload-download-button").addEventListener("click", (event) => {
+    event.stopPropagation()
+    openDownloadUpload(task)
+  })
   return card
+}
+
+function openDownloadUpload(task) {
+  const dialog = document.createElement("dialog")
+  dialog.className = "download-upload-dialog"
+  dialog.setAttribute("aria-label", "上传下载结果")
+  dialog.innerHTML = `
+    <form>
+      <h2>上传下载结果</h2>
+      <p>上传以下三个文件后，下载阶段将标记为完成，并自动继续后续流程。</p>
+      ${[["info", "download.info.json", ".json"], ["video", "download.mp4", ".mp4"], ["cover", "download.webp", ".webp"]].map(([field, name, accept]) => `
+        <label>${name}<input type="file" name="${field}" accept="${accept}" required /></label>
+      `).join("")}
+      <p class="message" role="status" aria-live="polite"></p>
+      <div class="form-actions">
+        <button class="button secondary upload-close" type="button">取消</button>
+        <button class="button" type="submit">上传并继续</button>
+      </div>
+    </form>
+  `
+  let busy = false
+  const form = dialog.querySelector("form")
+  const message = dialog.querySelector(".message")
+  const close = () => { if (!busy) dialog.close() }
+  dialog.querySelector(".upload-close").addEventListener("click", close)
+  dialog.addEventListener("cancel", (event) => { if (busy) event.preventDefault() })
+  dialog.addEventListener("close", () => dialog.remove())
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault()
+    if (busy) return
+    const data = new FormData(form)
+    for (const [field, name] of [["info", "download.info.json"], ["video", "download.mp4"], ["cover", "download.webp"]]) {
+      const file = data.get(field)
+      if (file?.name !== name || !file.size) {
+        message.textContent = `请选择非空的 ${name}`
+        return
+      }
+    }
+    const force = await confirmRerunIfCompleted(task, "ingest")
+    if (force === null) return
+    data.set("force", String(force))
+    busy = true
+    form.querySelectorAll("button, input").forEach((element) => { element.disabled = true })
+    message.textContent = "正在上传…"
+    try {
+      await uploadDownloadArtifacts(task.id, data, (percent) => {
+        message.textContent = percent < 100 ? `正在上传 ${percent}%` : "文件已发送，正在导入并启动后续流程…"
+      })
+      busy = false
+      dialog.close()
+      await refreshTasks()
+    } catch (error) {
+      message.textContent = error.message
+    } finally {
+      busy = false
+      form.querySelectorAll("button, input").forEach((element) => { element.disabled = false })
+    }
+  })
+  document.body.appendChild(dialog)
+  dialog.showModal()
+}
+
+function uploadDownloadArtifacts(taskId, data, onProgress) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest()
+    request.open("POST", `/api/tasks/${taskId}/download-upload`)
+    request.setRequestHeader("X-YouDub-Identity", state.deviceIdentity)
+    request.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable) onProgress(Math.floor(event.loaded / event.total * 100))
+    })
+    request.addEventListener("load", () => {
+      if (request.status >= 200 && request.status < 300) return resolve()
+      let detail = `上传失败（HTTP ${request.status}）`
+      try { detail = JSON.parse(request.responseText).detail || detail } catch {}
+      reject(new Error(detail))
+    })
+    request.addEventListener("error", () => reject(new Error("上传连接中断，请刷新任务状态后重试")))
+    request.send(data)
+  })
 }
 
 function renderStepProgress(task, step) {
