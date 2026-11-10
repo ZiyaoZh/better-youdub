@@ -73,7 +73,8 @@ COPY scripts scripts
 RUN chmod +x scripts/*.sh \
   && ln -sf /app/scripts/youdub.sh /usr/local/bin/youdub \
   && ln -sf /app/scripts/youdub-web.sh /usr/local/bin/youdub-web \
-  && python -c "import youdub; from youdub.cli import main; from youdub.web import app"
+  && python -c "import youdub; from youdub.cli import main; from youdub.web import app" \
+  && python -c "from pathlib import Path; from tempfile import TemporaryDirectory; import numpy as np; import soundfile as sf; from youdub.tts import TTSConfig, _stretch_segment_audio; tmp = TemporaryDirectory(); p = Path(tmp.name); sf.write(p / 'probe.wav', np.sin(np.arange(16000) * 2 * np.pi * 220 / 16000), 16000); (p / 'cache').mkdir(); audio = _stretch_segment_audio(p / 'probe.wav', 0.8, 0.8, p / 'cache', TTSConfig()); assert 0 < len(audio) <= 12800; tmp.cleanup()"
 
 ENTRYPOINT ["scripts/docker-entrypoint.sh"]
 CMD ["uvicorn", "youdub.web:app", "--host", "0.0.0.0", "--port", "8000"]

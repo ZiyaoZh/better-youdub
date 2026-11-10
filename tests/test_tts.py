@@ -3,6 +3,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from youdub import tts
 from youdub.network import network_router
 from youdub.tts import (
@@ -38,6 +40,33 @@ class _FakeModel:
         assert kwargs["reference_wav_path"]
         assert kwargs["text"]
         return np.ones(800, dtype=np.float32) * 0.1
+
+
+@pytest.mark.parametrize("module_name", ["core", "stretch"])
+def test_stretch_segment_audio_supports_audiostretchy_layouts(tmp_path, monkeypatch, module_name):
+    np, sf = _audio_modules()
+    package = types.ModuleType("audiostretchy")
+    package.__path__ = []
+    module = types.ModuleType(f"audiostretchy.{module_name}")
+    calls = []
+
+    def stretch_audio(source, output, *, ratio):
+        calls.append((source, output, ratio))
+        sf.write(output, np.ones(12000, dtype=np.float32) * 0.1, 16000)
+
+    module.stretch_audio = stretch_audio
+    monkeypatch.setitem(sys.modules, "audiostretchy", package)
+    monkeypatch.setitem(sys.modules, "audiostretchy.core", module if module_name == "core" else None)
+    monkeypatch.setitem(sys.modules, "audiostretchy.stretch", module if module_name == "stretch" else None)
+    source = tmp_path / "segment.wav"
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    sf.write(source, np.zeros(16000, dtype=np.float32), 16000)
+
+    audio = tts._stretch_segment_audio(source, 0.8, 0.5, cache, TTSConfig())
+
+    assert calls == [(str(source), str(cache / source.name), 0.8)]
+    assert len(audio) == 8000
 
 
 def test_load_voxcpm_model_tries_direct_before_system_proxy(monkeypatch) -> None:

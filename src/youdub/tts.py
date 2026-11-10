@@ -387,11 +387,18 @@ def _stretch_segment_audio(
 
     output_path = cache_dir / segment_path.name
     try:
-        from audiostretchy.stretch import stretch_audio
+        try:
+            from audiostretchy.core import stretch_audio
+        except ModuleNotFoundError as exc:
+            if exc.name != "audiostretchy.core":
+                raise
+            # audiostretchy releases before the core module was introduced.
+            from audiostretchy.stretch import stretch_audio
     except ImportError as exc:
         raise ImportError(
-            "The audiostretchy package is required for aligned TTS audio. "
-            "Install GPU dependencies or disable TTS alignment with YOUDUB_TTS_ALIGN_AUDIO=0."
+            "Could not import audiostretchy for aligned TTS audio: "
+            f"{exc}. Install or repair GPU dependencies, or disable TTS alignment "
+            "with YOUDUB_TTS_ALIGN_AUDIO=0."
         ) from exc
 
     stretch_audio(str(segment_path), str(output_path), ratio=ratio)
