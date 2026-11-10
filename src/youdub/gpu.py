@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import gc
+import errno
 import logging
+import os
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -64,12 +66,14 @@ def resolve_device(
 
     cuda = torch.cuda
     if not cuda.is_available():
+        _check_cuda_device_access()
         if requested == "auto":
             return ResolvedDevice("cpu")
         raise RuntimeError("CUDA was requested but no CUDA device is available")
 
     device_count = int(cuda.device_count())
     if device_count <= 0:
+        _check_cuda_device_access()
         if requested == "auto":
             return ResolvedDevice("cpu")
         raise RuntimeError("CUDA was requested but no CUDA device is available")
@@ -89,6 +93,24 @@ def resolve_device(
     )
     LOGGER.info("Selected CUDA device %s for requested device %s", selected_index, requested)
     return ResolvedDevice("cuda", selected_index)
+
+
+def _check_cuda_device_access() -> None:
+    """Identify a lost container device grant before auto falls back to CPU."""
+    for path in ("/dev/nvidiactl", "/dev/nvidia-uvm"):
+        try:
+            descriptor = os.open(path, os.O_RDWR)
+        except OSError as exc:
+            if exc.errno in {errno.EPERM, errno.EACCES}:
+                raise RuntimeError(
+                    f"CUDA device access denied: {path}: {exc.strerror}. "
+                    "The container may have lost its NVIDIA device cgroup permissions. "
+                    "Recreate it with explicit Docker GPU device mappings; see "
+                    "docs/gpu-container-stability.md. Retrying another GPU in the same "
+                    "container cannot restore these permissions."
+                ) from exc
+        else:
+            os.close(descriptor)
 
 
 def _parse_cuda_device_index(device: str) -> int | None:

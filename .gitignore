@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 command.md
+compose.gpu-devices.local.yml
 Dockerfile
 !codex-container/Dockerfile
 

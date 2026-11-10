@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import sys
 import types
+import errno
+import importlib.util
+import stat
+from pathlib import Path
+
+import pytest
 
 from youdub import gpu
 
@@ -87,3 +93,61 @@ def test_resolve_device_avoids_excluded_gpu_when_possible(monkeypatch) -> None:
     selected = gpu.resolve_device("cuda", excluded_indices={0, 1})
 
     assert selected == gpu.ResolvedDevice("cuda", 2)
+
+
+@pytest.mark.parametrize("requested", ["auto", "cuda", "cuda:2"])
+def test_resolve_device_reports_lost_container_permissions(monkeypatch, requested) -> None:
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False),
+    ))
+
+    def denied(*args):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(gpu.os, "open", denied)
+    with pytest.raises(RuntimeError, match="cgroup permissions"):
+        gpu.resolve_device(requested)
+
+
+def test_resolve_device_auto_still_uses_cpu_without_gpu(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False),
+    ))
+
+    def missing(*args):
+        raise FileNotFoundError(errno.ENOENT, "No such file or directory")
+
+    monkeypatch.setattr(gpu.os, "open", missing)
+    assert gpu.resolve_device("auto") == gpu.ResolvedDevice("cpu")
+    with pytest.raises(RuntimeError, match="no CUDA device is available"):
+        gpu.resolve_device("cuda")
+
+
+def test_device_override_includes_all_character_devices(monkeypatch, tmp_path) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "gpu_device_mappings", Path(__file__).parents[1] / "scripts/gpu_device_mappings.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    dev = tmp_path / "dev"
+    dev.mkdir()
+    for name in ("nvidiactl", "nvidia0", "nvidia4", "nvidia-uvm", "nvidia-uvm-tools"):
+        (dev / name).touch()
+    (dev / "nvidia-caps").mkdir()
+    (dev / "nvidia-caps/nvidia-cap1").touch()
+    original_stat = Path.stat
+
+    def device_stat(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if path.is_relative_to(dev) and stat.S_ISREG(result.st_mode):
+            return types.SimpleNamespace(st_mode=stat.S_IFCHR | 0o666)
+        return result
+
+    monkeypatch.setattr(Path, "stat", device_stat)
+    mappings = module.device_override(dev)["services"]["youdub-gpu"]["devices"]
+    assert len(mappings) == 6
+    assert f"{dev / 'nvidia4'}:{dev / 'nvidia4'}:rwm" in mappings
+    assert f"{dev / 'nvidia-caps/nvidia-cap1'}:{dev / 'nvidia-caps/nvidia-cap1'}:rwm" in mappings
+    (dev / "nvidia-uvm").unlink()
+    with pytest.raises(RuntimeError, match="devices are missing"):
+        module.device_override(dev)

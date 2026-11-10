@@ -148,6 +148,10 @@ Xet 客户端，以确保 SOCKS 代理能覆盖模型权重下载。WebUI 会在
 
 ### 3. 启动 GPU 服务
 
+长期运行的 systemd/cgroup 环境建议同时配置显式 GPU 设备映射，避免容器运行中
+出现 NVML `Unknown Error`、CUDA 不可用且重启才恢复的问题，见
+[GPU 容器稳定性修复](docs/gpu-container-stability.md)。
+
 ```bash
 export YOUDUB_UID="$(id -u)"
 export YOUDUB_GID="$(id -g)"
