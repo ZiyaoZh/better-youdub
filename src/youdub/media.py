@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -8,6 +9,8 @@ from pathlib import Path
 
 from .cancellation import CancellationContext, run_managed_command
 from .gpu import resolve_device
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,7 @@ def run_command(
     *,
     cancellation: CancellationContext | None = None,
     cleanup_paths: tuple[Path, ...] = (),
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if cancellation is None:
         result = subprocess.run(
@@ -49,12 +53,14 @@ def run_command(
             stderr=subprocess.PIPE,
             text=True,
             check=False,
+            env=env,
         )
     else:
         result = run_managed_command(
             command,
             cancellation=cancellation,
             cleanup_paths=cleanup_paths,
+            env=env,
         )
     if result.returncode != 0:
         raise CommandError(command, result.returncode, result.stderr)
@@ -112,6 +118,17 @@ def separate_audio(
     output_dir.mkdir(parents=True, exist_ok=True)
     demucs_root = output_dir / "demucs"
     resolved_device = resolve_device(device)
+    env = None
+    if resolved_device.torch_name.startswith("cuda"):
+        threads = int(os.getenv("YOUDUB_DEMUCS_CPU_THREADS", "4"))
+        if threads < 1:
+            raise ValueError("YOUDUB_DEMUCS_CPU_THREADS must be a positive integer")
+        env = os.environ.copy()
+        # Set before Demucs imports torch/BLAS. GPU inference still uses CUDA;
+        # these pools handle CPU preprocessing and overlap/add reconstruction.
+        for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+            env[key] = str(threads)
+        LOGGER.info("Demucs device=%s CPU threads=%s", resolved_device.torch_name, threads)
     command = [
         "demucs",
         "--two-stems",
@@ -127,12 +144,13 @@ def separate_audio(
         str(audio_path),
     ]
     if cancellation is None:
-        run_command(command)
+        run_command(command, env=env)
     else:
         run_command(
             command,
             cancellation=cancellation,
             cleanup_paths=(demucs_root, output_dir / "audio_vocals.wav", output_dir / "audio_instruments.wav"),
+            env=env,
         )
 
     source_dir = demucs_root / model_name / audio_path.stem

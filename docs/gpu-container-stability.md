@@ -56,3 +56,16 @@ docker compose exec youdub-gpu python -c 'import torch; assert torch.cuda.is_ava
 故障 worker 本身已经是独立 Python 进程。容器级设备权限丢失时，再启动 worker、
 换卡或增加重试次数均不能恢复权限。界面父进程可能仍保留先前 CUDA 初始化结果，
 所以仍会选出 `cuda:2`，而新的 worker 初始化 CUDA 时会失败。
+
+## GPU 分离时 CPU 占用高、处理慢
+
+GPU Demucs 仍在 CPU 上处理整段音频、拼接结果。大型多核机器上的 PyTorch
+默认线程数可能过高，多个任务并发时，线程调度和同步会拖慢处理。
+GPU 分离子进程默认将 `OMP_NUM_THREADS`、`MKL_NUM_THREADS`、
+`OPENBLAS_NUM_THREADS` 设置为 4；可以通过 `YOUDUB_DEMUCS_CPU_THREADS`
+设置其他正整数。此限制仅作用于 GPU Demucs 子进程，不影响 CPU 分离或其他步骤。
+
+线程数不是音质参数：模型仍是 `htdemucs_ft`，分段、重叠、随机平移次数和
+输出格式均不变。不同归约顺序可能产生微小浮点差异。线程数也不是越小越好，
+应根据实际硬件和并发量测量；默认 4 来自当前 A100 多任务环境的对比结果。
+配置修改对新启动的分离进程生效，已运行的进程继续使用原线程数。
