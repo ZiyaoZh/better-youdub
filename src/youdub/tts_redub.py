@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .cancellation import CancellationContext, TaskCancelled
+from .subtitles import text_similarity
 from .tts import (
     TTSConfig,
     TTS_SEGMENTS_DIR,
@@ -23,6 +26,8 @@ from .tts import (
 )
 from .tts_quality import REDUB_PLAN_OUTPUT
 
+LOGGER = logging.getLogger(__name__)
+
 TTS_VERSIONS_DIR = "segments/tts_versions"
 VOCAL_SEGMENTS_DIR = "segments/vocals"
 REDUB_HISTORY_OUTPUT = "tts.redub.history.jsonl"
@@ -32,12 +37,22 @@ REDUB_HISTORY_OUTPUT = "tts.redub.history.jsonl"
 class RedubTTSConfig:
     round: int = 1
     max_rounds: int = 1
+    candidates: int = 3
+    accept_similarity: float = 0.90
+    min_improvement: float = 0.02
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.candidates <= 5:
+            raise ValueError("Redub candidates must be between 1 and 5")
+        if not 0 < self.min_improvement <= 1 or not 0 < self.accept_similarity <= 1:
+            raise ValueError("Redub similarity thresholds must be in (0, 1]")
 
     @classmethod
     def from_env(cls) -> "RedubTTSConfig":
         return cls(
             round=_int_env("YOUDUB_TTS_REDUB_ROUND", cls.round),
             max_rounds=_int_env("YOUDUB_TTS_REDUB_MAX_ROUNDS", cls.max_rounds),
+            candidates=_int_env("YOUDUB_TTS_REDUB_CANDIDATES", cls.candidates),
         )
 
 
@@ -68,10 +83,13 @@ def redub_tts(
         raise FileNotFoundError(vocals_dir)
     version_dir = task_dir / TTS_VERSIONS_DIR / f"round-{redub_config.round:03d}"
     version_dir.mkdir(parents=True, exist_ok=True)
+    # Preserve earlier attempts when this round is run again.
+    version_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=version_dir))
 
+    scorer = None
     model = None
     try:
-        model = load_voxcpm_model(tts_config)
+        scorer = load_redub_scorer(tts_config)
         fallback = choose_fallback_reference(vocals_dir, tts_config.min_reference_ms)
         for item in segments:
             _checkpoint(cancellation, f"redub:segment:{item.get('tts_index', 'unknown')}")
@@ -86,28 +104,56 @@ def redub_tts(
             if not reference_path.exists() or audio_duration_ms(reference_path) < tts_config.min_reference_ms:
                 reference_path = fallback
             try:
-                _checkpoint(cancellation, f"redub:generate:{tts_index}")
-                wav = model.generate(
-                    text=tts_synthesis_text(entries[tts_index - 1], tts_config),
-                    reference_wav_path=str(reference_path),
-                    cfg_value=tts_config.cfg_value,
-                    inference_timesteps=tts_config.inference_timesteps,
+                entry = entries[tts_index - 1]
+                text = tts_synthesis_text(entry, tts_config)
+                baseline = score_redub_audio(scorer, previous_path, text)
+                best_quality = baseline
+                best_path = None
+                best_strategy = None
+                candidates = []
+                if baseline["similarity"] < redub_config.accept_similarity:
+                    if model is None:
+                        model = load_voxcpm_model(tts_config)
+                    for candidate in range(redub_config.candidates):
+                        _checkpoint(cancellation, f"redub:generate:{tts_index}:{candidate + 1}")
+                        strategy = redub_candidate_strategy(tts_config, candidate, redub_config.round)
+                        candidate_path = version_dir / f"{tts_index:04d}.candidate-{candidate + 1}.wav"
+                        wav = model.generate(
+                            text=text,
+                            reference_wav_path=str(reference_path),
+                            **strategy,
+                        )
+                        _soundfile().write(str(candidate_path), wav, int(model.tts_model.sample_rate))
+                        _checkpoint(cancellation, f"redub:score:{tts_index}:{candidate + 1}")
+                        quality = score_redub_audio(scorer, candidate_path, text)
+                        candidates.append({"file": str(candidate_path), "strategy": strategy, "quality": quality})
+                        if quality["similarity"] > best_quality["similarity"]:
+                            best_path, best_quality, best_strategy = candidate_path, quality, strategy
+                        if best_quality["similarity"] >= redub_config.accept_similarity:
+                            break
+                improved = (
+                    best_path is not None
+                    and best_quality["similarity"] >= baseline["similarity"] + redub_config.min_improvement
                 )
-                _soundfile().write(str(new_path), wav, int(model.tts_model.sample_rate))
-                replace_tts_segment(new_path, active_path)
-                update_tts_manifest_record(task_dir, tts_index, entries[tts_index - 1], reference_path, tts_config)
-                _append_history(
-                    task_dir,
-                    _history_record(
-                        redub_config,
-                        item,
-                        "success",
-                        old_file=previous_path,
-                        new_file=version_dir / f"{tts_index:04d}.new.wav",
-                        strategy=_strategy_for_history(item, tts_config),
-                    ),
+                _checkpoint(cancellation, f"redub:select:{tts_index}")
+                if improved:
+                    replace_tts_segment(best_path, new_path)
+                    replace_tts_segment(new_path, active_path)
+                    # Keep the base cache identity: a later normal TTS run must not undo this repair.
+                    update_tts_manifest_record(task_dir, tts_index, entry, reference_path, tts_config)
+                record = _history_record(
+                    redub_config, item, "success" if improved else "kept_original",
+                    old_file=previous_path, new_file=new_path if improved else None,
+                    strategy=best_strategy,
                 )
-                _checkpoint(cancellation, f"redub:segment-complete:{tts_index}")
+                record.update(old_quality=baseline, new_quality=best_quality if improved else baseline,
+                              synthesis_text=text, reference_file=str(reference_path),
+                              global_quality={"similarity": item.get("similarity"), "reasons": item.get("reasons", [])},
+                              candidates=candidates, selection_reason="improved" if improved else
+                              "baseline_passed" if not candidates else "no_improvement")
+                _append_history(task_dir, record)
+                LOGGER.info("redub segment %s: %.4f -> %.4f (%s)", tts_index,
+                            baseline["similarity"], record["new_quality"]["similarity"], record["selection_reason"])
             except TaskCancelled:
                 if previous_path.exists():
                     replace_tts_segment(previous_path, active_path)
@@ -123,7 +169,7 @@ def redub_tts(
                         "failed",
                         old_file=previous_path,
                         new_file=new_path if new_path.exists() else None,
-                        strategy=_strategy_for_history(item, tts_config),
+                        strategy=None,
                         error=str(exc),
                     ),
                 )
@@ -132,6 +178,7 @@ def redub_tts(
         return write_tts_mix(entries, tts_dir, task_dir, tts_config, cancellation=cancellation)
     finally:
         del model
+        del scorer
         if not tts_config.cache_model:
             unload_voxcpm_model()
 
@@ -164,7 +211,14 @@ def replace_tts_segment(source_path: Path, active_path: Path) -> None:
     if not source_path.exists():
         raise FileNotFoundError(source_path)
     active_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_path, active_path)
+    # Stage on the same filesystem so readers never observe a partial WAV.
+    fd, temporary = tempfile.mkstemp(prefix=f".{active_path.name}.", dir=active_path.parent)
+    os.close(fd)
+    try:
+        shutil.copy2(source_path, temporary)
+        os.replace(temporary, active_path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def _history_record(
@@ -195,18 +249,39 @@ def _history_record(
     }
 
 
-def _strategy_for_history(segment: dict[str, Any], config: TTSConfig) -> dict[str, Any]:
-    strategy = segment.get("strategy")
-    if not isinstance(strategy, dict):
-        strategy = {}
-    return {
-        **strategy,
-        "reference": strategy.get("reference") or "same_segment_or_fallback",
-        "cfg_value": config.cfg_value,
-        "inference_timesteps": config.inference_timesteps,
-        "start_pad_ms": config.start_pad_ms,
-        "end_pad_ms": config.end_pad_ms,
-    }
+def redub_candidate_strategy(config: TTSConfig, candidate: int, round_number: int = 1) -> dict[str, Any]:
+    # Change both guidance and solver resolution; repeating the failed configuration
+    # provides no directed correction even though VoxCPM sampling is stochastic.
+    offsets = (0.5, -0.5, 1.0, -0.75, 0.75)
+    offset = offsets[(candidate + round_number - 1) % len(offsets)]
+    return {"cfg_value": max(0.5, config.cfg_value + offset),
+            "inference_timesteps": max(20, config.inference_timesteps * 2) + candidate * 5}
+
+
+def load_redub_scorer(config: TTSConfig):
+    from faster_whisper import WhisperModel
+    from .gpu import resolve_device
+    from .transcription import _cached_whisper_model_source
+
+    model_name = os.getenv("YOUDUB_WHISPER_MODEL", "large-v2")
+    root = Path(os.getenv("YOUDUB_MODELS_DIR", "models")) / "ASR" / "whisper"
+    source = _cached_whisper_model_source(root, model_name)
+    device = resolve_device(config.device)
+    return WhisperModel(str(source or model_name), device=device.name,
+                        device_index=device.index or 0,
+                        compute_type="float16" if device.name == "cuda" else "int8",
+                        download_root=str(root))
+
+
+def score_redub_audio(scorer, path: Path, text: str) -> dict[str, Any]:
+    # No target text as a prompt: it could bias recognition towards a false pass.
+    segments, _info = scorer.transcribe(
+        str(path), language=os.getenv("YOUDUB_TTS_ASR_LANGUAGE", "zh"),
+        beam_size=5, temperature=0, condition_on_previous_text=False, vad_filter=False,
+    )
+    recognized = "".join(segment.text for segment in segments).strip()
+    return {"asr_text": recognized, "similarity": text_similarity(text, recognized),
+            "duration_ms": audio_duration_ms(path), "source": "segment_asr"}
 
 
 def _append_history(task_dir: Path, record: dict[str, Any]) -> None:

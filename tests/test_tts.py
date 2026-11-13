@@ -222,6 +222,7 @@ def test_generate_tts_uses_tower_path_tts_text_and_regenerates_without_matching_
     tts_dir.mkdir(parents=True)
     sf.write(tts_dir / "0001.wav", np.zeros(800, dtype=np.float32), 16000)
     captured_texts = []
+    _mock_redub_scoring(monkeypatch)
 
     class CapturingModel(_FakeModel):
         def generate(self, **kwargs):
@@ -331,6 +332,7 @@ def test_redub_tts_replaces_segment_and_rebuilds_mix(tmp_path: Path, monkeypatch
         encoding="utf-8",
     )
     monkeypatch.setattr("youdub.tts_redub.load_voxcpm_model", lambda _config: _FakeModel())
+    _mock_redub_scoring(monkeypatch)
     unloaded = []
     monkeypatch.setattr("youdub.tts_redub.unload_voxcpm_model", lambda: unloaded.append(True))
 
@@ -338,8 +340,8 @@ def test_redub_tts_replaces_segment_and_rebuilds_mix(tmp_path: Path, monkeypatch
 
     audio, _sample_rate = sf.read(tts_dir / "0001.wav", dtype="float32")
     assert float(audio.max()) > 0.09
-    assert (tmp_path / "segments" / "tts_versions" / "round-001" / "0001.previous.wav").exists()
-    assert (tmp_path / "segments" / "tts_versions" / "round-001" / "0001.new.wav").exists()
+    assert list((tmp_path / "segments" / "tts_versions" / "round-001").glob("attempt-*/0001.previous.wav"))
+    assert list((tmp_path / "segments" / "tts_versions" / "round-001").glob("attempt-*/0001.new.wav"))
     assert (tmp_path / "audio_tts.wav").exists()
     history = (tmp_path / "tts.redub.history.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert len(history) == 1
@@ -375,6 +377,7 @@ def test_redub_tts_uses_tower_path_tts_text(tmp_path: Path, monkeypatch) -> None
         encoding="utf-8",
     )
     captured_texts = []
+    _mock_redub_scoring(monkeypatch)
 
     class CapturingModel(_FakeModel):
         def generate(self, **kwargs):
@@ -389,3 +392,79 @@ def test_redub_tts_uses_tower_path_tts_text(tmp_path: Path, monkeypatch) -> None
     assert captured_texts == ["走 2杠0杠5 路线。"]
     manifest = json.loads((tmp_path / "segments" / "tts.manifest.json").read_text(encoding="utf-8"))
     assert manifest["segments"]["0001"]["tts_text"] == "走 2杠0杠5 路线。"
+
+
+def _mock_redub_scoring(monkeypatch, scores=None):
+    monkeypatch.setattr("youdub.tts_redub.load_redub_scorer", lambda config: object())
+    def score(scorer, path, text):
+        value = (0.0 if "previous" in path.name else 1.0) if scores is None else next(scores)
+        return {"similarity": value, "asr_text": text, "source": "segment_asr"}
+    monkeypatch.setattr("youdub.tts_redub.score_redub_audio", score)
+
+
+@pytest.mark.parametrize("scores,expected,status,count", [
+    ([0.4, 0.3, 0.2, 0.1], 0.4, "kept_original", 3),
+    ([1.0], 1.0, "kept_original", 0),
+    ([0.2, 0.6, 0.8, 0.5], 0.8, "success", 3),
+    ([0.8, 0.81, 0.7, 0.6], 0.8, "kept_original", 3),
+])
+def test_redub_selects_only_better_candidates(tmp_path, monkeypatch, scores, expected, status, count):
+    np, sf = _audio_modules()
+    (tmp_path / "translation.json").write_text(json.dumps([
+        {"start": 0, "end": 1, "translation": "这是一段测试音频。"}]))
+    (tmp_path / "tts.redub.plan.json").write_text(json.dumps({"segments": [{"tts_index": 1}]}))
+    for kind in ("tts", "vocals"):
+        folder = tmp_path / "segments" / kind
+        folder.mkdir(parents=True)
+        sf.write(folder / "0001.wav", np.zeros(16000, dtype=np.float32), 16000)
+    original = (tmp_path / "segments/tts/0001.wav").read_bytes()
+    strategies = []
+    class Model(_FakeModel):
+        def generate(self, **kwargs):
+            strategies.append((kwargs["cfg_value"], kwargs["inference_timesteps"]))
+            return super().generate(**kwargs)
+    monkeypatch.setattr("youdub.tts_redub.load_voxcpm_model", lambda config: Model())
+    monkeypatch.setattr("youdub.tts_redub.unload_voxcpm_model", lambda: None)
+    _mock_redub_scoring(monkeypatch, iter(scores))
+    redub_tts(tmp_path, TTSConfig(align_audio=False), RedubTTSConfig())
+    record = json.loads((tmp_path / "tts.redub.history.jsonl").read_text())
+    assert record["status"] == status
+    assert record["new_quality"]["similarity"] == expected
+    assert len(strategies) == count
+    assert len(set(strategies)) == count
+    assert all(strategy != (2.0, 10) for strategy in strategies)
+    if status == "kept_original":
+        assert (tmp_path / "segments/tts/0001.wav").read_bytes() == original
+    else:
+        assert record["strategy"]["cfg_value"] == 1.5
+
+
+def test_redub_scoring_failure_keeps_original(tmp_path, monkeypatch):
+    np, sf = _audio_modules()
+    (tmp_path / "translation.json").write_text(json.dumps([
+        {"start": 0, "end": 1, "translation": "失败应保留原音频。"}]))
+    (tmp_path / "tts.redub.plan.json").write_text(json.dumps({"segments": [{"tts_index": 1}]}))
+    for kind in ("tts", "vocals"):
+        folder = tmp_path / "segments" / kind
+        folder.mkdir(parents=True)
+        sf.write(folder / "0001.wav", np.zeros(16000, dtype=np.float32), 16000)
+    active = tmp_path / "segments/tts/0001.wav"
+    original = active.read_bytes()
+    monkeypatch.setattr("youdub.tts_redub.load_redub_scorer", lambda config: object())
+    def fail(*args):
+        raise RuntimeError("ASR failed")
+    monkeypatch.setattr("youdub.tts_redub.score_redub_audio", fail)
+    monkeypatch.setattr("youdub.tts_redub.unload_voxcpm_model", lambda: None)
+    with pytest.raises(RuntimeError, match="ASR failed"):
+        redub_tts(tmp_path, TTSConfig(), RedubTTSConfig())
+    assert active.read_bytes() == original
+    assert json.loads((tmp_path / "tts.redub.history.jsonl").read_text())["status"] == "failed"
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"candidates": 0}, {"candidates": 6}, {"accept_similarity": 1.1},
+    {"min_improvement": 0}, {"accept_similarity": float("nan")},
+])
+def test_redub_config_rejects_invalid_selection_limits(kwargs):
+    with pytest.raises(ValueError):
+        RedubTTSConfig(**kwargs)

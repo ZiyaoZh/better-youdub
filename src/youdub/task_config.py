@@ -426,6 +426,9 @@ def runtime_options_from_task_config(config: AppConfig, overrides: Mapping[str, 
         redub_tts=RedubTTSConfig(
             round=int(values["redub_tts"]["round"]),
             max_rounds=workflow_max_rounds,
+            candidates=int(values["redub_tts"]["candidates"]),
+            accept_similarity=float(values["redub_tts"]["accept_similarity"]),
+            min_improvement=float(values["redub_tts"]["min_improvement"]),
         ),
         synthesis=SynthesisConfig(
             burn_subtitles=bool(values["synthesis"]["burn_subtitles"]),

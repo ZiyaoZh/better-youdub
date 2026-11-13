@@ -378,3 +378,13 @@ def test_task_config_partial_update_preserves_sections_and_masked_secrets(monkey
     assert effective["translation"]["model"] == "gpt-updated"
     assert effective["translation"]["segment_extra_prompt"] == "旧分段提示"
     assert effective["tts"]["cfg_value"] == 3.0
+
+
+def test_redub_selection_options_reach_runtime(monkeypatch, tmp_path):
+    monkeypatch.setenv("YOUDUB_CONFIG_PATH", str(tmp_path / "youdub.json"))
+    options = runtime_options_from_task_config(AppConfig.from_env(), {
+        "redub_tts": {"candidates": 2, "accept_similarity": 0.95, "min_improvement": 0.05},
+    })
+    assert options.redub_tts.candidates == 2
+    assert options.redub_tts.accept_similarity == 0.95
+    assert options.redub_tts.min_improvement == 0.05
