@@ -7,8 +7,8 @@ services:
     working_dir: /app
     environment:
       PYTHONPATH: /app/src
-      YOUDUB_UID: ${YOUDUB_UID:-1064}
-      YOUDUB_GID: ${YOUDUB_GID:-1065}
+      YOUDUB_UID: ${YOUDUB_UID:-1059}
+      YOUDUB_GID: ${YOUDUB_GID:-1059}
       YOUDUB_ROOT: /data/videos
       YOUDUB_TASKS_PATH: /data/tasks/tasks.json
       YOUDUB_LOG_DIR: /data/logs

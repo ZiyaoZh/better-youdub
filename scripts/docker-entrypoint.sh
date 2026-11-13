@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_UID="${YOUDUB_UID:-1064}"
-APP_GID="${YOUDUB_GID:-1065}"
+APP_UID="${YOUDUB_UID:-1059}"
+APP_GID="${YOUDUB_GID:-1059}"
 APP_USER="${APP_UID}:${APP_GID}"
 
 ensure_app_user() {
