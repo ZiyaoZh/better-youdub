@@ -236,36 +236,20 @@ def test_web_system_status_reports_compact_resource_summary(monkeypatch, tmp_pat
     }
 
 
-def test_web_gpu_memory_falls_back_to_torch_when_nvidia_smi_is_missing(monkeypatch) -> None:
-    gib = 1024 * 1024 * 1024
-
-    class FakeCuda:
-        @staticmethod
-        def is_available() -> bool:
-            return True
-
-        @staticmethod
-        def device_count() -> int:
-            return 2
-
-        @staticmethod
-        def mem_get_info(index: int) -> tuple[int, int]:
-            return {
-                0: (6 * gib, 8 * gib),
-                1: (10 * gib, 12 * gib),
-            }[index]
+def test_web_gpu_memory_does_not_touch_torch_without_monitoring_tools(monkeypatch) -> None:
+    class ForbiddenCuda:
+        def __getattr__(self, name):
+            raise AssertionError(f"Monitoring must not create a CUDA context: {name}")
 
     monkeypatch.setattr(web_module.shutil, "which", lambda name: None)
     monkeypatch.setitem(sys.modules, "pynvml", None)
-    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=FakeCuda()))
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=ForbiddenCuda()))
 
-    payload = web_module._gpu_memory_usage_payload()
-
-    assert payload == {
-        "available": True,
-        "used_bytes": 4 * gib,
-        "total_bytes": 20 * gib,
-        "percent": 20.0,
+    assert web_module._gpu_memory_usage_payload() == {
+        "available": False,
+        "used_bytes": None,
+        "total_bytes": None,
+        "percent": None,
     }
 
 
@@ -1917,7 +1901,7 @@ def test_web_does_not_retry_non_cuda_gpu_worker_failure(monkeypatch, tmp_path: P
 
 
 def test_web_preserves_explicit_cuda_device_for_gpu_worker(monkeypatch) -> None:
-    monkeypatch.setattr(web_module, "resolve_device", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError()))
+    monkeypatch.setattr(web_module, "resolve_device_isolated", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError()))
 
     selected, lease_index = web_module._lease_gpu_device("cuda:3", excluded_indices={3})
 

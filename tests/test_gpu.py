@@ -16,6 +16,9 @@ class _FakeCuda:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
+    def is_initialized(self) -> bool:
+        return True
+
     def is_available(self) -> bool:
         return True
 
@@ -151,3 +154,39 @@ def test_device_override_includes_all_character_devices(monkeypatch, tmp_path) -
     (dev / "nvidia-uvm").unlink()
     with pytest.raises(RuntimeError, match="devices are missing"):
         module.device_override(dev)
+
+
+def test_cleanup_does_not_initialize_idle_cuda(monkeypatch) -> None:
+    class IdleCuda:
+        def is_initialized(self):
+            return False
+
+        def __getattr__(self, name):
+            raise AssertionError(f"Idle CUDA must not be touched: {name}")
+
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=IdleCuda()))
+    gpu.cleanup_gpu_memory("idle-parent")
+    assert gpu.cuda_memory_snapshot("idle-parent") is None
+
+
+def test_isolated_device_probe_preserves_exclusions(monkeypatch) -> None:
+    import json
+    import subprocess
+
+    def probe(command, **kwargs):
+        assert command[:3] == [sys.executable, "-m", "youdub.gpu"]
+        assert command[3] == "auto"
+        assert json.loads(command[4]) == [0, 2]
+        return subprocess.CompletedProcess(command, 0, '{"name":"cuda","index":1}', '')
+
+    monkeypatch.setattr(gpu.subprocess, "run", probe)
+    assert gpu.resolve_device_isolated("auto", excluded_indices={2, 0}) == gpu.ResolvedDevice("cuda", 1)
+
+
+def test_isolated_device_probe_reports_errors(monkeypatch) -> None:
+    import subprocess
+
+    monkeypatch.setattr(gpu.subprocess, "run", lambda *args, **kwargs:
+        subprocess.CompletedProcess(args, 1, '', 'CUDA device access denied'))
+    with pytest.raises(RuntimeError, match="CUDA device access denied"):
+        gpu.resolve_device_isolated("cuda")

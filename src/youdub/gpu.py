@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-import gc
 import errno
+import gc
+import json
 import logging
 import os
+import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -95,6 +98,28 @@ def resolve_device(
     return ResolvedDevice("cuda", selected_index)
 
 
+def resolve_device_isolated(
+    device: str,
+    *,
+    excluded_indices: set[int] | frozenset[int] | None = None,
+) -> ResolvedDevice:
+    """Probe CUDA in a short-lived process so scheduling retains no context."""
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "youdub.gpu", device,
+            json.dumps(sorted(excluded_indices or ())),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(f"CUDA device probe failed: {result.stderr.strip()}")
+    payload = json.loads(result.stdout)
+    return ResolvedDevice(payload["name"], payload["index"])
+
+
 def _check_cuda_device_access() -> None:
     """Identify a lost container device grant before auto falls back to CPU."""
     for path in ("/dev/nvidiactl", "/dev/nvidia-uvm"):
@@ -163,7 +188,7 @@ def _device_with_most_free_memory(
 
 def cuda_memory_snapshot(label: str = "") -> CudaMemorySnapshot | None:
     torch = _torch_module()
-    if torch is None or not _cuda_available(torch):
+    if torch is None or not _cuda_initialized(torch):
         return None
 
     cuda = torch.cuda
@@ -188,7 +213,7 @@ def cleanup_gpu_memory(label: str = "gpu-cleanup", *, collect_ipc: bool = True) 
         return
 
     cuda = getattr(torch, "cuda", None)
-    if cuda is None or not _cuda_available(torch):
+    if cuda is None or not _cuda_initialized(torch):
         gc.collect()
         return
 
@@ -212,19 +237,14 @@ def cleanup_gpu_memory(label: str = "gpu-cleanup", *, collect_ipc: bool = True) 
 
 
 def _torch_module() -> Any | None:
-    try:
-        import torch
-    except Exception:
-        return None
-    return torch
+    # Cleanup must never import torch or initialize CUDA in an idle parent.
+    return sys.modules.get("torch")
 
 
-def _cuda_available(torch: Any) -> bool:
+def _cuda_initialized(torch: Any) -> bool:
     cuda = getattr(torch, "cuda", None)
-    if cuda is None or not hasattr(cuda, "is_available"):
-        return False
     try:
-        return bool(cuda.is_available())
+        return bool(cuda is not None and cuda.is_initialized())
     except Exception:
         return False
 
@@ -249,3 +269,8 @@ def _cuda_call(cuda: Any, name: str) -> None:
         function()
     except Exception:
         LOGGER.debug("Ignoring CUDA cleanup failure from %s", name, exc_info=True)
+
+
+if __name__ == "__main__":
+    selected = resolve_device(sys.argv[1], excluded_indices=set(json.loads(sys.argv[2])))
+    print(json.dumps({"name": selected.name, "index": selected.index}))

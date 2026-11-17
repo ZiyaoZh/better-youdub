@@ -435,6 +435,8 @@ YOUDUB_ROOT/<author>/<upload_date> <title>/
 
 Web UI 对 Demucs、WhisperX（包括对配音的识别）和 TTS/局部重配均在独立 GPU 子进程中执行。若子进程报出可识别的 CUDA 瞬态错误（例如 `CUDA failed with error invalid argument`、cuDNN/cuBLAS 状态错误或非法内存访问），默认会在清理旧子进程后再执行一次。使用 `auto` 或未编号 `cuda` 时，重试会避开首次选中的卡；指定 `cuda:N` 时保留该显式选择并在同一卡重试。`YOUDUB_GPU_MAX_ATTEMPTS` 默认是 `2`（首次加一次重试），`YOUDUB_GPU_RETRY_DELAY_SECONDS` 默认是 `1`；模型、音频、配置等非 CUDA 错误不会自动重试。
 
+Web 的自动选卡探测也在短生命周期子进程中执行，常驻 Web 进程不会为调度、显存监控或清理创建 CUDA 上下文。GPU 步骤结束并退出 worker 后，YouDub 不保留模型或 CUDA 上下文占用显存。显存监控使用 `nvidia-smi` 或 NVML；两者都不可用时显示不可用，不通过 PyTorch 初始化 CUDA 来查询。
+
 `YOUDUB_DOWNLOAD_MAX_HEIGHT=0` 表示不限制下载高度。首次调试建议先限制为 `720` 或使用短视频，以减少下载、模型运行和合成时间。
 
 Docker 启动时，如果配置了 `network.ssh_host` 或 `YOUDUB_NETWORK_SSH_HOST`，入口脚本会建立 SSH 动态转发，并将系统候选代理指向本地 SOCKS 端口。Compose 默认把 `${HOME}/.ssh` 以只读方式挂载到容器；入口脚本会先将它复制到应用用户专用的临时 SSH 目录，以兼容宿主机和容器 UID 不同或 SSH 配置文件权限偏宽的情况。非默认 SSH 目录可通过 `YOUDUB_SSH_DIR` 指定。旧的 `translation.ssh_host` 和 `YOUDUB_TRANSLATION_SSH_HOST` 仍可兼容读取。

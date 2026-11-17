@@ -33,7 +33,7 @@ from pydantic import BaseModel
 from .config import AppConfig
 from .cancellation import CancellationContext, TaskCancelled, run_managed_command
 from .downloader import DownloadResult, download_url_to_artifacts, supported_js_runtimes
-from .gpu import cleanup_gpu_memory, resolve_device
+from .gpu import cleanup_gpu_memory, resolve_device_isolated
 from .ingest import (
     author_from_download_info,
     create_pending_url_task,
@@ -1104,7 +1104,6 @@ def _gpu_memory_usage_payload() -> dict[str, Any]:
     for reader in (
         _gpu_memory_usage_from_nvidia_smi,
         _gpu_memory_usage_from_pynvml,
-        _gpu_memory_usage_from_torch,
     ):
         payload = reader()
         if payload["available"]:
@@ -1166,33 +1165,6 @@ def _gpu_memory_usage_from_pynvml() -> dict[str, Any]:
                 total += int(info.total)
         finally:
             pynvml.nvmlShutdown()
-    except Exception:
-        return _resource_usage_payload(None, None, available=False)
-    if total <= 0:
-        return _resource_usage_payload(None, None, available=False)
-    return _resource_usage_payload(used, total)
-
-
-def _gpu_memory_usage_from_torch() -> dict[str, Any]:
-    try:
-        import torch  # type: ignore[import-not-found]
-    except ImportError:
-        return _resource_usage_payload(None, None, available=False)
-    cuda = getattr(torch, "cuda", None)
-    if cuda is None or not hasattr(cuda, "is_available") or not hasattr(cuda, "mem_get_info"):
-        return _resource_usage_payload(None, None, available=False)
-    try:
-        if not cuda.is_available():
-            return _resource_usage_payload(None, None, available=False)
-        count = int(cuda.device_count()) if hasattr(cuda, "device_count") else 1
-        used = 0
-        total = 0
-        for index in range(max(1, count)):
-            free_bytes, total_bytes = cuda.mem_get_info(index)
-            total_bytes = int(total_bytes)
-            free_bytes = int(free_bytes)
-            used += max(0, total_bytes - free_bytes)
-            total += total_bytes
     except Exception:
         return _resource_usage_payload(None, None, available=False)
     if total <= 0:
@@ -2475,7 +2447,7 @@ def _lease_gpu_device(
     with _GPU_DEVICE_LEASE_LOCK:
         excluded = set(_GPU_DEVICE_LEASES)
         excluded.update(excluded_indices)
-        resolved = resolve_device(requested, excluded_indices=excluded)
+        resolved = resolve_device_isolated(requested, excluded_indices=excluded)
         if resolved.name != "cuda" or resolved.index is None:
             return None, None
         _GPU_DEVICE_LEASES[resolved.index] = _GPU_DEVICE_LEASES.get(resolved.index, 0) + 1
