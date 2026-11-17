@@ -8,7 +8,7 @@ from pathlib import Path
 from .ingest import TASK_METADATA_NAME
 from .locking import TASK_LOCK_NAME
 
-TASK_RECORD_NAMES = frozenset({TASK_METADATA_NAME, TASK_LOCK_NAME})
+TASK_RECORD_NAMES = frozenset({TASK_METADATA_NAME, TASK_LOCK_NAME, "traffic.events.jsonl", "traffic.json", "traffic.txt"})
 
 
 @dataclass(frozen=True)

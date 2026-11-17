@@ -5,7 +5,7 @@
 command.md
 compose.gpu-devices.local.yml
 Dockerfile
-!codex-container/Dockerfile
+codex-container/
 
 # Runtime data
 data/

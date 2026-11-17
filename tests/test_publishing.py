@@ -64,6 +64,7 @@ def test_prepare_publish_package_writes_manifest_cover_and_markdown(tmp_path: Pa
     assert output == tmp_path.resolve() / "publish.json"
     assert data["status"] == "ready"
     assert data["video_path"] == "video.mp4"
+    assert not (tmp_path / "traffic.json").exists()
     assert data["cover_path"] == "cover.jpg"
     assert data["title"] == "译后标题 - 作者A"
     assert "原标题：Original Title" in data["description"]
@@ -87,6 +88,7 @@ def test_publish_to_bilibili_dry_run_writes_result_without_importing_uploader(tm
     assert data["status"] == "dry_run"
     assert data["platform"] == "bilibili"
     assert data["video_path"] == "video.mp4"
+    assert not (tmp_path / "traffic.json").exists()
 
 
 def test_publish_to_bilibili_requires_explicit_confirmation(tmp_path: Path) -> None:
@@ -126,6 +128,12 @@ def test_publish_to_bilibili_writes_real_upload_result(tmp_path: Path, monkeypat
     assert captured["task_dir"] == tmp_path.resolve()
     assert captured["package"]["title"] == "译后标题 - 作者A"
     assert captured["config"].sessdata == "sess"
+    assert (tmp_path / "traffic.json").exists()
+    assert (tmp_path / "traffic.txt").exists()
+    # Reopening an already published task regenerates the report without upload.
+    (tmp_path / "traffic.json").unlink()
+    publish_to_bilibili(tmp_path, captured["config"])
+    assert (tmp_path / "traffic.json").exists()
 
 
 def test_bilibili_headers_disable_brotli_without_dropping_other_headers() -> None:
@@ -296,7 +304,7 @@ def test_upload_bilibili_uses_web_upload_api(tmp_path: Path, monkeypatch) -> Non
     captured: dict[str, object] = {}
 
     class FakeWebUploader:
-        def __init__(self, config: BilibiliPublishConfig) -> None:
+        def __init__(self, config: BilibiliPublishConfig, **kwargs: object) -> None:
             captured["config"] = config
 
         async def __aenter__(self) -> "FakeWebUploader":
@@ -379,7 +387,7 @@ def test_upload_bilibili_switches_from_direct_to_proxy(tmp_path: Path, monkeypat
     publishing.network_router.clear()
 
     class FakeWebUploader:
-        def __init__(self, config: BilibiliPublishConfig) -> None:
+        def __init__(self, config: BilibiliPublishConfig, **kwargs: object) -> None:
             self.config = config
             attempts.append(config.proxy)
 

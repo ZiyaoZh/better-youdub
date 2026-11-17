@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import PipelineStep, StepStatus, Task, TaskType
+from .traffic import inherit_download_events
 
 DOWNLOAD_INFO_NAME = "download.info.json"
 TASK_METADATA_NAME = "task.json"
@@ -82,6 +83,7 @@ def create_task_from_download_artifacts(
     task_folder.mkdir(parents=True, exist_ok=True)
 
     _copy_video_if_needed(source, task_folder / "download.mp4")
+    inherit_download_events(source.parent, task_folder)
     _copy_file_if_different(info_path, task_folder / DOWNLOAD_INFO_NAME)
     if cover_path is not None:
         _copy_file_if_different(cover_path, task_folder / f"download{cover_path.suffix.lower()}")

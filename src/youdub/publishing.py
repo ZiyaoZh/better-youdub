@@ -18,6 +18,7 @@ from urllib.parse import urlsplit, urlunsplit
 from .cancellation import CancellationContext, TaskCancelled
 from .media import CommandError, require_binary
 from .network import BILIBILI_SERVICE, network_router
+from .traffic import record_payload, write_traffic_report
 
 FINAL_VIDEO = "video.mp4"
 SUMMARY = "summary.json"
@@ -215,13 +216,16 @@ def publish_to_bilibili(
     if result_path.exists() and not config.force:
         existing = _read_json_object(result_path)
         if existing.get("bvid") or existing.get("aid"):
+            write_traffic_report(task_dir)
             return result_path
 
     if cancellation is None:
         result = asyncio.run(_upload_bilibili(task_dir, package, config))
     else:
         result = asyncio.run(_upload_bilibili(task_dir, package, config, cancellation=cancellation))
-    return _write_json(result_path, result)
+    _write_json(result_path, result)
+    write_traffic_report(task_dir)
+    return result_path
 
 
 async def _upload_bilibili(
@@ -382,6 +386,8 @@ class _BilibiliWebUploader:
         url = str(url or "").strip()
         if not url:
             raise RuntimeError("Bilibili cover upload returned empty url")
+        record_payload(image_path.parent, "bilibili-cover", "upload",
+                       "proxy" if _bilibili_proxy(self.config) else "direct", len(encoded))
         return _normalize_bilibili_url(url)
 
     async def upload_video_file(self, video_path: Path) -> tuple[_BilibiliUploadedVideo, dict[str, Any]]:
@@ -433,6 +439,8 @@ class _BilibiliWebUploader:
                             raise RuntimeError(
                                 f"Bilibili chunk upload failed (status={response.status} body={text[:200]})"
                             )
+                        record_payload(video_path.parent, "bilibili-video", "upload",
+                                       "proxy" if _bilibili_proxy(self.config) else "direct", len(chunk))
                         etag = (
                             response.headers.get("ETag")
                             or response.headers.get("Etag")

@@ -21,6 +21,7 @@ from .ingest import (
 )
 from .locking import TaskLock
 from .network import VIDEO_SERVICE, NetworkRoute, network_router
+from .traffic import DownloadPayloadCounter, record_payload
 
 DOWNLOAD_VIDEO_NAME = "download.mp4"
 THUMBNAIL_EXTENSIONS = (".webp", ".jpg", ".jpeg", ".png")
@@ -247,6 +248,7 @@ def _download_media(
     for format_selector in format_candidates(config.max_height):
         _checkpoint(cancellation, "download:format-candidate")
         staging_dir = _create_staging_dir(task_dir)
+        traffic = DownloadPayloadCounter()
         try:
             staged_media = staging_dir / DOWNLOAD_VIDEO_NAME
             options = {
@@ -256,6 +258,7 @@ def _download_media(
                 "outtmpl": str(staging_dir / "download.%(ext)s"),
                 "writethumbnail": True,
                 "overwrites": True,
+                "progress_hooks": [traffic],
             }
             if format_selector is not None:
                 options["format"] = format_selector
@@ -285,6 +288,7 @@ def _download_media(
                 if not _is_format_unavailable(exc):
                     raise
         finally:
+            record_payload(task_dir, "video-source", "download", "proxy" if config.proxy else "direct", traffic.bytes)
             shutil.rmtree(staging_dir, ignore_errors=True)
     if last_error is not None:
         raise last_error
