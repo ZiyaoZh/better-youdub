@@ -454,7 +454,7 @@ Docker 启动时，如果配置了 `network.ssh_host` 或 `YOUDUB_NETWORK_SSH_HO
 
 ## 本地开发
 
-基础功能要求 Python 3.10 或更高版本。推荐使用虚拟环境：
+基础功能要求 Python 3.11 或更高版本。推荐使用虚拟环境：
 
 ```bash
 python3 -m venv .venv

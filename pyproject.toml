@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "better-youdub"
 version = "0.1.0"
 description = "Linux/container-native video localization pipeline"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "audiostretchy",
   "opencc-python-reimplemented>=0.1.7",
@@ -17,7 +17,7 @@ dependencies = [
   "PySocks>=1.7.1",
   "aiohttp==3.13.2",
   "aiohttp-socks==0.11.0",
-  "yt-dlp",
+  "yt-dlp[default]>=2026.11.23",
   "fastapi>=0.111.0",
   "uvicorn[standard]>=0.30.0",
   "python-multipart>=0.0.9",

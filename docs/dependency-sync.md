@@ -118,15 +118,14 @@ WMI==1.5.1; platform_system == "Windows"
 
 当前新增依赖说明：
 
-- `yt-dlp`：基础运行依赖，用于 `create-url-task` 下载用户显式提供的单个视频 URL。
-  GPU 依赖文件不再重复声明它。
+- `yt-dlp[default]`：基础运行依赖，用于 `create-url-task` 下载单个视频 URL，随包安装
+  兼容的 EJS solver。当前最低版本为 2026.11.23，需要 Python 3.11 或更新版本。
 - `aiohttp==3.13.2`：用于项目内置的 Bilibili Web 上传适配器。真实上传仍需
   环境变量提供账号凭证，并要求显式确认。
 - `aiohttp-socks==0.11.0`：用于 Bilibili Web 上传复用翻译阶段 SSH 动态转发
   `socks5h://...` 代理；不引入 Bilibili SDK。
-- `deno`：提供 yt-dlp EJS 可用的 JavaScript runtime。YouTube n challenge
-  solving 需要支持的 JS runtime；镜像固定安装 Deno 2.5.6，并通过
-  `remote_components=["ejs:github"]` 使用 yt-dlp EJS solver 分发。
+- `deno`：为 yt-dlp 的本地 EJS solver 提供 JavaScript runtime，用于处理 YouTube
+  的 n challenge。镜像固定安装 Deno 2.5.6。
 - `libass9`：提供 FFmpeg `subtitles` / `ass` filter 运行时依赖；GPU 镜像会将
   `/opt/conda/bin/ffmpeg` 和 `/opt/conda/bin/ffprobe` 指向 apt 安装的系统版本，
   避免 PyTorch 基础镜像中的 conda FFmpeg 缺少 libass 字幕 filter。

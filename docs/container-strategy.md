@@ -37,7 +37,7 @@
 
 特点：
 
-- 基于 `python:3.10-slim` 或 `ubuntu:22.04`
+- 基于 `python:3.11-slim`
 - 安装 FFmpeg 和必要系统库
 - 不安装 CUDA wheel，或安装 CPU 版 torch
 - 适合快速构建和验证

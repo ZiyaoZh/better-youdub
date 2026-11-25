@@ -135,8 +135,6 @@ def ytdlp_base_options(config: DownloadConfig) -> dict[str, Any]:
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
-        "remote_components": ["ejs:github"],
-        "extractor_args": {"youtube": {"player_js_variant": ["main"]}},
         "http_headers": {"User-Agent": DEFAULT_USER_AGENT},
         # Retry interrupted transfers inside yt-dlp so its partial file can be
         # resumed before the route wrapper starts a fresh download attempt.

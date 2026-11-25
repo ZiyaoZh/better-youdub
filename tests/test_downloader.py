@@ -121,8 +121,8 @@ def test_ytdlp_base_options_uses_nonempty_cookies_and_proxy(tmp_path: Path) -> N
 
     assert options["cookiefile"] == str(cookies.resolve())
     assert options["proxy"] == "http://127.0.0.1:7890"
-    assert options["remote_components"] == ["ejs:github"]
-    assert options["extractor_args"] == {"youtube": {"player_js_variant": ["main"]}}
+    assert "remote_components" not in options
+    assert "extractor_args" not in options
 
 
 def test_ytdlp_base_options_ignores_empty_cookies(tmp_path: Path) -> None:
