@@ -178,6 +178,7 @@ MAX_TASK_LIST_LIMIT = 100
 TASK_TERMINATED_MESSAGE = "任务已终止"
 SCHEDULED_PUBLISH_FAILED_MESSAGE = "定时发布调度失败"
 SCHEDULED_PUBLISH_RETRY_SECONDS = 30.0
+AUTOMATIC_PUBLISH_COOLDOWN_SECONDS = 30 * 60
 DEFAULT_GPU_MAX_ATTEMPTS = 2
 DEFAULT_GPU_RETRY_DELAY_SECONDS = 1.0
 _CUDA_RETRY_MARKERS = (
@@ -1461,7 +1462,7 @@ def _task_publish_scheduled(task: Task) -> bool:
     if _unfinished_future_for_task(task.id) is not None:
         return False
     try:
-        run_at = _scheduled_publish_datetime(task)
+        run_at = _publish_ready_datetime(task)
     except ValueError:
         return False
     return run_at is not None
@@ -1497,7 +1498,7 @@ def _schedule_run_all_for_task(task: Task, label: str) -> None:
         if _task_has_active_work(task):
             raise HTTPException(status_code=409, detail="Task is already running")
         first_step = _first_run_all_step(task)
-        if first_step == PipelineStep.PUBLISH_BILIBILI and _defer_publish_if_needed(task):
+        if first_step == PipelineStep.PUBLISH_BILIBILI and _defer_publish_if_needed(task, automatic=True):
             return
         _validate_scheduled_publish_task(task)
         _mark_task_scheduled(task, first_step)
@@ -1523,10 +1524,11 @@ def _schedule_download_for_task(task: Task, label: str, *, force: bool = False) 
         )
 
 
-def _submit_step_job(task_id: str, step: PipelineStep, label: str) -> Future[Any]:
+def _submit_step_job(task_id: str, step: PipelineStep, label: str, *, automatic_publish: bool = False) -> Future[Any]:
     runtime = _create_task_runtime(task_id)
     task = _store().get(task_id)
-    future = _executor_for_step(step, task).submit(_run_step_job, task_id, step, label)
+    kwargs = {"automatic_publish": True} if automatic_publish else {}
+    future = _executor_for_step(step, task).submit(_run_step_job, task_id, step, label, **kwargs)
     return _track_running(task_id, future, runtime=runtime)
 
 
@@ -1820,14 +1822,55 @@ def _validate_scheduled_publish_task(task: Task) -> None:
         ) from exc
 
 
-def _defer_publish_if_needed(task: Task) -> bool:
-    _validate_scheduled_publish_task(task)
+def _automatic_publish_cooldown_path() -> Path:
+    return _store().path.with_name("automatic-publish-cooldowns.json")
+
+
+def _automatic_publish_cooldowns() -> dict[str, Any]:
+    path = _automatic_publish_cooldown_path()
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _uses_automatic_publish_cooldown(task: Task) -> bool:
+    options = runtime_options_from_task_config(_config(), task.config)
+    return options.bilibili.confirm and not options.bilibili.dry_run
+
+
+def _publish_ready_datetime(task: Task, *, automatic: bool | None = None) -> datetime | None:
     run_at = _scheduled_publish_datetime(task)
-    if run_at is None or run_at.timestamp() <= time.time():
+    if (task.automatic_publish if automatic is None else automatic) and _uses_automatic_publish_cooldown(task):
+        previous = _automatic_publish_cooldowns().get(task.identity or "legacy")
+        if previous and previous["task_id"] != task.id:
+            cooldown_end = datetime.fromtimestamp(
+                previous["started_at"] + AUTOMATIC_PUBLISH_COOLDOWN_SECONDS, timezone.utc,
+            )
+            run_at = max(run_at, cooldown_end) if run_at else cooldown_end
+    return run_at
+
+
+def _defer_publish_if_needed(task: Task, *, automatic: bool = False, reserve: bool = False) -> bool:
+    # Check and reserve together so concurrent tasks from one device cannot
+    # both start an upload before either one records its cooldown.
+    with _LOCK:
+        _validate_scheduled_publish_task(task)
+        run_at = _publish_ready_datetime(task, automatic=automatic)
+        if run_at is not None and run_at.timestamp() > time.time():
+            task.automatic_publish = automatic
+            _mark_task_scheduled(task, PipelineStep.PUBLISH_BILIBILI)
+            _PUBLISH_SCHEDULER.schedule(task.id, run_at)
+            return True
+        if automatic and reserve and _uses_automatic_publish_cooldown(task):
+            cooldowns = _automatic_publish_cooldowns()
+            cooldowns[task.identity or "legacy"] = {"task_id": task.id, "started_at": time.time()}
+            path = _automatic_publish_cooldown_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as file:
+                json.dump(cooldowns, file)
+                temporary_path = Path(file.name)
+            temporary_path.replace(path)
         return False
-    _mark_task_scheduled(task, PipelineStep.PUBLISH_BILIBILI)
-    _PUBLISH_SCHEDULER.schedule(task.id, run_at)
-    return True
 
 
 def _restore_scheduled_publishes() -> None:
@@ -1835,7 +1878,7 @@ def _restore_scheduled_publishes() -> None:
         if task.steps.get(PipelineStep.PUBLISH_BILIBILI.value) != StepStatus.QUEUED:
             continue
         try:
-            run_at = _scheduled_publish_datetime(task)
+            run_at = _publish_ready_datetime(task)
         except ValueError:
             _mark_scheduled_publish_failed(task.id)
             continue
@@ -1970,7 +2013,7 @@ def _dispatch_scheduled_publish(task_id: str) -> None:
         if _termination_requested(task_id):
             _store().update(_mark_task_terminated(task, PipelineStep.PUBLISH_BILIBILI))
             return
-        run_at = _scheduled_publish_datetime(task)
+        run_at = _publish_ready_datetime(task)
         if run_at is None:
             _mark_scheduled_publish_failed(task.id)
             return
@@ -1983,7 +2026,7 @@ def _dispatch_scheduled_publish(task_id: str) -> None:
                 time.time() + SCHEDULED_PUBLISH_RETRY_SECONDS,
             )
             return
-        _submit_step_job(task.id, PipelineStep.PUBLISH_BILIBILI, "web-scheduled-publish")
+        _submit_step_job(task.id, PipelineStep.PUBLISH_BILIBILI, "web-scheduled-publish", automatic_publish=task.automatic_publish)
 
 
 def _mark_scheduled_publish_failed(task_id: str) -> None:
@@ -2148,6 +2191,7 @@ def _run_step_job(
     task_lock: TaskLock | str | None = None,
     *,
     release_lock: bool = True,
+    automatic_publish: bool = False,
 ) -> None:
     store = _store()
     task = store.get(task_id)
@@ -2162,6 +2206,9 @@ def _run_step_job(
             task_lock = TaskLock(task.folder, task_lock).acquire(blocking=False)
             acquired_here = True
         _raise_if_termination_requested(task_id)
+        if step == PipelineStep.PUBLISH_BILIBILI and automatic_publish:
+            if _defer_publish_if_needed(task, automatic=True, reserve=True):
+                return
         if step != PipelineStep.REDUB_TTS or _redub_plan_has_segments(task):
             _clear_step_outputs(task, step, preserve_subtitle_cache=step == PipelineStep.SUBTITLE)
         task.status = TaskStatus.RUNNING
@@ -2543,9 +2590,11 @@ def _run_all_job(task_id: str, task_lock: TaskLock | None = None) -> None:
             _raise_if_termination_requested(task_id)
             if _step_completed(task, step):
                 continue
-            if step == PipelineStep.PUBLISH_BILIBILI and _defer_publish_if_needed(task):
+            if step == PipelineStep.PUBLISH_BILIBILI and _defer_publish_if_needed(task, automatic=True):
                 return
             _run_step_for_run_all(task_id, step, task_lock)
+            if step == PipelineStep.PUBLISH_BILIBILI and _store().get(task_id).steps.get(step.value) == StepStatus.QUEUED:
+                return
             if step == PipelineStep.PUBLISH_BILIBILI and _publish_result_confirmed(_runtime_for_task(task_id)):
                 return
             _raise_if_termination_requested(task_id)
@@ -2580,7 +2629,8 @@ def _run_step_for_run_all(task_id: str, step: PipelineStep, task_lock: TaskLock 
     if _step_uses_gpu(step, _store().get(task_id)):
         _run_step_for_run_all_on_executor(_GPU_EXECUTOR, task_id, step, task_lock)
         return
-    _run_step_job(task_id, step, task_lock=task_lock, release_lock=False)
+    kwargs = {"automatic_publish": True} if step == PipelineStep.PUBLISH_BILIBILI else {}
+    _run_step_job(task_id, step, task_lock=task_lock, release_lock=False, **kwargs)
 
 
 def _run_step_for_run_all_on_executor(

@@ -2844,3 +2844,159 @@ def test_font_changes_invalidate_only_sub_rendering_and_keep_reusable_cache(monk
     for name in (*cache_names, "translation.json", "transcript.corrected.json"):
         assert (task.folder / name).read_text() == "preserved input or reusable cache"
     assert updated.steps[PipelineStep.TRANSLATE.value] == StepStatus.SUCCESS
+
+
+def _cooldown_task(client, tmp_path, name, identity=DEVICE_A, *, dry_run=False):
+    source = tmp_path / f"{name}.mp4"
+    source.write_bytes(b"video")
+    payload = client.post(
+        "/api/tasks/local", headers={"X-YouDub-Identity": identity} if identity else {},
+        json={"source": str(source), "title": name},
+    ).json()
+    task = web_module._store().get(payload["id"])
+    task.config = {
+        "workflow": {"include_bilibili_upload": True},
+        "bilibili": {"confirm": True, "dry_run": dry_run},
+    }
+    web_module._store().update(task)
+    return task
+
+
+def _fake_cooldown_pipeline(monkeypatch, uploaded):
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            pass
+
+        def run_step(self, task, step, task_lock=None):
+            assert step == PipelineStep.PUBLISH_BILIBILI
+            uploaded.append(task.id)
+            task.mark_step(step, StepStatus.SUCCESS)
+            task.status = TaskStatus.SUCCESS
+            return task
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FakeRunner)
+    monkeypatch.setattr(web_module, "_run_all_steps", lambda task_id: [PipelineStep.PUBLISH_BILIBILI])
+    # Record scheduling without starting a background clock thread.
+    scheduled = {}
+    monkeypatch.setattr(web_module._PUBLISH_SCHEDULER, "schedule", lambda task_id, run_at: scheduled.update({task_id: run_at}))
+    return scheduled
+
+
+def test_automatic_upload_cooldown_by_device_and_manual_bypass(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    uploaded = []
+    scheduled = _fake_cooldown_pipeline(monkeypatch, uploaded)
+    first = _cooldown_task(client, tmp_path, "first")
+    second = _cooldown_task(client, tmp_path, "second")
+    other = _cooldown_task(client, tmp_path, "other", DEVICE_B)
+    manual = _cooldown_task(client, tmp_path, "manual")
+
+    web_module._run_all_job(first.id)
+    state_before = web_module._automatic_publish_cooldowns()
+    web_module._run_all_job(second.id)
+    web_module._run_all_job(other.id)
+    assert uploaded == [first.id, other.id]
+    assert scheduled[second.id].timestamp() == pytest.approx(state_before[DEVICE_A]["started_at"] + 1800)
+    waiting = client.get(f"/api/tasks/{second.id}").json()
+    assert waiting["queued"] is True
+    assert waiting["running"] is False
+    assert waiting["display_status"] == "scheduled-publish"
+    probe = TaskLock(second.folder, "cooldown-probe").acquire(blocking=False)
+    probe.release()
+
+    # Exercise the public single-step entry point during another task's cooldown.
+    response = client.post(f"/api/tasks/{manual.id}/run", json={"step": "publish-bilibili"})
+    assert response.status_code == 200
+    _wait_for_task_idle(client, manual.id)
+    assert manual.id in uploaded
+    assert web_module._automatic_publish_cooldowns()[DEVICE_A] == state_before[DEVICE_A]
+    assert web_module._store().get(second.id).automatic_publish is True
+
+
+def test_automatic_upload_cooldown_restores_and_rechecks_each_waiter(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    uploaded = []
+    scheduled = _fake_cooldown_pipeline(monkeypatch, uploaded)
+    tasks = [_cooldown_task(client, tmp_path, f"queued-{i}") for i in range(3)]
+    for task in tasks:
+        web_module._run_all_job(task.id)
+    assert uploaded == [tasks[0].id]
+    assert set(scheduled) == {task.id for task in tasks[1:]}
+
+    # Rebuild the scheduler from disk without relying on in-memory cooldown data.
+    scheduled.clear()
+    web_module._restore_scheduled_publishes()
+    assert set(scheduled) == {task.id for task in tasks[1:]}
+    path = web_module._automatic_publish_cooldown_path()
+    state = json.loads(path.read_text())
+    state[DEVICE_A]["started_at"] -= 1800
+    path.write_text(json.dumps(state))
+    web_module._dispatch_scheduled_publish(tasks[1].id)
+    _wait_for_task_idle(client, tasks[1].id)
+    web_module._dispatch_scheduled_publish(tasks[2].id)
+    assert uploaded == [tasks[0].id, tasks[1].id]
+    assert scheduled[tasks[2].id].timestamp() > time.time()
+
+
+def test_automatic_upload_cooldown_reservation_is_atomic(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    uploaded = []
+    scheduled = _fake_cooldown_pipeline(monkeypatch, uploaded)
+    tasks = [_cooldown_task(client, tmp_path, f"parallel-{i}") for i in range(2)]
+    barrier = threading.Barrier(2)
+
+    def run(task):
+        barrier.wait(timeout=2)
+        web_module._run_step_job(task.id, PipelineStep.PUBLISH_BILIBILI, automatic_publish=True)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(run, tasks))
+    assert len(uploaded) == 1
+    assert len(scheduled) == 1
+    assert set(uploaded) | set(scheduled) == {task.id for task in tasks}
+
+
+def test_automatic_upload_cooldown_dry_run_retry_and_scheduled_time(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    uploaded = []
+    scheduled = _fake_cooldown_pipeline(monkeypatch, uploaded)
+    first = _cooldown_task(client, tmp_path, "real")
+    dry_run = _cooldown_task(client, tmp_path, "dry", dry_run=True)
+    later = _cooldown_task(client, tmp_path, "later")
+    web_module._run_all_job(dry_run.id)
+    assert not web_module._automatic_publish_cooldown_path().exists()
+    web_module._run_all_job(first.id)
+    state = web_module._automatic_publish_cooldowns()
+    web_module._run_all_job(dry_run.id)
+    assert web_module._automatic_publish_cooldowns() == state
+    # The same task may retry immediately, while other tasks must wait.
+    web_module._run_all_job(first.id)
+    assert uploaded.count(first.id) == 2
+    later.config["publish"] = {"scheduled_at": (datetime.now(web_module.BEIJING_TIMEZONE) + timedelta(hours=2)).isoformat()}
+    web_module._store().update(later)
+    web_module._run_all_job(later.id)
+    assert scheduled[later.id] == datetime.fromisoformat(later.config["publish"]["scheduled_at"])
+    assert later.id not in uploaded
+
+
+def test_failed_automatic_upload_keeps_device_cooldown(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    uploaded = []
+    scheduled = _fake_cooldown_pipeline(monkeypatch, uploaded)
+    first = _cooldown_task(client, tmp_path, "failed")
+    second = _cooldown_task(client, tmp_path, "after-failure")
+
+    class FailingRunner:
+        def __init__(self, **kwargs):
+            pass
+
+        def run_step(self, task, step, task_lock=None):
+            raise RuntimeError("upload failed")
+
+    monkeypatch.setattr(web_module, "PipelineRunner", FailingRunner)
+    with pytest.raises(RuntimeError, match="upload failed"):
+        web_module._run_all_job(first.id)
+    assert web_module._store().get(first.id).status == TaskStatus.FAILED
+    web_module._run_all_job(second.id)
+    assert second.id in scheduled
+    assert web_module._automatic_publish_cooldowns()[DEVICE_A]["task_id"] == first.id

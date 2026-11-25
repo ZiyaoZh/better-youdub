@@ -71,6 +71,7 @@ class Task:
     termination: dict[str, Any] = field(default_factory=dict)
     resources_cleaned_at: str | None = None
     resources_cleaned_bytes: int = 0
+    automatic_publish: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -91,6 +92,7 @@ class Task:
             "termination": self.termination,
             "resources_cleaned_at": self.resources_cleaned_at,
             "resources_cleaned_bytes": self.resources_cleaned_bytes,
+            "automatic_publish": self.automatic_publish,
         }
 
     @classmethod
@@ -116,6 +118,7 @@ class Task:
             termination=data.get("termination") if isinstance(data.get("termination"), dict) else {},
             resources_cleaned_at=data.get("resources_cleaned_at"),
             resources_cleaned_bytes=max(0, int(data.get("resources_cleaned_bytes") or 0)),
+            automatic_publish=data.get("automatic_publish") is True,
         )
 
     def mark_step(self, step: PipelineStep, status: StepStatus) -> None:

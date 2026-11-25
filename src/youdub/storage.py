@@ -115,6 +115,7 @@ class TaskStore:
             termination=dict(existing.termination),
             resources_cleaned_at=existing.resources_cleaned_at,
             resources_cleaned_bytes=existing.resources_cleaned_bytes,
+            automatic_publish=existing.automatic_publish,
         )
 
     def _write_task_metadata(self, task: Task) -> None:
